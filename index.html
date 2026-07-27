@@ -7,7 +7,7 @@
   <meta name="description" content="Ledgerly is a multi-account personal finance tracker with budgets, reports, and optional Supabase cloud sync." />
   <title>Ledgerly — Personal Finance</title>
   <link rel="manifest" href="manifest.webmanifest" />
-  <link rel="stylesheet" href="styles.css?v=4" />
+  <link rel="stylesheet" href="styles.css?v=5" />
 </head>
 <body>
   <section class="auth-screen" id="authScreen">
@@ -15,7 +15,7 @@
       <div class="auth-brand">
         <div class="brand-mark">L</div>
         <div>
-          <strong>Arnold</strong>
+          <strong>Ledgerly</strong>
           <span>Personal finance, clearly organized</span>
         </div>
       </div>
@@ -255,6 +255,27 @@
           <label class="field transfer-field" hidden><span>To account</span><select id="transferToAccount"></select></label>
           <label class="field expense-income-field"><span id="categoryLabel">Expense category</span><select id="entryCategory"></select></label>
           <label class="field full-width"><span>Description</span><input id="entryDescription" type="text" maxlength="120" placeholder="e.g. Weekly groceries" /></label>
+          <label class="field full-width"><span>Remarks / comments</span><textarea id="entryRemarks" maxlength="2000" rows="3" placeholder="Optional notes, reference number, who joined, or anything else to remember"></textarea></label>
+          <div class="field full-width receipt-field">
+            <span>Receipt picture <span class="optional-label">Optional</span></span>
+            <label class="receipt-upload" for="entryReceipt">
+              <span class="receipt-upload-icon" aria-hidden="true">▧</span>
+              <span><strong>Choose a receipt image</strong><small>JPEG, PNG, WebP, HEIC or HEIF · maximum 8 MB</small></span>
+              <input id="entryReceipt" type="file" accept="image/jpeg,image/png,image/webp,image/heic,image/heif,.jpg,.jpeg,.png,.webp,.heic,.heif" />
+            </label>
+            <p class="field-help receipt-help" id="receiptFileHelp">Receipts are stored privately in your Supabase project and are available on your signed-in devices.</p>
+            <div class="receipt-preview" id="receiptPreview" hidden>
+              <div class="receipt-thumbnail">
+                <img id="receiptPreviewImage" alt="Receipt preview" />
+                <span id="receiptPreviewFallback" aria-hidden="true">▧</span>
+              </div>
+              <div class="receipt-preview-copy"><strong id="receiptPreviewName"></strong><span id="receiptPreviewInfo"></span></div>
+              <div class="receipt-preview-actions">
+                <button class="text-button" id="viewReceiptButton" type="button">View</button>
+                <button class="text-button danger-text" id="removeReceiptButton" type="button">Remove</button>
+              </div>
+            </div>
+          </div>
         </div>
         <p class="form-error" id="transactionFormError" role="alert"></p>
         <div class="modal-actions"><button class="secondary-button" type="button" data-close-modal="transactionModal">Cancel</button><button class="primary-button" type="submit">Save entry</button></div>
@@ -332,8 +353,8 @@
       </div>
 
       <div class="import-rules-grid">
-        <div><strong>Expense / Income</strong><span>Use Date, Type, Amount, Description, Category, and Account.</span></div>
-        <div><strong>Transfer</strong><span>Use Date, Type, Amount, Description, From Account, and To Account.</span></div>
+        <div><strong>Expense / Income</strong><span>Use Date, Type, Amount, Description, Remarks, Category, and Account.</span></div>
+        <div><strong>Transfer</strong><span>Use Date, Type, Amount, Description, Remarks, From Account, and To Account.</span></div>
       </div>
 
       <div class="form-grid import-options">
@@ -365,6 +386,6 @@
   </div>
 
   <div class="toast" id="toast" role="status" aria-live="polite"></div>
-  <script type="module" src="app.js?v=4"></script>
+  <script type="module" src="app.js?v=5"></script>
 </body>
 </html>

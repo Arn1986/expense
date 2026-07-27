@@ -3,6 +3,9 @@ import { SUPABASE_URL, SUPABASE_PUBLISHABLE_KEY } from "./config.js";
 const STORAGE_KEY = "ledgerly-data-v2-local";
 const LEGACY_STORAGE_KEY = "ledgerly-data-v1";
 const CURRENCY = "AED";
+const RECEIPT_BUCKET = "receipts";
+const MAX_RECEIPT_BYTES = 8 * 1024 * 1024;
+const ALLOWED_RECEIPT_TYPES = new Set(["image/jpeg", "image/png", "image/webp", "image/heic", "image/heif"]);
 const amountFormatter = new Intl.NumberFormat("en-AE", {
   minimumFractionDigits: 2,
   maximumFractionDigits: 2,
@@ -46,6 +49,9 @@ let transactionImportSourceRows = [];
 let transactionImportValidation = [];
 let transactionImportFileName = "";
 let spreadsheetModulePromise = null;
+let selectedReceiptFile = null;
+let removeExistingReceipt = false;
+let receiptPreviewObjectUrl = "";
 
 const el = Object.fromEntries([...document.querySelectorAll("[id]")].map((node) => [node.id, node]));
 
@@ -145,6 +151,9 @@ function bindEvents() {
 
   el.authForm.addEventListener("input", () => showAuthError(""));
   el.transactionForm.addEventListener("submit", handleTransactionSubmit);
+  el.entryReceipt.addEventListener("change", handleReceiptSelection);
+  el.viewReceiptButton.addEventListener("click", viewReceiptFromForm);
+  el.removeReceiptButton.addEventListener("click", removeReceiptFromForm);
   el.accountForm.addEventListener("submit", handleAccountSubmit);
   el.budgetForm.addEventListener("submit", handleBudgetSubmit);
   el.categoryForm.addEventListener("submit", handleCategorySubmit);
@@ -171,6 +180,7 @@ function bindEvents() {
       "edit-account": () => openAccountModal(id),
       "delete-account": () => deleteAccount(id),
       "edit-transaction": () => openTransactionModal(id),
+      "open-receipt": () => openTransactionReceipt(id),
       "delete-transaction": () => deleteTransaction(id),
       "edit-budget": () => openBudgetModal(id),
       "delete-budget": () => deleteBudget(id),
@@ -523,7 +533,7 @@ function renderAllTransactions() {
   const items = sortedTransactions().filter((transaction) => {
     const category = categoryById(transaction.category_id)?.name || "";
     const accountText = transactionAccountText(transaction);
-    const matchesSearch = !search || [transaction.description, category, accountText].some((value) => String(value || "").toLowerCase().includes(search));
+    const matchesSearch = !search || [transaction.description, transaction.remarks, category, accountText].some((value) => String(value || "").toLowerCase().includes(search));
     const matchesType = type === "all" || transaction.type === type;
     const matchesAccount = account === "all" || [transaction.account_id, transaction.from_account_id, transaction.to_account_id].includes(account);
     const matchesMonth = !month || transaction.entry_date?.startsWith(month);
@@ -538,15 +548,17 @@ function transactionListHTML(items, showActions) {
     const title = transaction.description || (transaction.type === "transfer" ? "Account transfer" : category?.name || capitalize(transaction.type));
     const subtitle = transaction.type === "transfer" ? transactionAccountText(transaction) : `${category?.name || "Uncategorized"} · ${transactionAccountText(transaction)}`;
     const sign = transaction.type === "expense" ? "−" : transaction.type === "income" ? "+" : "";
+    const remarks = String(transaction.remarks || "").trim();
+    const receiptAction = transaction.receipt_path ? `<button class="row-action receipt-action" data-action="open-receipt" data-id="${transaction.id}" aria-label="Open receipt" title="Open receipt">▧</button>` : "";
     return `<div class="transaction-row">
       <div class="transaction-main">
         <span class="transaction-icon ${transaction.type}">${transaction.type === "expense" ? "↓" : transaction.type === "income" ? "↑" : "⇄"}</span>
-        <div style="min-width:0"><div class="transaction-title">${escapeHTML(title)}</div><div class="transaction-subtitle">${escapeHTML(subtitle)}</div></div>
+        <div style="min-width:0"><div class="transaction-title">${escapeHTML(title)}</div><div class="transaction-subtitle">${escapeHTML(subtitle)}${transaction.receipt_path ? ' · <span class="receipt-indicator">Receipt</span>' : ""}</div>${remarks ? `<div class="transaction-remarks">${escapeHTML(remarks)}</div>` : ""}</div>
       </div>
       <div class="transaction-meta account-column">${escapeHTML(transactionAccountText(transaction))}</div>
       <div class="transaction-meta">${formatDate(transaction.entry_date)}</div>
       <div class="amount ${transaction.type}">${sign}${formatMoneyHTML(number(transaction.amount))}</div>
-      <div class="row-actions">${showActions ? `<button class="row-action" data-action="edit-transaction" data-id="${transaction.id}" aria-label="Edit entry">✎</button><button class="row-action danger" data-action="delete-transaction" data-id="${transaction.id}" aria-label="Delete entry">×</button>` : ""}</div>
+      <div class="row-actions">${receiptAction}${showActions ? `<button class="row-action" data-action="edit-transaction" data-id="${transaction.id}" aria-label="Edit entry">✎</button><button class="row-action danger" data-action="delete-transaction" data-id="${transaction.id}" aria-label="Delete entry">×</button>` : ""}</div>
     </div>`;
   }).join("")}</div>`;
 }
@@ -691,10 +703,14 @@ function setEntryType(type) {
 
 function openTransactionModal(id = null) {
   if (!state.accounts.length) return showToast("Add an account before recording an entry.", true);
+  clearReceiptFormState();
   el.transactionForm.reset();
   el.transactionId.value = "";
   el.entryDate.value = todayISO();
   el.transactionFormError.textContent = "";
+  el.receiptFileHelp.textContent = mode === "cloud"
+    ? "Receipts are stored privately in your Supabase project and are available on your signed-in devices."
+    : "Receipt uploads require Supabase cloud sync. Remarks are still saved in local preview.";
   let type = "expense";
   if (id) {
     const transaction = state.transactions.find((item) => item.id === id);
@@ -704,6 +720,7 @@ function openTransactionModal(id = null) {
     el.entryAmount.value = number(transaction.amount);
     el.entryDate.value = transaction.entry_date;
     el.entryDescription.value = transaction.description || "";
+    el.entryRemarks.value = transaction.remarks || "";
     setEntryType(type);
     if (type === "transfer") {
       el.transferFromAccount.value = transaction.from_account_id || "";
@@ -713,6 +730,7 @@ function openTransactionModal(id = null) {
       el.entryCategory.value = transaction.category_id || "";
     }
     el.transactionModalTitle.textContent = "Edit entry";
+    if (transaction.receipt_path) showExistingReceiptPreview(transaction);
   } else {
     setEntryType(type);
     el.transactionModalTitle.textContent = "Add entry";
@@ -727,12 +745,17 @@ async function handleTransactionSubmit(event) {
   const id = el.transactionId.value;
   const type = el.entryType.value;
   const amount = number(el.entryAmount.value);
+  const remarks = el.entryRemarks.value.trim();
+  const existing = id ? state.transactions.find((item) => item.id === id) : null;
   const base = {
-    type, amount, entry_date: el.entryDate.value, description: el.entryDescription.value.trim(),
+    type, amount, entry_date: el.entryDate.value, description: el.entryDescription.value.trim(), remarks,
     account_id: null, category_id: null, from_account_id: null, to_account_id: null,
   };
   if (!(amount > 0)) return showFormError(el.transactionFormError, "Enter an amount greater than zero.");
   if (!base.entry_date) return showFormError(el.transactionFormError, "Choose a transaction date.");
+  if (base.description.length > 120) return showFormError(el.transactionFormError, "Description must be 120 characters or fewer.");
+  if (remarks.length > 2000) return showFormError(el.transactionFormError, "Remarks must be 2,000 characters or fewer.");
+  if (selectedReceiptFile && mode !== "cloud") return showFormError(el.transactionFormError, "Receipt uploads require Supabase cloud sync.");
   if (type === "transfer") {
     base.from_account_id = el.transferFromAccount.value;
     base.to_account_id = el.transferToAccount.value;
@@ -744,19 +767,240 @@ async function handleTransactionSubmit(event) {
     if (!base.account_id) return showFormError(el.transactionFormError, "Choose an account.");
     if (!base.category_id) return showFormError(el.transactionFormError, `Create or select an ${type} category.`);
   }
+
+  let newlyUploadedPath = "";
+  let newlyInsertedId = "";
   try {
     if (id) {
-      const updated = await updateRow("transactions", id, base);
+      let receiptChanges = {};
+      if (selectedReceiptFile) {
+        receiptChanges = await uploadReceipt(id, selectedReceiptFile);
+        newlyUploadedPath = receiptChanges.receipt_path;
+      } else if (removeExistingReceipt) {
+        receiptChanges = { receipt_path: null, receipt_name: null, receipt_mime_type: null, receipt_size: null };
+      }
+      const updated = await updateRow("transactions", id, { ...base, ...receiptChanges });
       state.transactions = state.transactions.map((item) => item.id === id ? { ...item, ...updated } : item);
-      showToast("Entry updated.");
+      if ((selectedReceiptFile || removeExistingReceipt) && existing?.receipt_path && existing.receipt_path !== updated.receipt_path) {
+        await removeReceiptFile(existing.receipt_path, false);
+      }
+      newlyUploadedPath = "";
+      showToast(selectedReceiptFile ? "Entry and receipt updated." : "Entry updated.");
     } else {
-      state.transactions.push(await insertRow("transactions", base));
-      showToast("Entry added.");
+      let inserted = await insertRow("transactions", base);
+      newlyInsertedId = inserted.id;
+      if (selectedReceiptFile) {
+        const receiptChanges = await uploadReceipt(inserted.id, selectedReceiptFile);
+        newlyUploadedPath = receiptChanges.receipt_path;
+        const updated = await updateRow("transactions", inserted.id, receiptChanges);
+        inserted = { ...inserted, ...updated };
+      }
+      state.transactions.push(inserted);
+      newlyInsertedId = "";
+      newlyUploadedPath = "";
+      showToast(selectedReceiptFile ? "Entry and receipt added." : "Entry added.");
     }
     persistLocal();
     closeModal(el.transactionModal);
+    clearReceiptFormState();
     render();
-  } catch (error) { showFormError(el.transactionFormError, friendlyError(error)); }
+  } catch (error) {
+    if (newlyUploadedPath) await removeReceiptFile(newlyUploadedPath, false);
+    if (newlyInsertedId) {
+      try { await deleteRow("transactions", newlyInsertedId); } catch (rollbackError) { console.warn("Could not roll back transaction", rollbackError); }
+    }
+    showFormError(el.transactionFormError, friendlyError(error));
+  }
+}
+
+function handleReceiptSelection(event) {
+  const file = event.target.files?.[0] || null;
+  if (!file) {
+    selectedReceiptFile = null;
+    const existing = state.transactions.find((item) => item.id === el.transactionId.value);
+    if (existing?.receipt_path && !removeExistingReceipt) showExistingReceiptPreview(existing);
+    else hideReceiptPreview();
+    return;
+  }
+  try {
+    validateReceiptFile(file);
+    if (mode !== "cloud") throw new Error("Receipt uploads require Supabase cloud sync.");
+    selectedReceiptFile = file;
+    removeExistingReceipt = false;
+    el.receiptFileHelp.textContent = "The selected receipt will be uploaded privately when you save this entry.";
+    showSelectedReceiptPreview(file);
+  } catch (error) {
+    event.target.value = "";
+    selectedReceiptFile = null;
+    showFormError(el.transactionFormError, friendlyError(error));
+  }
+}
+
+function validateReceiptFile(file) {
+  const type = receiptMimeType(file);
+  if (!file || !ALLOWED_RECEIPT_TYPES.has(type)) throw new Error("Choose a JPEG, PNG, WebP, HEIC, or HEIF image.");
+  if (file.size > MAX_RECEIPT_BYTES) throw new Error("Receipt image must be 8 MB or smaller.");
+}
+
+function receiptMimeType(file) {
+  const browserType = String(file?.type || "").toLowerCase();
+  if (ALLOWED_RECEIPT_TYPES.has(browserType)) return browserType;
+  const extension = String(file?.name || "").toLowerCase().split(".").pop();
+  return ({ jpg: "image/jpeg", jpeg: "image/jpeg", png: "image/png", webp: "image/webp", heic: "image/heic", heif: "image/heif" })[extension] || "";
+}
+
+function clearReceiptFormState() {
+  selectedReceiptFile = null;
+  removeExistingReceipt = false;
+  if (el.entryReceipt) el.entryReceipt.value = "";
+  hideReceiptPreview();
+}
+
+function revokeReceiptPreviewUrl() {
+  if (receiptPreviewObjectUrl) URL.revokeObjectURL(receiptPreviewObjectUrl);
+  receiptPreviewObjectUrl = "";
+}
+
+function hideReceiptPreview() {
+  revokeReceiptPreviewUrl();
+  if (!el.receiptPreview) return;
+  el.receiptPreview.hidden = true;
+  el.receiptPreviewImage.removeAttribute("src");
+  el.receiptPreviewImage.hidden = true;
+  el.receiptPreviewFallback.hidden = false;
+}
+
+function showSelectedReceiptPreview(file) {
+  revokeReceiptPreviewUrl();
+  receiptPreviewObjectUrl = URL.createObjectURL(file);
+  el.receiptPreview.hidden = false;
+  el.receiptPreviewName.textContent = file.name;
+  el.receiptPreviewInfo.textContent = `New receipt · ${formatFileSize(file.size)}`;
+  el.receiptPreviewImage.src = receiptPreviewObjectUrl;
+  el.receiptPreviewImage.hidden = false;
+  el.receiptPreviewFallback.hidden = true;
+  el.receiptPreviewImage.onerror = () => {
+    el.receiptPreviewImage.hidden = true;
+    el.receiptPreviewFallback.hidden = false;
+  };
+}
+
+async function showExistingReceiptPreview(transaction) {
+  revokeReceiptPreviewUrl();
+  el.receiptPreview.hidden = false;
+  el.receiptPreviewName.textContent = transaction.receipt_name || "Receipt image";
+  el.receiptPreviewInfo.textContent = `${formatFileSize(transaction.receipt_size)} · Stored privately`;
+  el.receiptPreviewImage.hidden = true;
+  el.receiptPreviewFallback.hidden = false;
+  if (mode !== "cloud") return;
+  try {
+    const url = await createReceiptSignedUrl(transaction.receipt_path, 300);
+    if (el.transactionId.value !== transaction.id || selectedReceiptFile || removeExistingReceipt) return;
+    el.receiptPreviewImage.src = url;
+    el.receiptPreviewImage.hidden = false;
+    el.receiptPreviewFallback.hidden = true;
+    el.receiptPreviewImage.onerror = () => {
+      el.receiptPreviewImage.hidden = true;
+      el.receiptPreviewFallback.hidden = false;
+    };
+  } catch (error) {
+    console.warn("Could not load receipt preview", error);
+  }
+}
+
+function removeReceiptFromForm() {
+  const existing = state.transactions.find((item) => item.id === el.transactionId.value);
+  selectedReceiptFile = null;
+  el.entryReceipt.value = "";
+  removeExistingReceipt = Boolean(existing?.receipt_path);
+  hideReceiptPreview();
+  el.receiptFileHelp.textContent = removeExistingReceipt
+    ? "The existing receipt will be removed when you save this entry."
+    : mode === "cloud"
+      ? "Receipts are stored privately in your Supabase project and are available on your signed-in devices."
+      : "Receipt uploads require Supabase cloud sync. Remarks are still saved in local preview.";
+}
+
+async function viewReceiptFromForm() {
+  if (selectedReceiptFile && receiptPreviewObjectUrl) {
+    window.open(receiptPreviewObjectUrl, "_blank", "noopener,noreferrer");
+    return;
+  }
+  const transaction = state.transactions.find((item) => item.id === el.transactionId.value);
+  if (transaction?.receipt_path && !removeExistingReceipt) await openReceiptPath(transaction.receipt_path);
+}
+
+async function openTransactionReceipt(id) {
+  const transaction = state.transactions.find((item) => item.id === id);
+  if (!transaction?.receipt_path) return showToast("This entry does not have a receipt.", true);
+  await openReceiptPath(transaction.receipt_path);
+}
+
+async function openReceiptPath(path) {
+  if (mode !== "cloud") return showToast("Receipt viewing requires Supabase cloud sync.", true);
+  const popup = window.open("about:blank", "_blank");
+  try {
+    const url = await createReceiptSignedUrl(path, 120);
+    if (popup) popup.location.href = url;
+    else window.open(url, "_blank", "noopener,noreferrer");
+  } catch (error) {
+    if (popup) popup.close();
+    showToast(friendlyError(error), true);
+  }
+}
+
+async function createReceiptSignedUrl(path, expiresIn = 120) {
+  const { data, error } = await supabase.storage.from(RECEIPT_BUCKET).createSignedUrl(path, expiresIn);
+  if (error) throw error;
+  const url = data?.signedUrl || data?.signedURL;
+  if (!url) throw new Error("Could not create a secure receipt link.");
+  return url;
+}
+
+async function uploadReceipt(transactionId, file) {
+  validateReceiptFile(file);
+  if (mode !== "cloud") throw new Error("Receipt uploads require Supabase cloud sync.");
+  setSyncStatus("syncing", "Uploading receipt");
+  const safeName = sanitizeReceiptFilename(file.name);
+  const path = `${user.id}/${transactionId}/${crypto.randomUUID()}-${safeName}`;
+  const mimeType = receiptMimeType(file);
+  const { data, error } = await supabase.storage.from(RECEIPT_BUCKET).upload(path, file, {
+    cacheControl: "3600",
+    upsert: false,
+    contentType: mimeType,
+  });
+  if (error) throw error;
+  setSyncStatus("cloud", "Cloud synchronized");
+  return {
+    receipt_path: data?.path || path,
+    receipt_name: file.name.slice(0, 255),
+    receipt_mime_type: mimeType.slice(0, 100),
+    receipt_size: file.size,
+  };
+}
+
+async function removeReceiptFile(path, showError = true) {
+  if (!path || mode !== "cloud") return true;
+  const { error } = await supabase.storage.from(RECEIPT_BUCKET).remove([path]);
+  if (error) {
+    if (showError) showToast(`The entry was saved, but the old receipt could not be removed: ${friendlyError(error)}`, true);
+    else console.warn("Could not remove receipt", error);
+    return false;
+  }
+  return true;
+}
+
+function sanitizeReceiptFilename(name) {
+  const cleaned = String(name || "receipt.jpg").normalize("NFKD").replace(/[^a-zA-Z0-9._-]+/g, "-").replace(/-+/g, "-").replace(/^[-.]+|[-.]+$/g, "");
+  return (cleaned || "receipt.jpg").slice(-120);
+}
+
+function formatFileSize(bytes) {
+  const value = number(bytes);
+  if (!value) return "Size unavailable";
+  if (value < 1024) return `${value} B`;
+  if (value < 1024 * 1024) return `${(value / 1024).toFixed(1)} KB`;
+  return `${(value / (1024 * 1024)).toFixed(1)} MB`;
 }
 
 function openAccountModal(id = null) {
@@ -914,10 +1158,13 @@ async function deleteAccount(id) {
 
 async function deleteTransaction(id) {
   if (!confirm("Delete this entry?")) return;
+  const transaction = state.transactions.find((item) => item.id === id);
   try {
     await deleteRow("transactions", id);
     state.transactions = state.transactions.filter((item) => item.id !== id);
-    persistLocal(); render(); showToast("Entry deleted.");
+    const receiptRemoved = transaction?.receipt_path ? await removeReceiptFile(transaction.receipt_path, false) : true;
+    persistLocal(); render();
+    showToast(receiptRemoved ? "Entry deleted." : "Entry deleted, but its receipt file could not be cleaned up.", !receiptRemoved);
   } catch (error) { showToast(friendlyError(error), true); }
 }
 
@@ -1163,12 +1410,13 @@ async function readTransactionImportFile(file) {
     type: row[indexByKey.type] ?? "",
     amount: row[indexByKey.amount] ?? "",
     description: row[indexByKey.description] ?? "",
+    remarks: row[indexByKey.remarks] ?? "",
     category: row[indexByKey.category] ?? "",
     account: row[indexByKey.account] ?? "",
     fromAccount: row[indexByKey.fromAccount] ?? "",
     toAccount: row[indexByKey.toAccount] ?? "",
     currency: row[indexByKey.currency] ?? "",
-  })).filter((row) => [row.date, row.type, row.amount, row.description, row.category, row.account, row.fromAccount, row.toAccount, row.currency].some((value) => String(value ?? "").trim()));
+  })).filter((row) => [row.date, row.type, row.amount, row.description, row.remarks, row.category, row.account, row.fromAccount, row.toAccount, row.currency].some((value) => String(value ?? "").trim()));
 }
 
 function normalizeImportHeader(value) {
@@ -1178,6 +1426,7 @@ function normalizeImportHeader(value) {
     type: "type", transactiontype: "type", entrytype: "type",
     amount: "amount", value: "amount",
     description: "description", details: "description", memo: "description", narrative: "description",
+    remarks: "remarks", remark: "remarks", comments: "remarks", comment: "remarks", notes: "remarks", note: "remarks",
     category: "category", categoryname: "category",
     account: "account", accountname: "account",
     fromaccount: "fromAccount", sourceaccount: "fromAccount", from: "fromAccount",
@@ -1206,11 +1455,13 @@ function validateTransactionImport() {
     const entryDate = parseImportDate(source.date);
     const amount = parseImportAmount(source.amount);
     const description = String(source.description ?? "").trim().replace(/\s+/g, " ");
+    const remarks = String(source.remarks ?? "").trim();
     const currency = String(source.currency ?? "").trim().toUpperCase();
     if (!entryDate) errors.push("Invalid date. Use YYYY-MM-DD.");
     if (!type) errors.push("Type must be Expense, Income, or Transfer.");
     if (!(amount > 0)) errors.push("Amount must be greater than zero.");
     if (description.length > 120) errors.push("Description is longer than 120 characters.");
+    if (remarks.length > 2000) errors.push("Remarks are longer than 2,000 characters.");
     if (currency && currency !== CURRENCY) errors.push(`Currency must be ${CURRENCY} or blank.`);
 
     const normalized = {
@@ -1218,6 +1469,7 @@ function validateTransactionImport() {
       amount,
       entry_date: entryDate,
       description,
+      remarks,
       categoryName: "",
       accountName: "",
       fromAccountName: "",
@@ -1321,6 +1573,7 @@ async function importValidatedTransactions() {
         amount: normalized.amount,
         entry_date: normalized.entry_date,
         description: normalized.description,
+        remarks: normalized.remarks,
         category_id: null,
         account_id: null,
         from_account_id: null,
@@ -1423,6 +1676,7 @@ function transactionFingerprintFromState(transaction) {
     amount: number(transaction.amount),
     entry_date: transaction.entry_date,
     description: transaction.description || "",
+    remarks: transaction.remarks || "",
     categoryName: categoryById(transaction.category_id)?.name || "",
     accountName: accountById(transaction.account_id)?.name || "",
     fromAccountName: accountById(transaction.from_account_id)?.name || "",
@@ -1436,6 +1690,7 @@ function transactionFingerprintFromImport(transaction) {
     transaction.type || "",
     number(transaction.amount).toFixed(2),
     normalizeLookup(transaction.description),
+    normalizeLookup(transaction.remarks),
     normalizeLookup(transaction.categoryName),
     normalizeLookup(transaction.accountName),
     normalizeLookup(transaction.fromAccountName),
@@ -1462,17 +1717,19 @@ function exportJSON() {
 }
 
 function exportCSV() {
-  const header = ["Date", "Type", "Description", "Category", "Account", "From account", "To account", "Amount", "Currency"];
+  const header = ["Date", "Type", "Description", "Remarks", "Category", "Account", "From account", "To account", "Amount", "Currency", "Receipt filename"];
   const rows = sortedTransactions().map((transaction) => [
     transaction.entry_date,
     transaction.type,
     transaction.description || "",
+    transaction.remarks || "",
     categoryById(transaction.category_id)?.name || "",
     accountById(transaction.account_id)?.name || "",
     accountById(transaction.from_account_id)?.name || "",
     accountById(transaction.to_account_id)?.name || "",
     number(transaction.amount).toFixed(2),
     CURRENCY,
+    transaction.receipt_name || "",
   ]);
   const csv = [header, ...rows].map((row) => row.map(csvCell).join(",")).join("\r\n");
   downloadFile(`ledgerly-transactions-${todayISO()}.csv`, csv, "text/csv;charset=utf-8");
@@ -1577,6 +1834,8 @@ function friendlyError(error) {
   if (message.includes("Failed to fetch")) return "Could not reach Supabase. Check your connection and project configuration.";
   if (message.includes("duplicate key")) return "A record with the same name or category already exists.";
   if (message.includes("violates foreign key")) return "This item is still used by another record.";
+  if (message.includes("Bucket not found") || message.includes("bucket not found")) return "Receipt storage is not ready. Run the supplied Supabase receipt migration first.";
+  if (message.includes("row-level security") && message.toLowerCase().includes("storage")) return "Supabase blocked the receipt. Run the supplied receipt-storage policies in the SQL Editor.";
   return message;
 }
 function emptyHTML(title, copy) { return `<div class="empty-state"><strong>${escapeHTML(title)}</strong><span>${escapeHTML(copy)}</span></div>`; }
