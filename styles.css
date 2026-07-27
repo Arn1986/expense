@@ -461,3 +461,76 @@ a.secondary-button { display: inline-flex; align-items: center; justify-content:
   .calendar-day-total .aed-symbol { display: none; }
   .calendar-transfer-count { padding: 2px 3px; font-size: .56rem; }
 }
+
+/* Recurring schedules and planned calendar occurrences */
+.section-note { margin: 5px 0 0; color: var(--slate-400); font-size: .76rem; line-height: 1.45; }
+.recurring-filters { grid-template-columns: repeat(2, minmax(180px, 260px)); }
+.recurring-list { display: grid; gap: 14px; }
+.recurring-card { padding: 17px; display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 14px; border: 1px solid var(--slate-200); border-radius: var(--radius-md); background: var(--white); }
+.recurring-card.paused { background: var(--slate-50); }
+.recurring-card-main { min-width: 0; display: grid; gap: 10px; }
+.recurring-card-heading { min-width: 0; display: flex; align-items: center; gap: 10px; }
+.recurring-type-icon { width: 39px; height: 39px; flex: 0 0 auto; display: grid; place-items: center; border-radius: 11px; font-weight: 900; }
+.recurring-type-icon.expense { color: var(--red-700); background: var(--red-100); }
+.recurring-type-icon.income { color: var(--green-700); background: var(--green-100); }
+.recurring-type-icon.transfer { color: var(--blue-600); background: var(--blue-100); }
+.recurring-card-title { min-width: 0; }
+.recurring-card-title strong, .recurring-card-title span { display: block; }
+.recurring-card-title strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.recurring-card-title span { margin-top: 3px; color: var(--slate-500); font-size: .74rem; }
+.recurring-card-details { display: flex; flex-wrap: wrap; gap: 7px; }
+.recurring-chip { padding: 5px 8px; border-radius: 999px; color: var(--slate-600); font-size: .67rem; font-weight: 800; background: var(--slate-100); }
+.recurring-chip.active { color: var(--green-700); background: var(--green-100); }
+.recurring-chip.paused { color: var(--amber-700); background: var(--amber-100); }
+.recurring-chip.auto { color: var(--blue-600); background: var(--blue-100); }
+.recurring-card-remarks { overflow: hidden; color: var(--slate-500); font-size: .74rem; line-height: 1.45; text-overflow: ellipsis; white-space: nowrap; }
+.recurring-card-side { min-width: 155px; display: flex; flex-direction: column; align-items: flex-end; justify-content: space-between; gap: 14px; }
+.recurring-card-amount { font-size: 1.02rem; font-weight: 900; }
+.recurring-card-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 5px; }
+.recurring-card-actions .row-action.wide { width: auto; padding: 0 10px; }
+.recurrence-box { padding: 16px; border: 1px solid var(--slate-200); border-radius: 14px; background: var(--slate-50); }
+.recurrence-box-heading { margin-bottom: 14px; }
+.recurrence-box-heading strong, .recurrence-box-heading span { display: block; }
+.recurrence-box-heading span { margin-top: 3px; color: var(--slate-500); font-size: .73rem; }
+.recurrence-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; }
+.repeat-every-control { display: grid; grid-template-columns: minmax(80px, .65fr) minmax(90px, 1fr); align-items: center; border: 1px solid var(--slate-200); border-radius: 10px; background: var(--white); }
+.repeat-every-control:focus-within { outline: 3px solid rgba(59,130,246,.22); border-color: var(--blue-500); }
+.repeat-every-control input { border: 0; outline: 0; }
+.repeat-every-control span { padding: 0 12px; color: var(--slate-500); font-size: .78rem; font-weight: 800; }
+.recurring-auto-post { padding: 13px 14px; align-items: flex-start; border: 1px solid var(--slate-200); border-radius: 12px; background: #eff6ff; }
+.recurring-auto-post input { margin-top: 2px; }
+.recurring-auto-post span strong, .recurring-auto-post span small { display: block; }
+.recurring-auto-post span small { margin-top: 4px; color: var(--slate-500); font-size: .72rem; font-weight: 500; line-height: 1.4; }
+.calendar-planned-total { min-width: 0; padding: 3px 5px; display: flex; align-items: center; gap: 3px; border: 1px dashed var(--slate-300); border-radius: 7px; color: var(--slate-600); font-size: .61rem; font-weight: 900; background: rgba(248,250,252,.9); }
+.calendar-planned-total.expense { color: var(--red-700); border-color: #fecaca; background: #fff7f7; }
+.calendar-planned-total.income { color: var(--green-700); border-color: #bbf7d0; background: #f0fdf4; }
+.calendar-planned-count { padding: 2px 5px; color: var(--amber-700); font-size: .61rem; font-weight: 900; }
+.planned-agenda { margin-bottom: 18px; display: grid; gap: 10px; }
+.planned-agenda-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.planned-agenda-heading strong { font-size: .82rem; }
+.planned-agenda-heading span { color: var(--slate-500); font-size: .7rem; }
+.planned-row { padding: 12px; display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 12px; align-items: center; border: 1px dashed var(--slate-300); border-radius: 12px; background: var(--slate-50); }
+.planned-row-main { min-width: 0; display: flex; align-items: center; gap: 10px; }
+.planned-row-copy { min-width: 0; }
+.planned-row-copy strong, .planned-row-copy span { display: block; }
+.planned-row-copy strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.planned-row-copy span { margin-top: 3px; color: var(--slate-500); font-size: .7rem; }
+.planned-row-side { display: flex; align-items: center; gap: 9px; }
+.planned-row-side .amount { min-width: 105px; }
+.planned-label { padding: 3px 7px; border-radius: 999px; color: var(--amber-700); font-size: .62rem; font-weight: 900; background: var(--amber-100); }
+
+@media (max-width: 760px) {
+  .recurring-filters, .recurrence-grid { grid-template-columns: 1fr; }
+  .recurring-card { grid-template-columns: 1fr; }
+  .recurring-card-side { min-width: 0; align-items: stretch; }
+  .recurring-card-actions { justify-content: flex-start; }
+  .planned-row { grid-template-columns: 1fr; }
+  .planned-row-side { justify-content: space-between; }
+}
+
+@media (max-width: 520px) {
+  .calendar-planned-total { padding: 2px 3px; font-size: .52rem; }
+  .calendar-planned-total .aed-symbol { display: none; }
+  .calendar-planned-count { padding: 1px 2px; font-size: .52rem; }
+}
+.recurring-indicator { color: var(--amber-700); font-weight: 800; }

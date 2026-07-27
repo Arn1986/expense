@@ -54,6 +54,7 @@ let removeExistingReceipt = false;
 let receiptPreviewObjectUrl = "";
 let calendarCursor = new Date(new Date().getFullYear(), new Date().getMonth(), 1);
 let selectedCalendarDate = todayISO();
+let postingRecurringEntries = false;
 
 const el = Object.fromEntries([...document.querySelectorAll("[id]")].map((node) => [node.id, node]));
 
@@ -64,6 +65,7 @@ async function initialize() {
     weekday: "long", month: "long", day: "numeric",
   }).format(new Date());
   el.entryDate.value = todayISO();
+  el.recurringStartDate.value = todayISO();
   el.reportMonth.value = todayISO().slice(0, 7);
   bindEvents();
 
@@ -140,6 +142,7 @@ function bindEvents() {
 
   el.openTransactionButton.addEventListener("click", () => openTransactionModal());
   el.openTransactionImportButton.addEventListener("click", openTransactionImportModal);
+  el.openRecurringButton.addEventListener("click", () => openRecurringModal());
   el.calendarPreviousMonth.addEventListener("click", () => moveCalendarMonth(-1));
   el.calendarNextMonth.addEventListener("click", () => moveCalendarMonth(1));
   el.calendarTodayButton.addEventListener("click", showCalendarToday);
@@ -154,6 +157,12 @@ function bindEvents() {
   document.querySelectorAll("[data-entry-type]").forEach((button) => {
     button.addEventListener("click", () => setEntryType(button.dataset.entryType));
   });
+  document.querySelectorAll("[data-recurring-type]").forEach((button) => {
+    button.addEventListener("click", () => setRecurringType(button.dataset.recurringType));
+  });
+  el.recurringFrequency.addEventListener("change", updateRecurringIntervalUnit);
+  el.recurringInterval.addEventListener("input", updateRecurringIntervalUnit);
+  el.recurringEndMode.addEventListener("change", updateRecurringEndDateVisibility);
   el.accountType.addEventListener("change", () => {
     if (!el.accountId.value) el.accountColor.value = ACCOUNT_COLORS[el.accountType.value] || ACCOUNT_COLORS.other;
   });
@@ -166,10 +175,12 @@ function bindEvents() {
   el.accountForm.addEventListener("submit", handleAccountSubmit);
   el.budgetForm.addEventListener("submit", handleBudgetSubmit);
   el.categoryForm.addEventListener("submit", handleCategorySubmit);
+  el.recurringForm.addEventListener("submit", handleRecurringSubmit);
 
   [el.transactionSearch, el.transactionTypeFilter, el.transactionAccountFilter, el.transactionMonthFilter]
     .forEach((input) => input.addEventListener("input", renderAllTransactions));
   [el.reportPeriod, el.reportMonth].forEach((input) => input.addEventListener("input", renderReports));
+  [el.recurringStatusFilter, el.recurringTypeFilter].forEach((input) => input.addEventListener("input", renderRecurringEntries));
 
   el.exportButton.addEventListener("click", exportJSON);
   el.exportCsvButton.addEventListener("click", exportCSV);
@@ -195,6 +206,10 @@ function bindEvents() {
       "delete-budget": () => deleteBudget(id),
       "edit-category": () => openCategoryModal(id),
       "delete-category": () => deleteCategory(id),
+      "edit-recurring": () => openRecurringModal(id),
+      "toggle-recurring": () => toggleRecurringEntry(id),
+      "post-recurring": () => postRecurringOccurrenceById(id, actionTarget.dataset.date),
+      "delete-recurring": () => deleteRecurringEntry(id),
     };
     if (actions[action]) await actions[action]();
   });
@@ -235,6 +250,7 @@ async function enterCloudApp(authUser) {
   try {
     await loadCloudState();
     if (!state.categories.length) await seedDefaultCategories();
+    await postDueRecurringEntries();
     setSyncStatus("cloud", "Cloud synchronized");
     render();
   } catch (error) {
@@ -249,7 +265,7 @@ function enterLocalApp() {
   state = loadLocalState();
   showAppScreen();
   setSyncStatus("local", "Local browser only");
-  render();
+  postDueRecurringEntries().finally(render);
 }
 
 async function handleSignOut() {
@@ -294,21 +310,23 @@ function setAuthBusy(busy) {
 function showAuthError(message) { el.authError.textContent = message; }
 
 async function loadCloudState() {
-  const [accountsResult, categoriesResult, transactionsResult, budgetsResult] = await Promise.all([
+  const [accountsResult, categoriesResult, transactionsResult, budgetsResult, recurringResult] = await Promise.all([
     supabase.from("accounts").select("*").order("created_at", { ascending: true }),
     supabase.from("categories").select("*").order("kind").order("name"),
     supabase.from("transactions").select("*").order("entry_date", { ascending: false }).order("created_at", { ascending: false }),
     supabase.from("budgets").select("*").order("created_at", { ascending: true }),
+    supabase.from("recurring_entries").select("*").order("created_at", { ascending: true }),
   ]);
-  [accountsResult, categoriesResult, transactionsResult, budgetsResult].forEach((result) => {
+  [accountsResult, categoriesResult, transactionsResult, budgetsResult, recurringResult].forEach((result) => {
     if (result.error) throw result.error;
   });
   state = {
-    version: 2,
+    version: 3,
     accounts: accountsResult.data || [],
     categories: categoriesResult.data || [],
     transactions: transactionsResult.data || [],
     budgets: budgetsResult.data || [],
+    recurringEntries: recurringResult.data || [],
   };
 }
 
@@ -320,12 +338,23 @@ async function seedDefaultCategories() {
 }
 
 function emptyState() {
-  return { version: 2, accounts: [], categories: [], transactions: [], budgets: [] };
+  return { version: 3, accounts: [], categories: [], transactions: [], budgets: [], recurringEntries: [] };
+}
+
+function normalizeState(value) {
+  return {
+    version: 3,
+    accounts: Array.isArray(value?.accounts) ? value.accounts : [],
+    categories: Array.isArray(value?.categories) ? value.categories : [],
+    transactions: Array.isArray(value?.transactions) ? value.transactions : [],
+    budgets: Array.isArray(value?.budgets) ? value.budgets : [],
+    recurringEntries: Array.isArray(value?.recurringEntries) ? value.recurringEntries : Array.isArray(value?.recurring_entries) ? value.recurring_entries : [],
+  };
 }
 
 function defaultLocalState() {
   return {
-    version: 2,
+    version: 3,
     accounts: [
       localRow({ name: "Current Account", type: "current", opening_balance: 0, color: ACCOUNT_COLORS.current, include_in_net_worth: true }),
       localRow({ name: "Savings", type: "savings", opening_balance: 0, color: ACCOUNT_COLORS.savings, include_in_net_worth: true }),
@@ -334,6 +363,7 @@ function defaultLocalState() {
     categories: defaultCategoryRows().map(localRow),
     transactions: [],
     budgets: [],
+    recurringEntries: [],
   };
 }
 
@@ -352,7 +382,7 @@ function localRow(row) {
 function loadLocalState() {
   try {
     const current = JSON.parse(localStorage.getItem(STORAGE_KEY));
-    if (isValidState(current)) return current;
+    if (isValidState(current)) return normalizeState(current);
     const legacy = JSON.parse(localStorage.getItem(LEGACY_STORAGE_KEY));
     if (legacy?.accounts && legacy?.transactions) {
       const migrated = migrateLegacyState(legacy);
@@ -404,7 +434,7 @@ function migrateLegacyState(legacy) {
       to_account_id: transaction.toAccountId || transaction.to_account_id || null,
     });
   });
-  return { version: 2, accounts, categories, transactions, budgets: [] };
+  return { version: 3, accounts, categories, transactions, budgets: [], recurringEntries: [] };
 }
 
 function persistLocal() {
@@ -453,11 +483,12 @@ function switchView(view) {
   activeView = view;
   document.querySelectorAll(".view").forEach((section) => section.classList.toggle("active", section.id === `${view}View`));
   document.querySelectorAll(".nav-item").forEach((button) => button.classList.toggle("active", button.dataset.view === view));
-  const titles = { dashboard: "Dashboard", accounts: "Accounts", transactions: "Transactions", calendar: "Calendar", budgets: "Budgets", reports: "Reports", categories: "Categories", settings: "Data & settings" };
+  const titles = { dashboard: "Dashboard", accounts: "Accounts", transactions: "Transactions", calendar: "Calendar", recurring: "Recurring", budgets: "Budgets", reports: "Reports", categories: "Categories", settings: "Data & settings" };
   el.pageTitle.textContent = titles[view] || "Ledgerly";
   el.sidebar.classList.remove("open");
   if (view === "reports") renderReports();
   if (view === "calendar") renderCalendar();
+  if (view === "recurring") renderRecurringEntries();
 }
 
 function render() {
@@ -466,6 +497,7 @@ function render() {
   renderAccounts();
   renderTransactions();
   renderCalendar();
+  renderRecurringEntries();
   renderCategoryChart();
   renderCashFlowChart();
   renderBudgets();
@@ -564,7 +596,7 @@ function transactionListHTML(items, showActions) {
     return `<div class="transaction-row">
       <div class="transaction-main">
         <span class="transaction-icon ${transaction.type}">${transaction.type === "expense" ? "↓" : transaction.type === "income" ? "↑" : "⇄"}</span>
-        <div style="min-width:0"><div class="transaction-title">${escapeHTML(title)}</div><div class="transaction-subtitle">${escapeHTML(subtitle)}${transaction.receipt_path ? ' · <span class="receipt-indicator">Receipt</span>' : ""}</div>${remarks ? `<div class="transaction-remarks">${escapeHTML(remarks)}</div>` : ""}</div>
+        <div style="min-width:0"><div class="transaction-title">${escapeHTML(title)}</div><div class="transaction-subtitle">${escapeHTML(subtitle)}${transaction.recurring_entry_id ? ' · <span class="recurring-indicator">Recurring</span>' : ""}${transaction.receipt_path ? ' · <span class="receipt-indicator">Receipt</span>' : ""}</div>${remarks ? `<div class="transaction-remarks">${escapeHTML(remarks)}</div>` : ""}</div>
       </div>
       <div class="transaction-meta account-column">${escapeHTML(transactionAccountText(transaction))}</div>
       <div class="transaction-meta">${formatDate(transaction.entry_date)}</div>
@@ -582,6 +614,432 @@ function renderCategoryChart() {
 
 function renderCashFlowChart() {
   el.cashFlowChart.innerHTML = cashFlowBarsHTML(monthSeries(6, new Date()));
+}
+
+
+
+function renderRecurringEntries() {
+  if (!el.recurringEntriesList) return;
+  const entries = state.recurringEntries || [];
+  const status = el.recurringStatusFilter.value || "all";
+  const type = el.recurringTypeFilter.value || "all";
+  const inThirtyDays = addDaysISO(todayISO(), 30);
+  const upcoming = plannedOccurrencesBetween(todayISO(), inThirtyDays);
+  const activeCount = entries.filter((item) => item.active !== false).length;
+  const autoCount = entries.filter((item) => item.active !== false && item.auto_post !== false).length;
+  const upcomingExpenses = upcoming.filter((item) => item.rule.type === "expense").reduce((sum, item) => sum + number(item.rule.amount), 0);
+  const upcomingIncome = upcoming.filter((item) => item.rule.type === "income").reduce((sum, item) => sum + number(item.rule.amount), 0);
+
+  el.recurringSummary.innerHTML = [
+    summaryCard("Active schedules", activeCount, `${autoCount} post automatically`, activeCount ? "positive" : "", false),
+    summaryCard("Next 30 days", upcoming.length, "Planned occurrences", "", false),
+    summaryCard("Planned expenses", upcomingExpenses, "Next 30 days", upcomingExpenses ? "negative" : ""),
+    summaryCard("Planned income", upcomingIncome, "Next 30 days", upcomingIncome ? "positive" : ""),
+  ].join("");
+
+  const filtered = entries
+    .filter((item) => status === "all" || (status === "active" ? item.active !== false : item.active === false))
+    .filter((item) => type === "all" || item.type === type)
+    .sort((a, b) => Number(b.active !== false) - Number(a.active !== false) || String(a.start_date).localeCompare(String(b.start_date)));
+
+  el.recurringEntriesList.innerHTML = filtered.length
+    ? `<div class="recurring-list">${filtered.map(recurringCardHTML).join("")}</div>`
+    : emptyHTML("No matching recurring entries", "Create a schedule for salary, subscriptions, bills, loan payments, or transfers.");
+}
+
+function recurringCardHTML(rule) {
+  const active = rule.active !== false;
+  const dueDate = earliestDueUnpostedOccurrence(rule);
+  const nextDate = nextUnpostedOccurrence(rule, todayISO());
+  const target = recurringTargetText(rule);
+  const icon = rule.type === "expense" ? "↓" : rule.type === "income" ? "↑" : "⇄";
+  const sign = rule.type === "expense" ? "−" : rule.type === "income" ? "+" : "";
+  const title = rule.description || (rule.type === "transfer" ? "Recurring transfer" : categoryById(rule.category_id)?.name || `Recurring ${rule.type}`);
+  const nextCopy = dueDate
+    ? `Due ${formatDate(dueDate)}`
+    : nextDate
+      ? `Next ${formatDate(nextDate)}`
+      : active ? "No future occurrence" : "Schedule paused";
+  const endCopy = rule.end_date ? `Ends ${formatDate(rule.end_date)}` : "Continues until stopped";
+  return `<article class="recurring-card ${active ? "" : "paused"}">
+    <div class="recurring-card-main">
+      <div class="recurring-card-heading">
+        <span class="recurring-type-icon ${rule.type}">${icon}</span>
+        <div class="recurring-card-title"><strong>${escapeHTML(title)}</strong><span>${escapeHTML(target)}</span></div>
+      </div>
+      <div class="recurring-card-details">
+        <span class="recurring-chip ${active ? "active" : "paused"}">${active ? "Active" : "Paused"}</span>
+        <span class="recurring-chip">${escapeHTML(recurringScheduleText(rule))}</span>
+        <span class="recurring-chip">${escapeHTML(endCopy)}</span>
+        ${rule.auto_post !== false ? '<span class="recurring-chip auto">Auto-post</span>' : '<span class="recurring-chip">Manual posting</span>'}
+        <span class="recurring-chip">${escapeHTML(nextCopy)}</span>
+      </div>
+      ${rule.remarks ? `<div class="recurring-card-remarks">${escapeHTML(rule.remarks)}</div>` : ""}
+    </div>
+    <div class="recurring-card-side">
+      <div class="recurring-card-amount amount ${rule.type}">${sign}${formatMoneyHTML(rule.amount)}</div>
+      <div class="recurring-card-actions">
+        ${dueDate ? `<button class="row-action wide" data-action="post-recurring" data-id="${rule.id}" data-date="${dueDate}" title="Post the due occurrence">Post due</button>` : ""}
+        <button class="row-action wide" data-action="toggle-recurring" data-id="${rule.id}">${active ? "Pause" : "Resume"}</button>
+        <button class="row-action" data-action="edit-recurring" data-id="${rule.id}" aria-label="Edit recurring entry">✎</button>
+        <button class="row-action danger" data-action="delete-recurring" data-id="${rule.id}" aria-label="Delete recurring entry">×</button>
+      </div>
+    </div>
+  </article>`;
+}
+
+function recurringScheduleText(rule) {
+  const interval = Math.max(1, Math.trunc(number(rule.interval_value) || 1));
+  const unit = recurrenceUnit(rule.frequency, interval);
+  return `Every ${interval === 1 ? "" : `${interval} `}${unit} · starts ${formatDate(rule.start_date)}`;
+}
+
+function recurringTargetText(rule) {
+  if (rule.type === "transfer") {
+    return `${accountById(rule.from_account_id)?.name || "Unknown"} → ${accountById(rule.to_account_id)?.name || "Unknown"}`;
+  }
+  return `${categoryById(rule.category_id)?.name || "Uncategorized"} · ${accountById(rule.account_id)?.name || "Unknown account"}`;
+}
+
+function setRecurringType(type) {
+  el.recurringType.value = type;
+  document.querySelectorAll("[data-recurring-type]").forEach((button) => button.classList.toggle("active", button.dataset.recurringType === type));
+  document.querySelectorAll(".recurring-expense-income-field").forEach((field) => field.hidden = type === "transfer");
+  document.querySelectorAll(".recurring-transfer-field").forEach((field) => field.hidden = type !== "transfer");
+  el.recurringAccountLabel.textContent = type === "income" ? "Add to account" : "Pay from account";
+  el.recurringCategoryLabel.textContent = type === "income" ? "Income category" : "Expense category";
+  renderRecurringCategories(type);
+}
+
+function updateRecurringIntervalUnit() {
+  const interval = Math.max(1, Math.trunc(number(el.recurringInterval.value) || 1));
+  el.recurringIntervalUnit.textContent = recurrenceUnit(el.recurringFrequency.value, interval);
+}
+
+function recurrenceUnit(frequency, interval = 1) {
+  const singular = { daily: "day", weekly: "week", monthly: "month", yearly: "year" }[frequency] || "month";
+  return interval === 1 ? singular : `${singular}s`;
+}
+
+function updateRecurringEndDateVisibility() {
+  const hasEnd = el.recurringEndMode.value === "date";
+  el.recurringEndDateField.hidden = !hasEnd;
+  el.recurringEndDate.required = hasEnd;
+  if (!hasEnd) el.recurringEndDate.value = "";
+}
+
+function openRecurringModal(id = null) {
+  if (!state.accounts.length) return showToast("Add an account before creating a recurring entry.", true);
+  el.recurringForm.reset();
+  el.recurringId.value = "";
+  el.recurringStartDate.value = todayISO();
+  el.recurringFrequency.value = "monthly";
+  el.recurringInterval.value = "1";
+  el.recurringEndMode.value = "never";
+  el.recurringAutoPost.checked = true;
+  el.recurringFormError.textContent = "";
+  let type = "expense";
+  if (id) {
+    const rule = state.recurringEntries.find((item) => item.id === id);
+    if (!rule) return;
+    type = rule.type;
+    el.recurringId.value = rule.id;
+    el.recurringAmount.value = number(rule.amount);
+    el.recurringDescription.value = rule.description || "";
+    el.recurringRemarks.value = rule.remarks || "";
+    el.recurringFrequency.value = rule.frequency || "monthly";
+    el.recurringInterval.value = Math.max(1, Math.trunc(number(rule.interval_value) || 1));
+    el.recurringStartDate.value = rule.start_date || todayISO();
+    el.recurringEndMode.value = rule.end_date ? "date" : "never";
+    el.recurringEndDate.value = rule.end_date || "";
+    el.recurringAutoPost.checked = rule.auto_post !== false;
+    setRecurringType(type);
+    if (type === "transfer") {
+      el.recurringFromAccount.value = rule.from_account_id || "";
+      el.recurringToAccount.value = rule.to_account_id || "";
+    } else {
+      el.recurringAccount.value = rule.account_id || "";
+      el.recurringCategory.value = rule.category_id || "";
+    }
+    el.recurringModalTitle.textContent = "Edit recurring entry";
+  } else {
+    setRecurringType(type);
+    el.recurringModalTitle.textContent = "Add recurring entry";
+  }
+  updateRecurringIntervalUnit();
+  updateRecurringEndDateVisibility();
+  openModal(el.recurringModal);
+  el.recurringAmount.focus();
+}
+
+async function handleRecurringSubmit(event) {
+  event.preventDefault();
+  el.recurringFormError.textContent = "";
+  const id = el.recurringId.value;
+  const type = el.recurringType.value;
+  const amount = number(el.recurringAmount.value);
+  const interval = Math.trunc(number(el.recurringInterval.value));
+  const row = {
+    type,
+    amount,
+    description: el.recurringDescription.value.trim(),
+    remarks: el.recurringRemarks.value.trim(),
+    frequency: el.recurringFrequency.value,
+    interval_value: interval,
+    start_date: el.recurringStartDate.value,
+    end_date: el.recurringEndMode.value === "date" ? el.recurringEndDate.value : null,
+    auto_post: el.recurringAutoPost.checked,
+    account_id: null,
+    category_id: null,
+    from_account_id: null,
+    to_account_id: null,
+  };
+  if (!(amount > 0)) return showFormError(el.recurringFormError, "Enter an amount greater than zero.");
+  if (!(interval >= 1 && interval <= 365)) return showFormError(el.recurringFormError, "Repeat every must be between 1 and 365.");
+  if (!row.start_date) return showFormError(el.recurringFormError, "Choose a start date.");
+  if (row.end_date && row.end_date < row.start_date) return showFormError(el.recurringFormError, "End date cannot be before the start date.");
+  if (row.description.length > 120) return showFormError(el.recurringFormError, "Description must be 120 characters or fewer.");
+  if (row.remarks.length > 2000) return showFormError(el.recurringFormError, "Remarks must be 2,000 characters or fewer.");
+  if (type === "transfer") {
+    row.from_account_id = el.recurringFromAccount.value;
+    row.to_account_id = el.recurringToAccount.value;
+    if (!row.from_account_id || !row.to_account_id) return showFormError(el.recurringFormError, "Choose both transfer accounts.");
+    if (row.from_account_id === row.to_account_id) return showFormError(el.recurringFormError, "Choose two different accounts.");
+  } else {
+    row.account_id = el.recurringAccount.value;
+    row.category_id = el.recurringCategory.value || null;
+    if (!row.account_id) return showFormError(el.recurringFormError, "Choose an account.");
+    if (!row.category_id) return showFormError(el.recurringFormError, `Create or select an ${type} category.`);
+  }
+
+  try {
+    if (id) {
+      const updated = await updateRow("recurring_entries", id, row);
+      state.recurringEntries = state.recurringEntries.map((item) => item.id === id ? { ...item, ...updated } : item);
+      showToast("Recurring entry updated.");
+    } else {
+      state.recurringEntries.push(await insertRow("recurring_entries", { ...row, active: true }));
+      showToast("Recurring entry created.");
+    }
+    persistLocal();
+    closeModal(el.recurringModal);
+    await postDueRecurringEntries();
+    render();
+  } catch (error) {
+    showFormError(el.recurringFormError, friendlyError(error));
+  }
+}
+
+async function toggleRecurringEntry(id) {
+  const rule = state.recurringEntries.find((item) => item.id === id);
+  if (!rule) return;
+  try {
+    const updated = await updateRow("recurring_entries", id, { active: rule.active === false });
+    state.recurringEntries = state.recurringEntries.map((item) => item.id === id ? { ...item, ...updated } : item);
+    persistLocal();
+    if (updated.active !== false) await postDueRecurringEntries();
+    render();
+    showToast(updated.active === false ? "Recurring entry paused." : "Recurring entry resumed.");
+  } catch (error) { showToast(friendlyError(error), true); }
+}
+
+async function deleteRecurringEntry(id) {
+  const rule = state.recurringEntries.find((item) => item.id === id);
+  if (!rule || !confirm("Delete this recurring schedule? Transactions already posted from it will remain.")) return;
+  try {
+    await deleteRow("recurring_entries", id);
+    state.recurringEntries = state.recurringEntries.filter((item) => item.id !== id);
+    state.transactions = state.transactions.map((transaction) => transaction.recurring_entry_id === id ? { ...transaction, recurring_entry_id: null } : transaction);
+    persistLocal();
+    render();
+    showToast("Recurring schedule deleted. Posted transactions were kept.");
+  } catch (error) { showToast(friendlyError(error), true); }
+}
+
+async function postDueRecurringEntries() {
+  if (postingRecurringEntries || !(state.recurringEntries || []).length) return 0;
+  postingRecurringEntries = true;
+  try {
+    const today = todayISO();
+    const existing = new Set(state.transactions.filter((item) => item.recurring_entry_id && item.scheduled_date).map(transactionOccurrenceKey));
+    const rows = [];
+    for (const rule of state.recurringEntries) {
+      if (rule.active === false || rule.auto_post === false) continue;
+      const occurrences = recurringOccurrencesBetween(rule, rule.start_date, today, 5000);
+      for (const date of occurrences) {
+        const key = `${rule.id}|${date}`;
+        if (!existing.has(key)) {
+          rows.push(transactionFromRecurring(rule, date));
+          existing.add(key);
+        }
+      }
+    }
+    if (!rows.length) return 0;
+    if (rows.length > 5000) throw new Error("This schedule would create more than 5,000 due entries. Shorten its date range before enabling automatic posting.");
+    if (mode === "cloud") {
+      setSyncStatus("syncing", "Posting recurring entries");
+      for (const batch of chunk(rows, 100)) {
+        const { data, error } = await supabase.from("transactions").insert(batch.map((row) => ({ ...row, user_id: user.id }))).select();
+        if (error) throw error;
+        state.transactions.push(...(data || []));
+      }
+      setSyncStatus("cloud", "Cloud synchronized");
+    } else {
+      state.transactions.push(...rows.map(localRow));
+      persistLocal();
+    }
+    showToast(`${rows.length} recurring ${rows.length === 1 ? "entry" : "entries"} posted.`);
+    return rows.length;
+  } finally {
+    postingRecurringEntries = false;
+  }
+}
+
+async function postRecurringOccurrenceById(id, date) {
+  const rule = state.recurringEntries.find((item) => item.id === id);
+  if (!rule || !date) return;
+  if (date > todayISO()) return showToast("Future recurring entries remain planned until their date arrives.", true);
+  if (hasPostedOccurrence(rule.id, date)) return showToast("This recurring occurrence is already posted.", true);
+  try {
+    const inserted = await insertRow("transactions", transactionFromRecurring(rule, date));
+    state.transactions.push(inserted);
+    persistLocal();
+    render();
+    showToast("Recurring occurrence posted.");
+  } catch (error) { showToast(friendlyError(error), true); }
+}
+
+function transactionFromRecurring(rule, date) {
+  return {
+    type: rule.type,
+    amount: number(rule.amount),
+    entry_date: date,
+    scheduled_date: date,
+    recurring_entry_id: rule.id,
+    description: rule.description || "",
+    remarks: rule.remarks || "",
+    account_id: rule.type === "transfer" ? null : rule.account_id,
+    category_id: rule.type === "transfer" ? null : rule.category_id,
+    from_account_id: rule.type === "transfer" ? rule.from_account_id : null,
+    to_account_id: rule.type === "transfer" ? rule.to_account_id : null,
+  };
+}
+
+function transactionOccurrenceKey(transaction) {
+  return `${transaction.recurring_entry_id}|${transaction.scheduled_date}`;
+}
+
+function hasPostedOccurrence(ruleId, date) {
+  return state.transactions.some((transaction) => transaction.recurring_entry_id === ruleId && transaction.scheduled_date === date);
+}
+
+function earliestDueUnpostedOccurrence(rule) {
+  if (rule.active === false) return "";
+  return recurringOccurrencesBetween(rule, rule.start_date, todayISO(), 50000).find((date) => !hasPostedOccurrence(rule.id, date)) || "";
+}
+
+function nextUnpostedOccurrence(rule, fromDate = todayISO()) {
+  if (rule.active === false) return "";
+  const horizon = rule.end_date || addYearsISO(fromDate, 5);
+  return recurringOccurrencesBetween(rule, fromDate, horizon, 2500).find((date) => !hasPostedOccurrence(rule.id, date)) || "";
+}
+
+function plannedOccurrencesBetween(startDate, endDate, accountId = "all") {
+  const occurrences = [];
+  for (const rule of state.recurringEntries || []) {
+    if (rule.active === false || !recurringMatchesAccount(rule, accountId)) continue;
+    for (const date of recurringOccurrencesBetween(rule, startDate, endDate, 5000)) {
+      if (!hasPostedOccurrence(rule.id, date)) occurrences.push({ rule, date });
+    }
+  }
+  return occurrences.sort((a, b) => a.date.localeCompare(b.date) || String(a.rule.created_at).localeCompare(String(b.rule.created_at)));
+}
+
+function plannedOccurrencesForDate(date, accountId = "all") {
+  return plannedOccurrencesBetween(date, date, accountId);
+}
+
+function recurringMatchesAccount(rule, accountId) {
+  return accountId === "all" || [rule.account_id, rule.from_account_id, rule.to_account_id].includes(accountId);
+}
+
+function recurringOccurrencesBetween(rule, rangeStart, rangeEnd, maxOccurrences = 5000) {
+  if (!rule?.start_date || !rangeStart || !rangeEnd || rangeEnd < rangeStart) return [];
+  const effectiveEnd = rule.end_date && rule.end_date < rangeEnd ? rule.end_date : rangeEnd;
+  if (effectiveEnd < rule.start_date || effectiveEnd < rangeStart) return [];
+  const interval = Math.max(1, Math.trunc(number(rule.interval_value) || 1));
+  let index = approximateOccurrenceIndex(rule, rangeStart, interval);
+  const results = [];
+  for (let guard = 0; guard < maxOccurrences + 2; guard += 1, index += 1) {
+    const date = recurringOccurrenceDate(rule, index, interval);
+    if (!date || date > effectiveEnd) break;
+    if (date >= rangeStart && date >= rule.start_date) results.push(date);
+    if (results.length > maxOccurrences) throw new Error("Recurring date range is too large. Shorten the schedule or increase its repeat interval.");
+  }
+  return results;
+}
+
+function approximateOccurrenceIndex(rule, rangeStart, interval) {
+  const start = parseISODate(rule.start_date);
+  const range = parseISODate(rangeStart);
+  if (!start || !range || range <= start) return 0;
+  if (rule.frequency === "daily") return Math.max(0, Math.floor(daysBetween(start, range) / interval) - 1);
+  if (rule.frequency === "weekly") return Math.max(0, Math.floor(daysBetween(start, range) / (interval * 7)) - 1);
+  if (rule.frequency === "yearly") return Math.max(0, Math.floor((range.getFullYear() - start.getFullYear()) / interval) - 1);
+  const months = (range.getFullYear() - start.getFullYear()) * 12 + range.getMonth() - start.getMonth();
+  return Math.max(0, Math.floor(months / interval) - 1);
+}
+
+function recurringOccurrenceDate(rule, index, interval) {
+  const start = parseISODate(rule.start_date);
+  if (!start) return "";
+  const year = start.getFullYear();
+  const month = start.getMonth();
+  const day = start.getDate();
+  let date;
+  if (rule.frequency === "daily") {
+    date = new Date(year, month, day + index * interval);
+  } else if (rule.frequency === "weekly") {
+    date = new Date(year, month, day + index * interval * 7);
+  } else if (rule.frequency === "yearly") {
+    const targetYear = year + index * interval;
+    date = new Date(targetYear, month, Math.min(day, daysInMonth(targetYear, month)));
+  } else {
+    const targetMonthIndex = month + index * interval;
+    const targetYear = year + Math.floor(targetMonthIndex / 12);
+    const targetMonth = ((targetMonthIndex % 12) + 12) % 12;
+    date = new Date(targetYear, targetMonth, Math.min(day, daysInMonth(targetYear, targetMonth)));
+  }
+  return localISODate(date);
+}
+
+function parseISODate(value) {
+  const match = String(value || "").match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (!match) return null;
+  return new Date(Number(match[1]), Number(match[2]) - 1, Number(match[3]));
+}
+
+function daysInMonth(year, monthIndex) {
+  return new Date(year, monthIndex + 1, 0).getDate();
+}
+
+function daysBetween(start, end) {
+  const dayMs = 86400000;
+  return Math.floor((Date.UTC(end.getFullYear(), end.getMonth(), end.getDate()) - Date.UTC(start.getFullYear(), start.getMonth(), start.getDate())) / dayMs);
+}
+
+function addDaysISO(value, days) {
+  const date = parseISODate(value);
+  if (!date) return value;
+  date.setDate(date.getDate() + days);
+  return localISODate(date);
+}
+
+function addYearsISO(value, years) {
+  const date = parseISODate(value);
+  if (!date) return value;
+  const targetYear = date.getFullYear() + years;
+  return validISODate(targetYear, date.getMonth() + 1, Math.min(date.getDate(), daysInMonth(targetYear, date.getMonth())));
 }
 
 
@@ -635,19 +1093,22 @@ function renderCalendar() {
   const year = calendarCursor.getFullYear();
   const month = calendarCursor.getMonth();
   const monthKey = `${year}-${String(month + 1).padStart(2, "0")}`;
+  const monthStart = `${monthKey}-01`;
+  const monthEnd = endOfMonthISO(calendarCursor);
   const accountId = el.calendarAccountFilter.value || "all";
   const monthEntries = state.transactions.filter((transaction) => transaction.entry_date?.startsWith(monthKey) && transactionMatchesAccount(transaction, accountId));
+  const monthPlanned = plannedOccurrencesBetween(monthStart, monthEnd, accountId);
   const monthIncome = sumTransactions(monthEntries, "income");
   const monthExpenses = sumTransactions(monthEntries, "expense");
-  const activeDays = new Set(monthEntries.map((transaction) => transaction.entry_date)).size;
+  const activeDays = new Set([...monthEntries.map((transaction) => transaction.entry_date), ...monthPlanned.map((item) => item.date)]).size;
   const transferCount = monthEntries.filter((transaction) => transaction.type === "transfer").length;
 
   el.calendarMonthLabel.textContent = new Intl.DateTimeFormat("en-US", { month: "long", year: "numeric" }).format(calendarCursor);
   el.calendarSummary.innerHTML = [
-    summaryCard("Income", monthIncome, `${monthEntries.filter((item) => item.type === "income").length} entries`, "positive"),
-    summaryCard("Expenses", monthExpenses, `${monthEntries.filter((item) => item.type === "expense").length} entries`, monthExpenses ? "negative" : ""),
-    summaryCard("Net cash flow", monthIncome - monthExpenses, "Income minus expenses", tone(monthIncome - monthExpenses)),
-    summaryCard("Activity", activeDays, `${transferCount} transfer${transferCount === 1 ? "" : "s"} · ${activeDays} active day${activeDays === 1 ? "" : "s"}`, "", false),
+    summaryCard("Income", monthIncome, `${monthEntries.filter((item) => item.type === "income").length} posted entries`, "positive"),
+    summaryCard("Expenses", monthExpenses, `${monthEntries.filter((item) => item.type === "expense").length} posted entries`, monthExpenses ? "negative" : ""),
+    summaryCard("Net cash flow", monthIncome - monthExpenses, "Posted income minus expenses", tone(monthIncome - monthExpenses)),
+    summaryCard("Planned", monthPlanned.length, `${transferCount} posted transfer${transferCount === 1 ? "" : "s"} · ${activeDays} active day${activeDays === 1 ? "" : "s"}`, "warning", false),
   ].join("");
 
   const first = new Date(year, month, 1);
@@ -657,18 +1118,23 @@ function renderCalendar() {
     const date = new Date(gridStart.getFullYear(), gridStart.getMonth(), gridStart.getDate() + index);
     const iso = localISODate(date);
     const dayEntries = state.transactions.filter((transaction) => transaction.entry_date === iso && transactionMatchesAccount(transaction, accountId));
+    const planned = plannedOccurrencesForDate(iso, accountId);
     const income = sumTransactions(dayEntries, "income");
     const expenses = sumTransactions(dayEntries, "expense");
     const transfers = dayEntries.filter((transaction) => transaction.type === "transfer").length;
+    const plannedIncome = planned.filter((item) => item.rule.type === "income").reduce((sum, item) => sum + number(item.rule.amount), 0);
+    const plannedExpenses = planned.filter((item) => item.rule.type === "expense").reduce((sum, item) => sum + number(item.rule.amount), 0);
+    const plannedTransfers = planned.filter((item) => item.rule.type === "transfer").length;
     const isCurrentMonth = date.getMonth() === month;
+    const hasActivity = dayEntries.length || planned.length;
     const classes = [
       "calendar-day",
       isCurrentMonth ? "" : "outside-month",
       iso === todayISO() ? "today" : "",
       iso === selectedCalendarDate ? "selected" : "",
-      dayEntries.length ? "has-activity" : "",
+      hasActivity ? "has-activity" : "",
     ].filter(Boolean).join(" ");
-    const aria = `${formatDate(iso)}. ${income ? `${formatMoneyText(income)} income. ` : ""}${expenses ? `${formatMoneyText(expenses)} expenses. ` : ""}${transfers ? `${transfers} transfers.` : ""}`;
+    const aria = `${formatDate(iso)}. ${income ? `${formatMoneyText(income)} posted income. ` : ""}${expenses ? `${formatMoneyText(expenses)} posted expenses. ` : ""}${transfers ? `${transfers} posted transfers. ` : ""}${planned.length ? `${planned.length} planned recurring entries.` : ""}`;
     cells.push(`<div class="${classes}">
       <button class="calendar-day-body" type="button" data-calendar-date="${iso}" aria-label="${escapeHTML(aria)}">
         <span class="calendar-day-number">${date.getDate()}</span>
@@ -676,7 +1142,10 @@ function renderCalendar() {
           ${income ? `<span class="calendar-day-total income"><span>+</span>${formatMoneyCompactHTML(income)}</span>` : ""}
           ${expenses ? `<span class="calendar-day-total expense"><span>−</span>${formatMoneyCompactHTML(expenses)}</span>` : ""}
           ${transfers ? `<span class="calendar-transfer-count">⇄ ${transfers}</span>` : ""}
-          ${!dayEntries.length ? `<span class="calendar-no-activity">No entries</span>` : ""}
+          ${plannedIncome ? `<span class="calendar-planned-total income">Planned +${formatMoneyCompactHTML(plannedIncome)}</span>` : ""}
+          ${plannedExpenses ? `<span class="calendar-planned-total expense">Planned −${formatMoneyCompactHTML(plannedExpenses)}</span>` : ""}
+          ${plannedTransfers ? `<span class="calendar-planned-count">Planned ⇄ ${plannedTransfers}</span>` : ""}
+          ${!hasActivity ? `<span class="calendar-no-activity">No entries</span>` : ""}
         </span>
       </button>
       <button class="calendar-day-add" type="button" data-calendar-add="${iso}" aria-label="Add entry on ${escapeHTML(formatDate(iso))}" title="Add entry">+</button>
@@ -688,6 +1157,7 @@ function renderCalendar() {
 
 function renderSelectedCalendarDay(accountId = "all") {
   const entries = sortedTransactions().filter((transaction) => transaction.entry_date === selectedCalendarDate && transactionMatchesAccount(transaction, accountId));
+  const planned = plannedOccurrencesForDate(selectedCalendarDate, accountId);
   const income = sumTransactions(entries, "income");
   const expenses = sumTransactions(entries, "expense");
   const transfers = entries.filter((transaction) => transaction.type === "transfer").length;
@@ -696,12 +1166,38 @@ function renderSelectedCalendarDay(accountId = "all") {
     dayMetricHTML("Income", income, "positive"),
     dayMetricHTML("Expenses", expenses, expenses ? "negative" : ""),
     dayMetricHTML("Net cash flow", income - expenses, tone(income - expenses)),
-    dayMetricHTML("Transfers", transfers, "", false),
+    dayMetricHTML("Planned", planned.length, planned.length ? "warning" : "", false),
   ].join("");
-  el.calendarDayTransactions.innerHTML = entries.length
+  const plannedHTML = planned.length ? plannedAgendaHTML(planned) : "";
+  const postedHTML = entries.length
     ? transactionListHTML(entries, true)
-    : emptyHTML("No entries on this day", "Use Add entry for this day to record an expense, income, or transfer.");
+    : emptyHTML("No posted entries on this day", planned.length ? "The recurring items above are planned and do not affect balances until posted." : "Use Add entry for this day to record an expense, income, or transfer.");
+  el.calendarDayTransactions.innerHTML = `${plannedHTML}${postedHTML}`;
 }
+
+function plannedAgendaHTML(planned) {
+  return `<div class="planned-agenda">
+    <div class="planned-agenda-heading"><strong>Planned recurring entries</strong><span>Not included in balances or reports until posted</span></div>
+    ${planned.map(({ rule, date }) => {
+      const title = rule.description || (rule.type === "transfer" ? "Recurring transfer" : categoryById(rule.category_id)?.name || `Recurring ${rule.type}`);
+      const icon = rule.type === "expense" ? "↓" : rule.type === "income" ? "↑" : "⇄";
+      const sign = rule.type === "expense" ? "−" : rule.type === "income" ? "+" : "";
+      const canPost = date <= todayISO();
+      return `<div class="planned-row">
+        <div class="planned-row-main">
+          <span class="recurring-type-icon ${rule.type}">${icon}</span>
+          <div class="planned-row-copy"><strong>${escapeHTML(title)}</strong><span>${escapeHTML(recurringTargetText(rule))} · ${escapeHTML(recurringScheduleText(rule))}</span></div>
+        </div>
+        <div class="planned-row-side">
+          <span class="planned-label">Planned</span>
+          <span class="amount ${rule.type}">${sign}${formatMoneyHTML(rule.amount)}</span>
+          ${canPost ? `<button class="secondary-button" data-action="post-recurring" data-id="${rule.id}" data-date="${date}" type="button">Post now</button>` : ""}
+        </div>
+      </div>`;
+    }).join("")}
+  </div>`;
+}
+
 
 function transactionMatchesAccount(transaction, accountId) {
   return accountId === "all" || [transaction.account_id, transaction.from_account_id, transaction.to_account_id].includes(accountId);
@@ -814,7 +1310,7 @@ function renderSettings() {
 
 function renderSelectors() {
   const accountOptions = state.accounts.map((account) => `<option value="${account.id}">${escapeHTML(account.name)} (${formatMoneyText(calculateAccountBalance(account.id))})</option>`).join("");
-  [el.entryAccount, el.transferFromAccount, el.transferToAccount].forEach((select) => {
+  [el.entryAccount, el.transferFromAccount, el.transferToAccount, el.recurringAccount, el.recurringFromAccount, el.recurringToAccount].forEach((select) => {
     const previous = select.value;
     select.innerHTML = accountOptions || `<option value="">No accounts available</option>`;
     if ([...select.options].some((option) => option.value === previous)) select.value = previous;
@@ -829,6 +1325,7 @@ function renderSelectors() {
   el.importDefaultAccount.innerHTML = `<option value="">Use account names from file</option>${state.accounts.map((account) => `<option value="${account.id}">${escapeHTML(account.name)}</option>`).join("")}`;
   if ([...el.importDefaultAccount.options].some((option) => option.value === importAccountPrevious)) el.importDefaultAccount.value = importAccountPrevious;
   renderEntryCategories(el.entryType.value);
+  renderRecurringCategories(el.recurringType.value);
   const budgetPrevious = el.budgetCategory.value;
   el.budgetCategory.innerHTML = state.categories.filter((category) => category.kind === "expense").sort((a, b) => a.name.localeCompare(b.name)).map((category) => `<option value="${category.id}">${escapeHTML(category.name)}</option>`).join("") || `<option value="">No expense categories</option>`;
   if ([...el.budgetCategory.options].some((option) => option.value === budgetPrevious)) el.budgetCategory.value = budgetPrevious;
@@ -839,6 +1336,13 @@ function renderEntryCategories(type) {
   const previous = el.entryCategory.value;
   el.entryCategory.innerHTML = state.categories.filter((category) => category.kind === type).sort((a, b) => a.name.localeCompare(b.name)).map((category) => `<option value="${category.id}">${escapeHTML(category.name)}</option>`).join("") || `<option value="">No ${type} categories</option>`;
   if ([...el.entryCategory.options].some((option) => option.value === previous)) el.entryCategory.value = previous;
+}
+
+function renderRecurringCategories(type) {
+  if (type === "transfer") return;
+  const previous = el.recurringCategory.value;
+  el.recurringCategory.innerHTML = state.categories.filter((category) => category.kind === type).sort((a, b) => a.name.localeCompare(b.name)).map((category) => `<option value="${category.id}">${escapeHTML(category.name)}</option>`).join("") || `<option value="">No ${type} categories</option>`;
+  if ([...el.recurringCategory.options].some((option) => option.value === previous)) el.recurringCategory.value = previous;
 }
 
 function setEntryType(type) {
@@ -1277,7 +1781,7 @@ async function handleCategorySubmit(event) {
   const duplicate = state.categories.some((category) => category.id !== id && category.kind === row.kind && category.name.toLowerCase() === row.name.toLowerCase());
   if (duplicate) return showFormError(el.categoryFormError, "That category already exists for this entry type.");
   if (id) {
-    const usedByWrongType = state.transactions.some((transaction) => transaction.category_id === id && transaction.type !== row.kind);
+    const usedByWrongType = state.transactions.some((transaction) => transaction.category_id === id && transaction.type !== row.kind) || state.recurringEntries.some((rule) => rule.category_id === id && rule.type !== row.kind);
     if (usedByWrongType) return showFormError(el.categoryFormError, "The category type cannot change while entries use it.");
   }
   try {
@@ -1296,8 +1800,8 @@ async function handleCategorySubmit(event) {
 async function deleteAccount(id) {
   const account = state.accounts.find((item) => item.id === id);
   if (!account) return;
-  const inUse = state.transactions.some((transaction) => [transaction.account_id, transaction.from_account_id, transaction.to_account_id].includes(id));
-  if (inUse) return showToast("Delete or move this account's transactions first.", true);
+  const inUse = state.transactions.some((transaction) => [transaction.account_id, transaction.from_account_id, transaction.to_account_id].includes(id)) || state.recurringEntries.some((rule) => [rule.account_id, rule.from_account_id, rule.to_account_id].includes(id));
+  if (inUse) return showToast("Delete or move this account's transactions and recurring schedules first.", true);
   if (!confirm(`Delete ${account.name}?`)) return;
   try {
     await deleteRow("accounts", id);
@@ -1307,8 +1811,11 @@ async function deleteAccount(id) {
 }
 
 async function deleteTransaction(id) {
-  if (!confirm("Delete this entry?")) return;
   const transaction = state.transactions.find((item) => item.id === id);
+  const warning = transaction?.recurring_entry_id
+    ? "Delete this entry? It came from a recurring schedule and may be posted again while that schedule remains active."
+    : "Delete this entry?";
+  if (!confirm(warning)) return;
   try {
     await deleteRow("transactions", id);
     state.transactions = state.transactions.filter((item) => item.id !== id);
@@ -1330,8 +1837,8 @@ async function deleteBudget(id) {
 async function deleteCategory(id) {
   const category = state.categories.find((item) => item.id === id);
   if (!category) return;
-  const inUse = state.transactions.some((transaction) => transaction.category_id === id) || state.budgets.some((budget) => budget.category_id === id);
-  if (inUse) return showToast("Remove this category from transactions and budgets first.", true);
+  const inUse = state.transactions.some((transaction) => transaction.category_id === id) || state.budgets.some((budget) => budget.category_id === id) || state.recurringEntries.some((rule) => rule.category_id === id);
+  if (inUse) return showToast("Remove this category from transactions, budgets, and recurring schedules first.", true);
   if (!confirm(`Delete ${category.name}?`)) return;
   try {
     await deleteRow("categories", id);
@@ -1867,7 +2374,7 @@ function exportJSON() {
 }
 
 function exportCSV() {
-  const header = ["Date", "Type", "Description", "Remarks", "Category", "Account", "From account", "To account", "Amount", "Currency", "Receipt filename"];
+  const header = ["Date", "Type", "Description", "Remarks", "Category", "Account", "From account", "To account", "Amount", "Currency", "Recurring schedule ID", "Scheduled date", "Receipt filename"];
   const rows = sortedTransactions().map((transaction) => [
     transaction.entry_date,
     transaction.type,
@@ -1879,6 +2386,8 @@ function exportCSV() {
     accountById(transaction.to_account_id)?.name || "",
     number(transaction.amount).toFixed(2),
     CURRENCY,
+    transaction.recurring_entry_id || "",
+    transaction.scheduled_date || "",
     transaction.receipt_name || "",
   ]);
   const csv = [header, ...rows].map((row) => row.map(csvCell).join(",")).join("\r\n");
@@ -1907,13 +2416,13 @@ async function importJSON(event) {
 
 async function replaceCloudState(imported) {
   setSyncStatus("syncing", "Restoring backup");
-  for (const table of ["transactions", "budgets", "accounts", "categories"]) {
+  for (const table of ["transactions", "budgets", "recurring_entries", "accounts", "categories"]) {
     const { error } = await supabase.from(table).delete().eq("user_id", user.id);
     if (error) throw error;
   }
   const clean = sanitizeImportedState(imported);
   const withUser = (rows) => rows.map((row) => ({ ...row, user_id: user.id }));
-  for (const [table, rows] of [["categories", clean.categories], ["accounts", clean.accounts], ["budgets", clean.budgets], ["transactions", clean.transactions]]) {
+  for (const [table, rows] of [["categories", clean.categories], ["accounts", clean.accounts], ["recurring_entries", clean.recurringEntries], ["budgets", clean.budgets], ["transactions", clean.transactions]]) {
     if (!rows.length) continue;
     const { error } = await supabase.from(table).insert(withUser(rows));
     if (error) throw error;
@@ -1928,12 +2437,14 @@ function sanitizeImportedState(imported) {
     delete copy.user_id;
     return copy;
   };
+  const clean = normalizeState(imported);
   return {
-    version: 2,
-    accounts: imported.accounts.map(strip),
-    categories: imported.categories.map(strip),
-    transactions: imported.transactions.map(strip),
-    budgets: imported.budgets.map(strip),
+    version: 3,
+    accounts: clean.accounts.map(strip),
+    categories: clean.categories.map(strip),
+    transactions: clean.transactions.map(strip),
+    budgets: clean.budgets.map(strip),
+    recurringEntries: clean.recurringEntries.map(strip),
   };
 }
 
@@ -1942,7 +2453,7 @@ async function resetApplication() {
   try {
     if (mode === "cloud") {
       setSyncStatus("syncing", "Resetting data");
-      for (const table of ["transactions", "budgets", "accounts", "categories"]) {
+      for (const table of ["transactions", "budgets", "recurring_entries", "accounts", "categories"]) {
         const { error } = await supabase.from(table).delete().eq("user_id", user.id);
         if (error) throw error;
       }
@@ -1983,6 +2494,8 @@ function friendlyError(error) {
   const message = String(error?.message || error || "Something went wrong.");
   if (message.includes("Failed to fetch")) return "Could not reach Supabase. Check your connection and project configuration.";
   if (message.includes("duplicate key")) return "A record with the same name or category already exists.";
+  if (message.includes("recurring_entries") && (message.includes("does not exist") || message.includes("schema cache"))) return "Recurring schedules are not ready. Run supabase/add-recurring-entries.sql in the Supabase SQL Editor.";
+  if ((message.includes("recurring_entry_id") || message.includes("scheduled_date")) && message.includes("column")) return "Recurring transaction columns are not ready. Run supabase/add-recurring-entries.sql in the Supabase SQL Editor.";
   if (message.includes("violates foreign key")) return "This item is still used by another record.";
   if (message.includes("Bucket not found") || message.includes("bucket not found")) return "Receipt storage is not ready. Run the supplied Supabase receipt migration first.";
   if (message.includes("row-level security") && message.toLowerCase().includes("storage")) return "Supabase blocked the receipt. Run the supplied receipt-storage policies in the SQL Editor.";
