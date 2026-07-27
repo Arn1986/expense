@@ -1,0 +1,315 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta name="theme-color" content="#0f172a" />
+  <meta name="description" content="Ledgerly is a multi-account personal finance tracker with budgets, reports, and optional Supabase cloud sync." />
+  <title>Ledgerly — Personal Finance</title>
+  <link rel="manifest" href="manifest.webmanifest" />
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <section class="auth-screen" id="authScreen">
+    <div class="auth-card">
+      <div class="auth-brand">
+        <div class="brand-mark">L</div>
+        <div>
+          <strong>Ledgerly</strong>
+          <span>Personal finance, clearly organized</span>
+        </div>
+      </div>
+
+      <div class="auth-copy">
+        <p class="eyebrow">Private cloud sync</p>
+        <h1>Your money, available on every device.</h1>
+        <p>Sign in to synchronize accounts, transactions, categories, budgets, and reports through your Supabase project.</p>
+      </div>
+
+      <div class="auth-tabs" role="tablist" aria-label="Authentication action">
+        <button class="auth-tab active" data-auth-mode="signin" type="button">Sign in</button>
+        <button class="auth-tab" data-auth-mode="signup" type="button">Create account</button>
+      </div>
+
+      <form id="authForm" class="auth-form">
+        <label class="field">
+          <span>Email</span>
+          <input id="authEmail" type="email" autocomplete="email" placeholder="you@example.com" required />
+        </label>
+        <label class="field">
+          <span>Password</span>
+          <input id="authPassword" type="password" autocomplete="current-password" minlength="6" placeholder="At least 6 characters" required />
+        </label>
+        <p class="form-error" id="authError" role="alert"></p>
+        <button class="primary-button wide-button" id="authSubmitButton" type="submit">Sign in</button>
+      </form>
+
+      <div class="setup-notice" id="setupNotice" hidden>
+        <strong>Supabase is not configured yet.</strong>
+        <p>Add your project URL and publishable key to <code>config.js</code>. You can still preview the app locally on this device.</p>
+        <button class="secondary-button wide-button" id="continueLocalButton" type="button">Continue in local preview</button>
+      </div>
+
+      <p class="auth-footnote" id="authFootnote">Your Supabase project controls authentication and database access.</p>
+    </div>
+  </section>
+
+  <div class="app-shell" id="appShell" hidden>
+    <aside class="sidebar" id="sidebar">
+      <div class="brand">
+        <div class="brand-mark">L</div>
+        <div>
+          <strong>Ledgerly</strong>
+          <span>Personal finance</span>
+        </div>
+      </div>
+
+      <nav class="nav" aria-label="Primary navigation">
+        <button class="nav-item active" data-view="dashboard"><span>⌂</span> Dashboard</button>
+        <button class="nav-item" data-view="accounts"><span>▣</span> Accounts</button>
+        <button class="nav-item" data-view="transactions"><span>↕</span> Transactions</button>
+        <button class="nav-item" data-view="budgets"><span>◎</span> Budgets</button>
+        <button class="nav-item" data-view="reports"><span>⌁</span> Reports</button>
+        <button class="nav-item" data-view="categories"><span>◇</span> Categories</button>
+        <button class="nav-item" data-view="settings"><span>⚙</span> Data & settings</button>
+      </nav>
+
+      <div class="sidebar-footer">
+        <div class="sync-pill" id="syncPill"><span class="status-dot"></span><span id="syncText">Cloud sync</span></div>
+        <p id="signedInEmail"></p>
+        <button class="text-button sidebar-action" id="signOutButton" type="button">Sign out</button>
+      </div>
+    </aside>
+
+    <main class="main-content">
+      <header class="topbar">
+        <button class="icon-button mobile-only" id="menuButton" aria-label="Open menu">☰</button>
+        <div>
+          <p class="eyebrow" id="todayLabel"></p>
+          <h1 id="pageTitle">Dashboard</h1>
+        </div>
+        <button class="primary-button" id="openTransactionButton" type="button">+ Add entry</button>
+      </header>
+
+      <div class="local-banner" id="localBanner" hidden>
+        <strong>Local preview:</strong> data is stored only in this browser. Configure Supabase to synchronize across devices.
+      </div>
+
+      <section class="view active" id="dashboardView">
+        <div class="summary-grid" id="summaryGrid"></div>
+
+        <div class="content-grid dashboard-primary-grid">
+          <section class="panel">
+            <div class="panel-heading">
+              <div><p class="eyebrow">Balances</p><h2>Your accounts</h2></div>
+              <button class="text-button" data-go-to="accounts">Manage</button>
+            </div>
+            <div class="account-list compact" id="dashboardAccounts"></div>
+          </section>
+
+          <section class="panel">
+            <div class="panel-heading">
+              <div><p class="eyebrow">This month</p><h2>Budget progress</h2></div>
+              <button class="text-button" data-go-to="budgets">View budgets</button>
+            </div>
+            <div id="dashboardBudgets"></div>
+          </section>
+        </div>
+
+        <div class="content-grid two-columns">
+          <section class="panel">
+            <div class="panel-heading">
+              <div><p class="eyebrow">Cash flow</p><h2>Last 6 months</h2></div>
+              <button class="text-button" data-go-to="reports">Full report</button>
+            </div>
+            <div id="cashFlowChart" class="cash-flow-chart"></div>
+          </section>
+
+          <section class="panel">
+            <div class="panel-heading">
+              <div><p class="eyebrow">This month</p><h2>Spending by category</h2></div>
+            </div>
+            <div id="categoryChart" class="category-chart"></div>
+          </section>
+        </div>
+
+        <section class="panel">
+          <div class="panel-heading">
+            <div><p class="eyebrow">Activity</p><h2>Recent transactions</h2></div>
+            <button class="text-button" data-go-to="transactions">View all</button>
+          </div>
+          <div id="recentTransactions"></div>
+        </section>
+      </section>
+
+      <section class="view" id="accountsView">
+        <div class="section-toolbar">
+          <p class="section-copy">Add current, savings, cash, investment, credit-card, or custom accounts. Credit-card debt should be entered as a negative starting balance.</p>
+          <button class="secondary-button" id="openAccountButton" type="button">+ Add account</button>
+        </div>
+        <div class="account-grid" id="accountsGrid"></div>
+      </section>
+
+      <section class="view" id="transactionsView">
+        <section class="panel">
+          <div class="filters transaction-filters">
+            <label><span>Search</span><input id="transactionSearch" type="search" placeholder="Description or category" /></label>
+            <label><span>Type</span><select id="transactionTypeFilter"><option value="all">All types</option><option value="expense">Expenses</option><option value="income">Income</option><option value="transfer">Transfers</option></select></label>
+            <label><span>Account</span><select id="transactionAccountFilter"></select></label>
+            <label><span>Month</span><input id="transactionMonthFilter" type="month" /></label>
+          </div>
+          <div id="allTransactions"></div>
+        </section>
+      </section>
+
+      <section class="view" id="budgetsView">
+        <div class="section-toolbar">
+          <p class="section-copy">Set monthly or yearly maximum spending targets for expense categories and compare them with actual spending.</p>
+          <button class="secondary-button" id="openBudgetButton" type="button">+ Create budget</button>
+        </div>
+        <div class="summary-grid budget-summary-grid" id="budgetSummary"></div>
+        <section class="panel">
+          <div class="panel-heading"><div><p class="eyebrow">Limits</p><h2>Category budgets</h2></div></div>
+          <div id="budgetsList"></div>
+        </section>
+      </section>
+
+      <section class="view" id="reportsView">
+        <section class="panel report-controls-panel">
+          <div class="filters report-filters">
+            <label><span>Report period</span><select id="reportPeriod"><option value="monthly">Monthly</option><option value="yearly">Yearly</option></select></label>
+            <label><span>Month</span><input id="reportMonth" type="month" /></label>
+          </div>
+        </section>
+        <div class="summary-grid" id="reportSummary"></div>
+        <div class="content-grid two-columns">
+          <section class="panel"><div class="panel-heading"><div><p class="eyebrow">Trend</p><h2>Net worth over time</h2></div></div><div id="netWorthChart" class="line-chart"></div></section>
+          <section class="panel"><div class="panel-heading"><div><p class="eyebrow">Breakdown</p><h2>Expenses by category</h2></div></div><div id="reportExpenseChart" class="category-chart"></div></section>
+        </div>
+        <div class="content-grid two-columns">
+          <section class="panel"><div class="panel-heading"><div><p class="eyebrow">Flow</p><h2>Income vs expenses</h2></div></div><div id="reportCashFlowChart" class="cash-flow-chart"></div></section>
+          <section class="panel"><div class="panel-heading"><div><p class="eyebrow">Income</p><h2>Income sources</h2></div></div><div id="incomeCategoryChart" class="category-chart"></div></section>
+        </div>
+      </section>
+
+      <section class="view" id="categoriesView">
+        <div class="section-toolbar">
+          <p class="section-copy">Create categories for both spending and income. Categories keep reports and budgets consistent.</p>
+          <button class="secondary-button" id="openCategoryButton" type="button">+ Add category</button>
+        </div>
+        <div class="content-grid two-columns equal-columns">
+          <section class="panel"><div class="panel-heading"><div><p class="eyebrow">Money out</p><h2>Expense categories</h2></div></div><div id="expenseCategoryList" class="category-manager-list"></div></section>
+          <section class="panel"><div class="panel-heading"><div><p class="eyebrow">Money in</p><h2>Income categories</h2></div></div><div id="incomeCategoryList" class="category-manager-list"></div></section>
+        </div>
+      </section>
+
+      <section class="view" id="settingsView">
+        <div class="content-grid two-columns equal-columns">
+          <section class="panel">
+            <div class="panel-heading"><div><p class="eyebrow">Synchronization</p><h2>Cloud status</h2></div></div>
+            <div class="settings-status" id="settingsStatus"></div>
+          </section>
+          <section class="panel">
+            <div class="panel-heading"><div><p class="eyebrow">Exports</p><h2>Download your data</h2></div></div>
+            <p class="muted">JSON preserves the complete application state. CSV creates a spreadsheet-friendly transaction list.</p>
+            <div class="button-row"><button class="secondary-button" id="exportButton">Export JSON backup</button><button class="secondary-button" id="exportCsvButton">Export transactions CSV</button></div>
+          </section>
+        </div>
+
+        <div class="content-grid two-columns equal-columns">
+          <section class="panel">
+            <div class="panel-heading"><div><p class="eyebrow">Restore</p><h2>Import a JSON backup</h2></div></div>
+            <p class="muted">Importing replaces the data currently stored for this account.</p>
+            <label class="secondary-button file-button">Choose backup file<input id="importInput" type="file" accept="application/json" /></label>
+          </section>
+          <section class="panel danger-panel">
+            <div class="panel-heading"><div><p class="eyebrow">Danger zone</p><h2>Reset financial data</h2></div></div>
+            <p class="muted">Deletes accounts, transactions, categories, and budgets for the current user.</p>
+            <button class="danger-button" id="resetButton">Reset application</button>
+          </section>
+        </div>
+
+        <section class="panel info-panel">
+          <h2>How balances work</h2>
+          <p>Opening balance plus income minus expenses determines each account balance. Transfers reduce the source and increase the destination without changing total net worth. Credit-card purchases push the card balance further below zero; card payments move it toward zero.</p>
+        </section>
+      </section>
+    </main>
+  </div>
+
+  <div class="modal-backdrop" id="transactionModal" hidden>
+    <section class="modal" role="dialog" aria-modal="true" aria-labelledby="transactionModalTitle">
+      <div class="modal-header"><div><p class="eyebrow">Record</p><h2 id="transactionModalTitle">Add entry</h2></div><button class="icon-button" data-close-modal="transactionModal" aria-label="Close">×</button></div>
+      <div class="segmented-control" role="tablist" aria-label="Entry type"><button class="segment active" data-entry-type="expense" type="button">Expense</button><button class="segment" data-entry-type="income" type="button">Income</button><button class="segment" data-entry-type="transfer" type="button">Transfer</button></div>
+      <form id="transactionForm">
+        <input type="hidden" id="transactionId" /><input type="hidden" id="entryType" value="expense" />
+        <div class="form-grid">
+          <label class="field full-width"><span>Amount</span><div class="money-input"><span>$</span><input id="entryAmount" type="number" min="0.01" step="0.01" inputmode="decimal" placeholder="0.00" required /></div></label>
+          <label class="field"><span>Date</span><input id="entryDate" type="date" required /></label>
+          <label class="field expense-income-field"><span id="accountLabel">Pay from account</span><select id="entryAccount"></select></label>
+          <label class="field transfer-field" hidden><span>From account</span><select id="transferFromAccount"></select></label>
+          <label class="field transfer-field" hidden><span>To account</span><select id="transferToAccount"></select></label>
+          <label class="field expense-income-field"><span id="categoryLabel">Expense category</span><select id="entryCategory"></select></label>
+          <label class="field full-width"><span>Description</span><input id="entryDescription" type="text" maxlength="120" placeholder="e.g. Weekly groceries" /></label>
+        </div>
+        <p class="form-error" id="transactionFormError" role="alert"></p>
+        <div class="modal-actions"><button class="secondary-button" type="button" data-close-modal="transactionModal">Cancel</button><button class="primary-button" type="submit">Save entry</button></div>
+      </form>
+    </section>
+  </div>
+
+  <div class="modal-backdrop" id="accountModal" hidden>
+    <section class="modal small-modal" role="dialog" aria-modal="true" aria-labelledby="accountModalTitle">
+      <div class="modal-header"><div><p class="eyebrow">Account</p><h2 id="accountModalTitle">Add account</h2></div><button class="icon-button" data-close-modal="accountModal" aria-label="Close">×</button></div>
+      <form id="accountForm">
+        <input type="hidden" id="accountId" />
+        <div class="form-grid">
+          <label class="field full-width"><span>Account name</span><input id="accountName" type="text" maxlength="60" placeholder="e.g. Everyday Current" required /></label>
+          <label class="field"><span>Account type</span><select id="accountType"><option value="current">Current</option><option value="savings">Savings</option><option value="credit">Credit card</option><option value="cash">Cash</option><option value="investment">Investment</option><option value="other">Other</option></select></label>
+          <label class="field"><span>Starting balance</span><div class="money-input"><span>$</span><input id="accountOpeningBalance" type="number" step="0.01" inputmode="decimal" value="0" required /></div></label>
+          <label class="field"><span>Card color</span><input id="accountColor" type="color" value="#2563eb" /></label>
+          <label class="check-field"><input id="accountIncludeNetWorth" type="checkbox" checked /><span>Include in net worth</span></label>
+        </div>
+        <p class="field-help">For money owed on a credit card, use a negative starting balance, such as -500.</p>
+        <p class="form-error" id="accountFormError" role="alert"></p>
+        <div class="modal-actions"><button class="secondary-button" type="button" data-close-modal="accountModal">Cancel</button><button class="primary-button" type="submit">Save account</button></div>
+      </form>
+    </section>
+  </div>
+
+  <div class="modal-backdrop" id="budgetModal" hidden>
+    <section class="modal small-modal" role="dialog" aria-modal="true" aria-labelledby="budgetModalTitle">
+      <div class="modal-header"><div><p class="eyebrow">Spending limit</p><h2 id="budgetModalTitle">Create budget</h2></div><button class="icon-button" data-close-modal="budgetModal" aria-label="Close">×</button></div>
+      <form id="budgetForm">
+        <input type="hidden" id="budgetId" />
+        <div class="form-grid">
+          <label class="field full-width"><span>Expense category</span><select id="budgetCategory" required></select></label>
+          <label class="field"><span>Maximum amount</span><div class="money-input"><span>$</span><input id="budgetAmount" type="number" min="0.01" step="0.01" required /></div></label>
+          <label class="field"><span>Period</span><select id="budgetPeriod"><option value="monthly">Monthly</option><option value="yearly">Yearly</option></select></label>
+        </div>
+        <p class="form-error" id="budgetFormError" role="alert"></p>
+        <div class="modal-actions"><button class="secondary-button" type="button" data-close-modal="budgetModal">Cancel</button><button class="primary-button" type="submit">Save budget</button></div>
+      </form>
+    </section>
+  </div>
+
+  <div class="modal-backdrop" id="categoryModal" hidden>
+    <section class="modal small-modal" role="dialog" aria-modal="true" aria-labelledby="categoryModalTitle">
+      <div class="modal-header"><div><p class="eyebrow">Classification</p><h2 id="categoryModalTitle">Add category</h2></div><button class="icon-button" data-close-modal="categoryModal" aria-label="Close">×</button></div>
+      <form id="categoryForm">
+        <input type="hidden" id="categoryId" />
+        <div class="form-grid">
+          <label class="field"><span>Category type</span><select id="categoryKind"><option value="expense">Expense</option><option value="income">Income</option></select></label>
+          <label class="field"><span>Color</span><input id="categoryColor" type="color" value="#64748b" /></label>
+          <label class="field full-width"><span>Category name</span><input id="categoryName" type="text" maxlength="50" placeholder="e.g. Pet care" required /></label>
+        </div>
+        <p class="form-error" id="categoryFormError" role="alert"></p>
+        <div class="modal-actions"><button class="secondary-button" type="button" data-close-modal="categoryModal">Cancel</button><button class="primary-button" type="submit">Save category</button></div>
+      </form>
+    </section>
+  </div>
+
+  <div class="toast" id="toast" role="status" aria-live="polite"></div>
+  <script type="module" src="app.js"></script>
+</body>
+</html>

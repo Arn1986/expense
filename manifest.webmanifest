@@ -1,0 +1,9 @@
+{
+  "name": "Ledgerly Personal Finance",
+  "short_name": "Ledgerly",
+  "start_url": "./",
+  "display": "standalone",
+  "background_color": "#f8fafc",
+  "theme_color": "#0f172a",
+  "description": "Multi-account expense tracking, budgets, reports, and cloud synchronization."
+}
