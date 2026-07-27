@@ -276,3 +276,32 @@ input:focus, select:focus { outline: 3px solid rgba(59,130,246,.22); border-colo
   .modal-backdrop { padding: 10px; align-items: end; }
   .modal { width: 100%; max-height: calc(100vh - 20px); padding: 21px 18px; border-radius: 22px 22px 12px 12px; }
 }
+
+/* UAE Dirham currency presentation. The mask uses the official CBUAE symbol asset. */
+.money {
+  display: inline-flex;
+  align-items: baseline;
+  gap: .11em;
+  max-width: 100%;
+  white-space: nowrap;
+}
+.money-sign { margin-right: -.03em; }
+.money-number { min-width: 0; }
+.aed-symbol {
+  width: .9em;
+  height: .79em;
+  flex: 0 0 auto;
+  display: inline-block;
+  color: inherit;
+  background-color: currentColor;
+  -webkit-mask: url("./assets/dirham-symbol.png") center / contain no-repeat;
+  mask: url("./assets/dirham-symbol.png") center / contain no-repeat;
+  transform: translateY(.04em);
+}
+.money-input .aed-symbol {
+  width: 1.05em;
+  height: .92em;
+  margin-left: 13px;
+  padding-left: 0;
+  color: var(--slate-500);
+}

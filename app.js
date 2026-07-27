@@ -2,11 +2,12 @@ import { SUPABASE_URL, SUPABASE_PUBLISHABLE_KEY } from "./config.js";
 
 const STORAGE_KEY = "ledgerly-data-v2-local";
 const LEGACY_STORAGE_KEY = "ledgerly-data-v1";
-const CURRENCY = "USD";
-const currency = new Intl.NumberFormat("en-US", { style: "currency", currency: CURRENCY });
-const compactCurrency = new Intl.NumberFormat("en-US", {
-  style: "currency",
-  currency: CURRENCY,
+const CURRENCY = "AED";
+const amountFormatter = new Intl.NumberFormat("en-AE", {
+  minimumFractionDigits: 2,
+  maximumFractionDigits: 2,
+});
+const compactAmountFormatter = new Intl.NumberFormat("en-AE", {
   notation: "compact",
   maximumFractionDigits: 1,
 });
@@ -479,8 +480,8 @@ function renderAccounts() {
           </div>
         </div>
         <h3>${escapeHTML(account.name)}</h3>
-        <p class="large-balance">${currency.format(balance)}</p>
-        <p class="opening-balance">Starting balance: ${currency.format(number(account.opening_balance))}${account.include_in_net_worth === false ? " · excluded from net worth" : ""}</p>
+        <p class="large-balance">${formatMoneyHTML(balance)}</p>
+        <p class="opening-balance">Starting balance: ${formatMoneyHTML(number(account.opening_balance))}${account.include_in_net_worth === false ? " · excluded from net worth" : ""}</p>
       </article>`;
   }).join("");
 }
@@ -490,7 +491,7 @@ function accountRowHTML(account) {
   return `<div class="account-row">
     <span class="account-icon" style="--account-color:${safeColor(account.color)}">${escapeHTML(account.name.slice(0, 1).toUpperCase())}</span>
     <div class="account-details"><strong>${escapeHTML(account.name)}</strong><span>${escapeHTML(account.type)}</span></div>
-    <span class="account-balance ${tone(balance)}">${currency.format(balance)}</span>
+    <span class="account-balance ${tone(balance)}">${formatMoneyHTML(balance)}</span>
   </div>`;
 }
 
@@ -534,7 +535,7 @@ function transactionListHTML(items, showActions) {
       </div>
       <div class="transaction-meta account-column">${escapeHTML(transactionAccountText(transaction))}</div>
       <div class="transaction-meta">${formatDate(transaction.entry_date)}</div>
-      <div class="amount ${transaction.type}">${sign}${currency.format(number(transaction.amount))}</div>
+      <div class="amount ${transaction.type}">${sign}${formatMoneyHTML(number(transaction.amount))}</div>
       <div class="row-actions">${showActions ? `<button class="row-action" data-action="edit-transaction" data-id="${transaction.id}" aria-label="Edit entry">✎</button><button class="row-action danger" data-action="delete-transaction" data-id="${transaction.id}" aria-label="Delete entry">×</button>` : ""}</div>
     </div>`;
   }).join("")}</div>`;
@@ -589,7 +590,7 @@ function budgetRowHTML(budget, showActions = true, anchor = todayISO().slice(0, 
       </div>
     </div>
     <div class="budget-track"><div class="budget-fill ${over ? "over" : ""}" style="width:${Math.min(percent, 100)}%;--category-color:${safeColor(category?.color)}"></div></div>
-    <div class="budget-row-bottom"><span>${currency.format(actual)} spent</span><strong class="${over ? "negative" : ""}">${Math.round(percent)}% of ${currency.format(amount)}</strong></div>
+    <div class="budget-row-bottom"><span>${formatMoneyHTML(actual)} spent</span><strong class="${over ? "negative" : ""}">${Math.round(percent)}% of ${formatMoneyHTML(amount)}</strong></div>
   </div>`;
 }
 
@@ -622,7 +623,7 @@ function renderReports() {
   el.reportSummary.innerHTML = [
     summaryCard("Net worth now", calculateNetWorth(), "Current included account balances", tone(calculateNetWorth())),
     summaryCard(`${capitalize(period)} expenses`, expenses, `${entries.filter((item) => item.type === "expense").length} entries`, expenses ? "negative" : ""),
-    summaryCard("Cash flow", net, `${currency.format(income)} income`, tone(net)),
+    summaryCard("Cash flow", net, `${formatMoneyText(income)} income`, tone(net)),
     summaryCard("Savings rate", savingsRate, budget.total ? `${Math.round(budget.percentage)}% of budget used` : "Net cash flow ÷ income", tone(savingsRate), false, "%"),
   ].join("");
 
@@ -643,7 +644,7 @@ function renderSettings() {
 }
 
 function renderSelectors() {
-  const accountOptions = state.accounts.map((account) => `<option value="${account.id}">${escapeHTML(account.name)} (${currency.format(calculateAccountBalance(account.id))})</option>`).join("");
+  const accountOptions = state.accounts.map((account) => `<option value="${account.id}">${escapeHTML(account.name)} (${formatMoneyText(calculateAccountBalance(account.id))})</option>`).join("");
   [el.entryAccount, el.transferFromAccount, el.transferToAccount].forEach((select) => {
     const previous = select.value;
     select.innerHTML = accountOptions || `<option value="">No accounts available</option>`;
@@ -968,7 +969,7 @@ function categoryBarsHTML(items, emptyMessage) {
   return items.slice(0, 10).map((item) => `<div class="category-row">
     <span class="category-name"><span class="category-dot" style="--category-color:${safeColor(item.color)}"></span>${escapeHTML(item.name)}</span>
     <span class="category-bar-track"><span class="category-bar" style="width:${(item.amount / max) * 100}%;--category-color:${safeColor(item.color)}"></span></span>
-    <span class="category-amount">${currency.format(item.amount)}</span>
+    <span class="category-amount">${formatMoneyHTML(item.amount)}</span>
   </div>`).join("");
 }
 
@@ -1011,7 +1012,7 @@ function monthsInYear(year) {
 
 function cashFlowBarsHTML(series) {
   const max = Math.max(...series.flatMap((item) => [item.income, item.expenses]), 1);
-  return `<div class="cash-flow-chart">${series.map((item) => `<div class="cash-month" title="${escapeHTML(item.label)}: ${currency.format(item.income)} income, ${currency.format(item.expenses)} expenses">
+  return `<div class="cash-flow-chart">${series.map((item) => `<div class="cash-month" title="${escapeHTML(item.label)}: ${formatMoneyText(item.income)} income, ${formatMoneyText(item.expenses)} expenses">
     <div class="cash-bars"><span class="cash-bar income" style="height:${Math.max((item.income / max) * 100, item.income ? 2 : 0)}%"></span><span class="cash-bar expense" style="height:${Math.max((item.expenses / max) * 100, item.expenses ? 2 : 0)}%"></span></div>
     <span class="cash-month-label">${escapeHTML(item.label)}</span>
   </div>`).join("")}</div><div class="chart-legend"><span class="legend-key"><span class="legend-swatch income"></span>Income</span><span class="legend-key"><span class="legend-swatch expense"></span>Expenses</span></div>`;
@@ -1034,19 +1035,40 @@ function netWorthLineHTML(series) {
   const grid = [0, .5, 1].map((ratio) => {
     const y = padTop + ratio * (height - padTop - padBottom);
     const value = max - ratio * range;
-    return `<line class="line-chart-grid" x1="${padX}" x2="${width - padX}" y1="${y}" y2="${y}"/><text class="line-chart-value" x="2" y="${y + 3}">${escapeHTML(compactCurrency.format(value))}</text>`;
+    return `<line class="line-chart-grid" x1="${padX}" x2="${width - padX}" y1="${y}" y2="${y}"/><text class="line-chart-value" x="2" y="${y + 3}">${escapeHTML(formatCompactMoneyText(value))}</text>`;
   }).join("");
   return `<svg viewBox="0 0 ${width} ${height}" role="img" aria-label="Net worth over time">
     <defs><linearGradient id="netWorthGradient" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stop-color="#3b82f6" stop-opacity=".25"/><stop offset="100%" stop-color="#3b82f6" stop-opacity="0"/></linearGradient></defs>
     ${grid}<path class="line-chart-area" d="${area}"/><path class="line-chart-line" d="${line}"/>
-    ${coords.map((point) => `<circle class="line-chart-dot" cx="${point.x}" cy="${point.y}" r="4"><title>${escapeHTML(point.label)}: ${currency.format(point.value)}</title></circle>`).join("")}
+    ${coords.map((point) => `<circle class="line-chart-dot" cx="${point.x}" cy="${point.y}" r="4"><title>${escapeHTML(point.label)}: ${formatMoneyText(point.value)}</title></circle>`).join("")}
     ${coords.map((point, index) => index % Math.ceil(coords.length / 6) === 0 || index === coords.length - 1 ? `<text class="line-chart-label" text-anchor="middle" x="${point.x}" y="${height - 12}">${escapeHTML(point.label)}</text>` : "").join("")}
   </svg>`;
 }
 
 function summaryCard(label, value, detail, className = "", money = true, suffix = "") {
-  const display = money ? currency.format(number(value)) : suffix ? `${Number(value).toFixed(1)}${suffix}` : Math.round(number(value)).toLocaleString("en-US");
-  return `<article class="summary-card"><p class="card-label">${escapeHTML(label)}</p><p class="card-value ${className}">${escapeHTML(display)}</p><p class="card-detail">${escapeHTML(detail)}</p></article>`;
+  const display = money
+    ? formatMoneyHTML(number(value))
+    : escapeHTML(suffix ? `${Number(value).toFixed(1)}${suffix}` : Math.round(number(value)).toLocaleString("en-AE"));
+  return `<article class="summary-card"><p class="card-label">${escapeHTML(label)}</p><p class="card-value ${className}">${display}</p><p class="card-detail">${escapeHTML(detail)}</p></article>`;
+}
+
+function formatMoneyText(value) {
+  const amount = number(value);
+  const sign = amount < 0 ? "−" : "";
+  return `${sign}${CURRENCY} ${amountFormatter.format(Math.abs(amount))}`;
+}
+
+function formatCompactMoneyText(value) {
+  const amount = number(value);
+  const sign = amount < 0 ? "−" : "";
+  return `${sign}${CURRENCY} ${compactAmountFormatter.format(Math.abs(amount))}`;
+}
+
+function formatMoneyHTML(value) {
+  const amount = number(value);
+  const sign = amount < 0 ? '<span class="money-sign" aria-hidden="true">−</span>' : "";
+  const accessible = escapeHTML(formatMoneyText(amount));
+  return `<span class="money" role="text" aria-label="${accessible}">${sign}<span class="aed-symbol" aria-hidden="true"></span><span class="money-number">${amountFormatter.format(Math.abs(amount))}</span></span>`;
 }
 
 function sortedTransactions() {
