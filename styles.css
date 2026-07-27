@@ -305,3 +305,54 @@ input:focus, select:focus { outline: 3px solid rgba(59,130,246,.22); border-colo
   padding-left: 0;
   color: var(--slate-500);
 }
+
+/* Bulk transaction import */
+a.secondary-button { display: inline-flex; align-items: center; justify-content: center; text-decoration: none; }
+.import-modal { width: min(1120px, 100%); }
+.import-guide { padding: 16px 18px; display: flex; align-items: center; justify-content: space-between; gap: 20px; border: 1px solid var(--blue-100); border-radius: var(--radius-md); background: #eff6ff; }
+.import-guide strong, .import-guide p { display: block; }
+.import-guide p { margin: 5px 0 0; color: var(--slate-600); font-size: .8rem; line-height: 1.5; }
+.import-guide code { padding: 2px 5px; border-radius: 5px; background: rgba(37,99,235,.09); }
+.import-template-buttons { flex: 0 0 auto; margin-top: 0; }
+.import-rules-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; margin: 14px 0 18px; }
+.import-rules-grid > div { padding: 13px 15px; border: 1px solid var(--slate-200); border-radius: 12px; background: var(--slate-50); }
+.import-rules-grid strong, .import-rules-grid span { display: block; }
+.import-rules-grid span { margin-top: 4px; color: var(--slate-500); font-size: .76rem; line-height: 1.45; }
+.import-options { align-items: end; }
+.import-checks { min-height: 44px; display: flex; flex-wrap: wrap; align-items: center; gap: 8px 18px; }
+.import-status { min-height: 54px; margin-top: 18px; padding: 12px 14px; display: flex; align-items: center; justify-content: space-between; gap: 16px; border: 1px solid var(--slate-200); border-radius: 12px; background: var(--slate-50); color: var(--slate-500); font-size: .78rem; }
+.import-status strong, .import-status span { display: block; }
+.import-status strong { color: var(--slate-800); }
+.import-status > div > span { margin-top: 3px; }
+.import-counts { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 7px; }
+.import-count { padding: 5px 8px; border-radius: 999px; font-size: .7rem; font-weight: 900; }
+.import-count.valid { color: var(--green-700); background: var(--green-100); }
+.import-count.duplicate { color: var(--amber-700); background: var(--amber-100); }
+.import-count.error { color: var(--red-700); background: var(--red-100); }
+.import-preview { margin-top: 13px; }
+.import-preview-scroll { max-height: 370px; overflow: auto; border: 1px solid var(--slate-200); border-radius: 12px; }
+.import-preview-table { width: 100%; min-width: 920px; border-collapse: separate; border-spacing: 0; font-size: .74rem; }
+.import-preview-table th { position: sticky; z-index: 1; top: 0; padding: 10px 11px; color: var(--slate-600); text-align: left; background: var(--slate-100); border-bottom: 1px solid var(--slate-200); }
+.import-preview-table td { padding: 10px 11px; vertical-align: top; border-bottom: 1px solid var(--slate-100); }
+.import-preview-table tbody tr:last-child td { border-bottom: 0; }
+.import-preview-table td:nth-child(1) { width: 52px; color: var(--slate-500); font-weight: 800; }
+.import-preview-table td:nth-child(2) { width: 210px; }
+.import-preview-table td:nth-child(3) { width: 102px; white-space: nowrap; }
+.import-preview-table td:nth-child(4) { width: 82px; }
+.import-preview-table td:nth-child(7) { width: 130px; text-align: right; white-space: nowrap; }
+.import-preview-table small { display: block; margin-top: 4px; color: var(--slate-500); line-height: 1.35; }
+.import-row-error { background: #fff7f7; }
+.import-row-duplicate { background: #fffdf5; }
+.import-row-status { display: inline-flex; padding: 3px 7px; border-radius: 999px; font-size: .65rem; font-weight: 900; }
+.import-row-status.valid { color: var(--green-700); background: var(--green-100); }
+.import-row-status.duplicate { color: var(--amber-700); background: var(--amber-100); }
+.import-row-status.error { color: var(--red-700); background: var(--red-100); }
+
+@media (max-width: 760px) {
+  .import-guide { align-items: stretch; flex-direction: column; }
+  .import-template-buttons { width: 100%; }
+  .import-template-buttons .secondary-button { flex: 1 1 180px; }
+  .import-rules-grid { grid-template-columns: 1fr; }
+  .import-status { align-items: flex-start; flex-direction: column; }
+  .import-counts { justify-content: flex-start; }
+}

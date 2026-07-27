@@ -7,7 +7,7 @@
   <meta name="description" content="Ledgerly is a multi-account personal finance tracker with budgets, reports, and optional Supabase cloud sync." />
   <title>Ledgerly — Personal Finance</title>
   <link rel="manifest" href="manifest.webmanifest" />
-  <link rel="stylesheet" href="styles.css?v=3" />
+  <link rel="stylesheet" href="styles.css?v=4" />
 </head>
 <body>
   <section class="auth-screen" id="authScreen">
@@ -151,6 +151,10 @@
       </section>
 
       <section class="view" id="transactionsView">
+        <div class="section-toolbar">
+          <p class="section-copy">Upload a standardized CSV or Excel file to add expenses, income, and transfers in bulk. Account and category names are matched case-insensitively.</p>
+          <button class="secondary-button" id="openTransactionImportButton" type="button">↑ Import CSV / Excel</button>
+        </div>
         <section class="panel">
           <div class="filters transaction-filters">
             <label><span>Search</span><input id="transactionSearch" type="search" placeholder="Description or category" /></label>
@@ -309,7 +313,58 @@
     </section>
   </div>
 
+  <div class="modal-backdrop" id="transactionImportModal" hidden>
+    <section class="modal import-modal" role="dialog" aria-modal="true" aria-labelledby="transactionImportModalTitle">
+      <div class="modal-header">
+        <div><p class="eyebrow">Bulk upload</p><h2 id="transactionImportModalTitle">Import transactions</h2></div>
+        <button class="icon-button" data-close-modal="transactionImportModal" aria-label="Close">×</button>
+      </div>
+
+      <div class="import-guide">
+        <div>
+          <strong>Use the Ledgerly column format</strong>
+          <p>Import the first worksheet from an Excel file or a CSV file. Dates should preferably use <code>YYYY-MM-DD</code> and amounts should be positive numbers.</p>
+        </div>
+        <div class="button-row import-template-buttons">
+          <a class="secondary-button" href="templates/ledgerly-transaction-import-template.csv" download>Download CSV template</a>
+          <a class="secondary-button" href="templates/ledgerly-transaction-import-template.xlsx" download>Download Excel template</a>
+        </div>
+      </div>
+
+      <div class="import-rules-grid">
+        <div><strong>Expense / Income</strong><span>Use Date, Type, Amount, Description, Category, and Account.</span></div>
+        <div><strong>Transfer</strong><span>Use Date, Type, Amount, Description, From Account, and To Account.</span></div>
+      </div>
+
+      <div class="form-grid import-options">
+        <label class="field full-width">
+          <span>Transaction file</span>
+          <input id="transactionImportInput" type="file" accept=".csv,.xlsx,.xls,text/csv,application/vnd.ms-excel,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" />
+        </label>
+        <label class="field">
+          <span>Fallback account</span>
+          <select id="importDefaultAccount"><option value="">Use account names from file</option></select>
+        </label>
+        <div class="import-checks">
+          <label class="check-field"><input id="importCreateCategories" type="checkbox" checked /><span>Create missing categories</span></label>
+          <label class="check-field"><input id="importSkipDuplicates" type="checkbox" checked /><span>Skip duplicate transactions</span></label>
+        </div>
+      </div>
+
+      <div class="import-status" id="transactionImportStatus">
+        <span>Select a CSV or Excel file to validate it before importing.</span>
+      </div>
+      <div class="import-preview" id="transactionImportPreview"></div>
+      <p class="form-error" id="transactionImportError" role="alert"></p>
+
+      <div class="modal-actions">
+        <button class="secondary-button" type="button" data-close-modal="transactionImportModal">Cancel</button>
+        <button class="primary-button" id="importTransactionsButton" type="button" disabled>Import transactions</button>
+      </div>
+    </section>
+  </div>
+
   <div class="toast" id="toast" role="status" aria-live="polite"></div>
-  <script type="module" src="app.js?v=3"></script>
+  <script type="module" src="app.js?v=4"></script>
 </body>
 </html>

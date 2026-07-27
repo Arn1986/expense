@@ -42,6 +42,10 @@ let authMode = "signin";
 let activeView = "dashboard";
 let toastTimer = null;
 let state = emptyState();
+let transactionImportSourceRows = [];
+let transactionImportValidation = [];
+let transactionImportFileName = "";
+let spreadsheetModulePromise = null;
 
 const el = Object.fromEntries([...document.querySelectorAll("[id]")].map((node) => [node.id, node]));
 
@@ -127,6 +131,7 @@ function bindEvents() {
   });
 
   el.openTransactionButton.addEventListener("click", () => openTransactionModal());
+  el.openTransactionImportButton.addEventListener("click", openTransactionImportModal);
   el.openAccountButton.addEventListener("click", () => openAccountModal());
   el.openBudgetButton.addEventListener("click", () => openBudgetModal());
   el.openCategoryButton.addEventListener("click", () => openCategoryModal());
@@ -151,6 +156,11 @@ function bindEvents() {
   el.exportButton.addEventListener("click", exportJSON);
   el.exportCsvButton.addEventListener("click", exportCSV);
   el.importInput.addEventListener("change", importJSON);
+  el.transactionImportInput.addEventListener("change", handleTransactionImportFile);
+  el.importDefaultAccount.addEventListener("change", validateTransactionImport);
+  el.importCreateCategories.addEventListener("change", validateTransactionImport);
+  el.importSkipDuplicates.addEventListener("change", validateTransactionImport);
+  el.importTransactionsButton.addEventListener("click", importValidatedTransactions);
   el.resetButton.addEventListener("click", resetApplication);
 
   document.body.addEventListener("click", async (event) => {
@@ -653,6 +663,9 @@ function renderSelectors() {
   const filterPrevious = el.transactionAccountFilter.value;
   el.transactionAccountFilter.innerHTML = `<option value="all">All accounts</option>${state.accounts.map((account) => `<option value="${account.id}">${escapeHTML(account.name)}</option>`).join("")}`;
   if ([...el.transactionAccountFilter.options].some((option) => option.value === filterPrevious)) el.transactionAccountFilter.value = filterPrevious;
+  const importAccountPrevious = el.importDefaultAccount.value;
+  el.importDefaultAccount.innerHTML = `<option value="">Use account names from file</option>${state.accounts.map((account) => `<option value="${account.id}">${escapeHTML(account.name)}</option>`).join("")}`;
+  if ([...el.importDefaultAccount.options].some((option) => option.value === importAccountPrevious)) el.importDefaultAccount.value = importAccountPrevious;
   renderEntryCategories(el.entryType.value);
   const budgetPrevious = el.budgetCategory.value;
   el.budgetCategory.innerHTML = state.categories.filter((category) => category.kind === "expense").sort((a, b) => a.name.localeCompare(b.name)).map((category) => `<option value="${category.id}">${escapeHTML(category.name)}</option>`).join("") || `<option value="">No expense categories</option>`;
@@ -1080,6 +1093,367 @@ function accountById(id) { return state.accounts.find((item) => item.id === id);
 function transactionAccountText(transaction) {
   if (transaction.type === "transfer") return `${accountById(transaction.from_account_id)?.name || "Unknown"} → ${accountById(transaction.to_account_id)?.name || "Unknown"}`;
   return accountById(transaction.account_id)?.name || "Unknown account";
+}
+
+
+function openTransactionImportModal() {
+  if (!state.accounts.length) return showToast("Add an account before importing transactions.", true);
+  transactionImportSourceRows = [];
+  transactionImportValidation = [];
+  transactionImportFileName = "";
+  el.transactionImportInput.value = "";
+  el.importDefaultAccount.value = "";
+  el.importCreateCategories.checked = true;
+  el.importSkipDuplicates.checked = true;
+  el.transactionImportError.textContent = "";
+  el.transactionImportStatus.innerHTML = "<span>Select a CSV or Excel file to validate it before importing.</span>";
+  el.transactionImportPreview.innerHTML = "";
+  el.importTransactionsButton.disabled = true;
+  openModal(el.transactionImportModal);
+}
+
+async function handleTransactionImportFile(event) {
+  const file = event.target.files?.[0];
+  transactionImportSourceRows = [];
+  transactionImportValidation = [];
+  transactionImportFileName = file?.name || "";
+  el.transactionImportError.textContent = "";
+  el.importTransactionsButton.disabled = true;
+  el.transactionImportPreview.innerHTML = "";
+  if (!file) {
+    el.transactionImportStatus.innerHTML = "<span>Select a CSV or Excel file to validate it before importing.</span>";
+    return;
+  }
+  el.transactionImportStatus.innerHTML = `<span>Reading ${escapeHTML(file.name)}…</span>`;
+  try {
+    transactionImportSourceRows = await readTransactionImportFile(file);
+    validateTransactionImport();
+  } catch (error) {
+    el.transactionImportStatus.innerHTML = `<span class="negative">Could not read ${escapeHTML(file.name)}.</span>`;
+    el.transactionImportError.textContent = friendlyError(error);
+  }
+}
+
+async function getSpreadsheetModule() {
+  if (!spreadsheetModulePromise) {
+    spreadsheetModulePromise = import("https://cdn.jsdelivr.net/npm/xlsx@0.18.5/+esm").then((module) => module.default?.read ? module.default : module);
+  }
+  return spreadsheetModulePromise;
+}
+
+async function readTransactionImportFile(file) {
+  const XLSX = await getSpreadsheetModule();
+  const workbook = XLSX.read(await file.arrayBuffer(), { type: "array", cellDates: true });
+  if (!workbook.SheetNames.length) throw new Error("The workbook does not contain a worksheet.");
+  const sheet = workbook.Sheets[workbook.SheetNames[0]];
+  const matrix = XLSX.utils.sheet_to_json(sheet, { header: 1, defval: "", raw: true, blankrows: false });
+  const firstRowIndex = matrix.findIndex((row) => Array.isArray(row) && row.some((cell) => String(cell ?? "").trim()));
+  if (firstRowIndex < 0) throw new Error("The file is empty.");
+  const headers = matrix[firstRowIndex].map(normalizeImportHeader);
+  const indexByKey = {};
+  headers.forEach((key, index) => {
+    if (key && indexByKey[key] === undefined) indexByKey[key] = index;
+  });
+  for (const required of ["date", "type", "amount"]) {
+    if (indexByKey[required] === undefined) throw new Error(`Missing required column: ${capitalize(required)}.`);
+  }
+  return matrix.slice(firstRowIndex + 1).map((row, offset) => ({
+    sourceRow: firstRowIndex + offset + 2,
+    date: row[indexByKey.date] ?? "",
+    type: row[indexByKey.type] ?? "",
+    amount: row[indexByKey.amount] ?? "",
+    description: row[indexByKey.description] ?? "",
+    category: row[indexByKey.category] ?? "",
+    account: row[indexByKey.account] ?? "",
+    fromAccount: row[indexByKey.fromAccount] ?? "",
+    toAccount: row[indexByKey.toAccount] ?? "",
+    currency: row[indexByKey.currency] ?? "",
+  })).filter((row) => [row.date, row.type, row.amount, row.description, row.category, row.account, row.fromAccount, row.toAccount, row.currency].some((value) => String(value ?? "").trim()));
+}
+
+function normalizeImportHeader(value) {
+  const key = String(value ?? "").replace(/^\uFEFF/, "").trim().toLowerCase().replace(/[^a-z0-9]+/g, "");
+  const aliases = {
+    date: "date", entrydate: "date", transactiondate: "date",
+    type: "type", transactiontype: "type", entrytype: "type",
+    amount: "amount", value: "amount",
+    description: "description", details: "description", memo: "description", narrative: "description",
+    category: "category", categoryname: "category",
+    account: "account", accountname: "account",
+    fromaccount: "fromAccount", sourceaccount: "fromAccount", from: "fromAccount",
+    toaccount: "toAccount", destinationaccount: "toAccount", to: "toAccount",
+    currency: "currency", currencycode: "currency",
+  };
+  return aliases[key] || "";
+}
+
+function validateTransactionImport() {
+  if (!transactionImportSourceRows.length) {
+    el.importTransactionsButton.disabled = true;
+    return;
+  }
+  const fallbackAccount = state.accounts.find((account) => account.id === el.importDefaultAccount.value) || null;
+  const accountMap = new Map(state.accounts.map((account) => [normalizeLookup(account.name), account]));
+  const categoryMap = new Map(state.categories.map((category) => [`${category.kind}:${normalizeLookup(category.name)}`, category]));
+  const createCategories = el.importCreateCategories.checked;
+  const skipDuplicates = el.importSkipDuplicates.checked;
+  const knownFingerprints = new Set(state.transactions.map(transactionFingerprintFromState));
+  const fileFingerprints = new Set();
+
+  transactionImportValidation = transactionImportSourceRows.map((source) => {
+    const errors = [];
+    const type = normalizeImportType(source.type);
+    const entryDate = parseImportDate(source.date);
+    const amount = parseImportAmount(source.amount);
+    const description = String(source.description ?? "").trim().replace(/\s+/g, " ");
+    const currency = String(source.currency ?? "").trim().toUpperCase();
+    if (!entryDate) errors.push("Invalid date. Use YYYY-MM-DD.");
+    if (!type) errors.push("Type must be Expense, Income, or Transfer.");
+    if (!(amount > 0)) errors.push("Amount must be greater than zero.");
+    if (description.length > 120) errors.push("Description is longer than 120 characters.");
+    if (currency && currency !== CURRENCY) errors.push(`Currency must be ${CURRENCY} or blank.`);
+
+    const normalized = {
+      type,
+      amount,
+      entry_date: entryDate,
+      description,
+      categoryName: "",
+      accountName: "",
+      fromAccountName: "",
+      toAccountName: "",
+      createCategory: false,
+    };
+
+    if (type === "expense" || type === "income") {
+      normalized.accountName = String(source.account ?? "").trim() || fallbackAccount?.name || "";
+      normalized.categoryName = String(source.category ?? "").trim();
+      const account = accountMap.get(normalizeLookup(normalized.accountName));
+      if (!normalized.accountName) errors.push("Account is required.");
+      else if (!account) errors.push(`Account “${normalized.accountName}” does not exist.`);
+      const categoryKey = `${type}:${normalizeLookup(normalized.categoryName)}`;
+      const category = categoryMap.get(categoryKey);
+      if (!normalized.categoryName) errors.push("Category is required.");
+      else if (normalized.categoryName.length > 50) errors.push("Category is longer than 50 characters.");
+      else if (!category && !createCategories) errors.push(`${capitalize(type)} category “${normalized.categoryName}” does not exist.`);
+      else if (!category) normalized.createCategory = true;
+    } else if (type === "transfer") {
+      normalized.fromAccountName = String(source.fromAccount ?? "").trim() || fallbackAccount?.name || "";
+      normalized.toAccountName = String(source.toAccount ?? "").trim();
+      const fromAccount = accountMap.get(normalizeLookup(normalized.fromAccountName));
+      const toAccount = accountMap.get(normalizeLookup(normalized.toAccountName));
+      if (!normalized.fromAccountName) errors.push("From Account is required.");
+      else if (!fromAccount) errors.push(`From Account “${normalized.fromAccountName}” does not exist.`);
+      if (!normalized.toAccountName) errors.push("To Account is required.");
+      else if (!toAccount) errors.push(`To Account “${normalized.toAccountName}” does not exist.`);
+      if (fromAccount && toAccount && fromAccount.id === toAccount.id) errors.push("Transfer accounts must be different.");
+    }
+
+    const fingerprint = errors.length ? "" : transactionFingerprintFromImport(normalized);
+    const duplicate = Boolean(fingerprint && (knownFingerprints.has(fingerprint) || fileFingerprints.has(fingerprint)));
+    if (fingerprint) fileFingerprints.add(fingerprint);
+    return {
+      sourceRow: source.sourceRow,
+      source,
+      normalized,
+      errors,
+      status: errors.length ? "error" : duplicate && skipDuplicates ? "duplicate" : "valid",
+    };
+  });
+  renderTransactionImportPreview();
+}
+
+function renderTransactionImportPreview() {
+  const validCount = transactionImportValidation.filter((row) => row.status === "valid").length;
+  const duplicateCount = transactionImportValidation.filter((row) => row.status === "duplicate").length;
+  const errorCount = transactionImportValidation.filter((row) => row.status === "error").length;
+  el.transactionImportStatus.innerHTML = `
+    <div><strong>${escapeHTML(transactionImportFileName || "Selected file")}</strong><span>${transactionImportValidation.length} data row${transactionImportValidation.length === 1 ? "" : "s"}</span></div>
+    <div class="import-counts"><span class="import-count valid">${validCount} ready</span><span class="import-count duplicate">${duplicateCount} duplicate</span><span class="import-count error">${errorCount} error${errorCount === 1 ? "" : "s"}</span></div>`;
+  const previewRows = transactionImportValidation.slice(0, 100);
+  el.transactionImportPreview.innerHTML = previewRows.length ? `
+    <div class="import-preview-scroll">
+      <table class="import-preview-table">
+        <thead><tr><th>Row</th><th>Status</th><th>Date</th><th>Type</th><th>Description</th><th>Category / route</th><th>Amount</th></tr></thead>
+        <tbody>${previewRows.map((row) => {
+          const route = row.normalized.type === "transfer"
+            ? `${row.normalized.fromAccountName || "—"} → ${row.normalized.toAccountName || "—"}`
+            : `${row.normalized.categoryName || "—"} · ${row.normalized.accountName || "—"}`;
+          const detail = row.errors.length ? row.errors.join(" ") : row.status === "duplicate" ? "Already in Ledgerly or repeated in this file." : row.normalized.createCategory ? "Ready · new category will be created." : "Ready to import.";
+          return `<tr class="import-row-${row.status}"><td>${row.sourceRow}</td><td><span class="import-row-status ${row.status}">${capitalize(row.status)}</span><small>${escapeHTML(detail)}</small></td><td>${escapeHTML(row.normalized.entry_date || String(row.source.date ?? ""))}</td><td>${escapeHTML(capitalize(row.normalized.type || String(row.source.type ?? "")))}</td><td>${escapeHTML(row.normalized.description || "—")}</td><td>${escapeHTML(route)}</td><td>${row.normalized.amount > 0 ? formatMoneyHTML(row.normalized.amount) : escapeHTML(String(row.source.amount ?? ""))}</td></tr>`;
+        }).join("")}</tbody>
+      </table>
+    </div>
+    ${transactionImportValidation.length > 100 ? `<p class="field-help">Showing the first 100 of ${transactionImportValidation.length} rows.</p>` : ""}` : emptyHTML("No data rows", "Add transactions below the header row in your file.");
+  el.transactionImportError.textContent = errorCount ? "Correct the highlighted rows in the source file, then choose the file again." : "";
+  el.importTransactionsButton.disabled = errorCount > 0 || validCount === 0;
+  el.importTransactionsButton.textContent = validCount ? `Import ${validCount} transaction${validCount === 1 ? "" : "s"}` : "Import transactions";
+}
+
+async function importValidatedTransactions() {
+  validateTransactionImport();
+  const errorCount = transactionImportValidation.filter((row) => row.status === "error").length;
+  const ready = transactionImportValidation.filter((row) => row.status === "valid");
+  if (errorCount || !ready.length) return;
+  el.importTransactionsButton.disabled = true;
+  el.transactionImportError.textContent = "";
+  try {
+    const missingCategories = [];
+    const missingKeys = new Set();
+    for (const row of ready) {
+      if (!row.normalized.createCategory) continue;
+      const key = `${row.normalized.type}:${normalizeLookup(row.normalized.categoryName)}`;
+      if (missingKeys.has(key)) continue;
+      missingKeys.add(key);
+      missingCategories.push({
+        kind: row.normalized.type,
+        name: row.normalized.categoryName,
+        color: importCategoryColor(row.normalized.categoryName),
+      });
+    }
+    if (missingCategories.length) await insertImportedCategories(missingCategories);
+
+    const accountMap = new Map(state.accounts.map((account) => [normalizeLookup(account.name), account]));
+    const categoryMap = new Map(state.categories.map((category) => [`${category.kind}:${normalizeLookup(category.name)}`, category]));
+    const transactionRows = ready.map(({ normalized }) => {
+      const base = {
+        type: normalized.type,
+        amount: normalized.amount,
+        entry_date: normalized.entry_date,
+        description: normalized.description,
+        category_id: null,
+        account_id: null,
+        from_account_id: null,
+        to_account_id: null,
+      };
+      if (normalized.type === "transfer") {
+        base.from_account_id = accountMap.get(normalizeLookup(normalized.fromAccountName)).id;
+        base.to_account_id = accountMap.get(normalizeLookup(normalized.toAccountName)).id;
+      } else {
+        base.account_id = accountMap.get(normalizeLookup(normalized.accountName)).id;
+        base.category_id = categoryMap.get(`${normalized.type}:${normalizeLookup(normalized.categoryName)}`).id;
+      }
+      return base;
+    });
+    await insertImportedTransactions(transactionRows);
+    persistLocal();
+    render();
+    closeModal(el.transactionImportModal);
+    const duplicateCount = transactionImportValidation.filter((row) => row.status === "duplicate").length;
+    showToast(`${transactionRows.length} transaction${transactionRows.length === 1 ? "" : "s"} imported${duplicateCount ? `; ${duplicateCount} duplicate${duplicateCount === 1 ? "" : "s"} skipped` : ""}.`);
+  } catch (error) {
+    el.transactionImportError.textContent = friendlyError(error);
+    el.importTransactionsButton.disabled = false;
+  }
+}
+
+async function insertImportedCategories(rows) {
+  if (mode === "cloud") {
+    setSyncStatus("syncing", "Creating categories");
+    const { data, error } = await supabase.from("categories").insert(rows.map((row) => ({ ...row, user_id: user.id }))).select();
+    if (error) throw error;
+    state.categories.push(...(data || []));
+  } else {
+    state.categories.push(...rows.map(localRow));
+  }
+}
+
+async function insertImportedTransactions(rows) {
+  if (mode === "cloud") {
+    setSyncStatus("syncing", "Importing transactions");
+    for (const batch of chunk(rows, 200)) {
+      const { data, error } = await supabase.from("transactions").insert(batch.map((row) => ({ ...row, user_id: user.id }))).select();
+      if (error) throw error;
+      state.transactions.push(...(data || []));
+    }
+    setSyncStatus("cloud", "Cloud synchronized");
+  } else {
+    state.transactions.push(...rows.map(localRow));
+  }
+}
+
+function normalizeImportType(value) {
+  const normalized = String(value ?? "").trim().toLowerCase();
+  return ["expense", "income", "transfer"].includes(normalized) ? normalized : "";
+}
+
+function parseImportDate(value) {
+  if (value instanceof Date && !Number.isNaN(value.getTime())) {
+    return `${value.getFullYear()}-${String(value.getMonth() + 1).padStart(2, "0")}-${String(value.getDate()).padStart(2, "0")}`;
+  }
+  const raw = String(value ?? "").trim();
+  if (!raw) return "";
+  let match = raw.match(/^(\d{4})[-\/.](\d{1,2})[-\/.](\d{1,2})$/);
+  if (match) return validISODate(Number(match[1]), Number(match[2]), Number(match[3]));
+  match = raw.match(/^(\d{1,2})[-\/.](\d{1,2})[-\/.](\d{2}|\d{4})$/);
+  if (match) {
+    let year = Number(match[3]);
+    if (year < 100) year += year >= 70 ? 1900 : 2000;
+    return validISODate(year, Number(match[2]), Number(match[1]));
+  }
+  const parsed = new Date(raw);
+  if (!Number.isNaN(parsed.getTime()) && /[A-Za-z]/.test(raw)) return validISODate(parsed.getFullYear(), parsed.getMonth() + 1, parsed.getDate());
+  return "";
+}
+
+function validISODate(year, month, day) {
+  const date = new Date(year, month - 1, day);
+  if (date.getFullYear() !== year || date.getMonth() !== month - 1 || date.getDate() !== day) return "";
+  return `${year}-${String(month).padStart(2, "0")}-${String(day).padStart(2, "0")}`;
+}
+
+function parseImportAmount(value) {
+  if (typeof value === "number") return Number.isFinite(value) ? Math.round(Math.abs(value) * 100) / 100 : 0;
+  let raw = String(value ?? "").trim();
+  if (!raw) return 0;
+  const parenthesized = /^\(.*\)$/.test(raw);
+  raw = raw.replace(/[()]/g, "").replace(/,/g, "").replace(/[^0-9.+-]/g, "");
+  const parsed = Number(raw);
+  if (!Number.isFinite(parsed)) return 0;
+  return Math.round(Math.abs(parenthesized ? -parsed : parsed) * 100) / 100;
+}
+
+function normalizeLookup(value) {
+  return String(value ?? "").trim().replace(/\s+/g, " ").toLowerCase();
+}
+
+function transactionFingerprintFromState(transaction) {
+  return transactionFingerprintFromImport({
+    type: transaction.type,
+    amount: number(transaction.amount),
+    entry_date: transaction.entry_date,
+    description: transaction.description || "",
+    categoryName: categoryById(transaction.category_id)?.name || "",
+    accountName: accountById(transaction.account_id)?.name || "",
+    fromAccountName: accountById(transaction.from_account_id)?.name || "",
+    toAccountName: accountById(transaction.to_account_id)?.name || "",
+  });
+}
+
+function transactionFingerprintFromImport(transaction) {
+  return [
+    transaction.entry_date || "",
+    transaction.type || "",
+    number(transaction.amount).toFixed(2),
+    normalizeLookup(transaction.description),
+    normalizeLookup(transaction.categoryName),
+    normalizeLookup(transaction.accountName),
+    normalizeLookup(transaction.fromAccountName),
+    normalizeLookup(transaction.toAccountName),
+  ].join("|");
+}
+
+function importCategoryColor(name) {
+  const palette = ["#2563eb", "#059669", "#d97706", "#7c3aed", "#db2777", "#0891b2", "#dc2626", "#65a30d", "#475569"];
+  let hash = 0;
+  for (const character of String(name || "")) hash = ((hash << 5) - hash + character.charCodeAt(0)) | 0;
+  return palette[Math.abs(hash) % palette.length];
+}
+
+function chunk(items, size) {
+  const batches = [];
+  for (let index = 0; index < items.length; index += size) batches.push(items.slice(index, index + size));
+  return batches;
 }
 
 function exportJSON() {
