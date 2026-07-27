@@ -39,6 +39,11 @@ create table if not exists public.transactions (
   amount numeric(14,2) not null check (amount > 0),
   entry_date date not null default current_date,
   description text not null default '' check (char_length(description) <= 120),
+  remarks text not null default '' check (char_length(remarks) <= 2000),
+  receipt_path text,
+  receipt_name text check (receipt_name is null or char_length(receipt_name) <= 255),
+  receipt_mime_type text check (receipt_mime_type is null or char_length(receipt_mime_type) <= 100),
+  receipt_size bigint check (receipt_size is null or receipt_size between 0 and 8388608),
   category_id uuid,
   account_id uuid,
   from_account_id uuid,
@@ -49,6 +54,7 @@ create table if not exists public.transactions (
   constraint transactions_account_owner_fk foreign key (account_id, user_id) references public.accounts(id, user_id) on delete restrict,
   constraint transactions_from_account_owner_fk foreign key (from_account_id, user_id) references public.accounts(id, user_id) on delete restrict,
   constraint transactions_to_account_owner_fk foreign key (to_account_id, user_id) references public.accounts(id, user_id) on delete restrict,
+  constraint transactions_receipt_path_owner_check check (receipt_path is null or receipt_path like user_id::text || '/%'),
   constraint transaction_shape_check check (
     (type in ('expense', 'income') and account_id is not null and category_id is not null and from_account_id is null and to_account_id is null)
     or
@@ -128,3 +134,27 @@ with check ((select auth.uid()) = user_id);
 
 revoke all on public.accounts, public.categories, public.transactions, public.budgets from anon;
 grant select, insert, update, delete on public.accounts, public.categories, public.transactions, public.budgets to authenticated;
+
+
+-- Private Supabase Storage bucket for receipt images.
+insert into storage.buckets (id, name, public, file_size_limit, allowed_mime_types)
+values ('receipts', 'receipts', false, 8388608, array['image/jpeg', 'image/png', 'image/webp', 'image/heic', 'image/heif'])
+on conflict (id) do update
+set public = false, file_size_limit = excluded.file_size_limit, allowed_mime_types = excluded.allowed_mime_types;
+
+drop policy if exists "Users upload their own receipts" on storage.objects;
+create policy "Users upload their own receipts" on storage.objects for insert to authenticated
+with check (bucket_id = 'receipts' and (storage.foldername(name))[1] = (select auth.uid()::text));
+
+drop policy if exists "Users read their own receipts" on storage.objects;
+create policy "Users read their own receipts" on storage.objects for select to authenticated
+using (bucket_id = 'receipts' and (storage.foldername(name))[1] = (select auth.uid()::text));
+
+drop policy if exists "Users update their own receipts" on storage.objects;
+create policy "Users update their own receipts" on storage.objects for update to authenticated
+using (bucket_id = 'receipts' and (storage.foldername(name))[1] = (select auth.uid()::text))
+with check (bucket_id = 'receipts' and (storage.foldername(name))[1] = (select auth.uid()::text));
+
+drop policy if exists "Users delete their own receipts" on storage.objects;
+create policy "Users delete their own receipts" on storage.objects for delete to authenticated
+using (bucket_id = 'receipts' and (storage.foldername(name))[1] = (select auth.uid()::text));
