@@ -8,7 +8,7 @@
   <title>Ledgerly — Personal Finance</title>
   <link rel="manifest" href="manifest.webmanifest" />
   <link rel="icon" type="image/png" href="assets/dirham-symbol.png" />
-  <link rel="stylesheet" href="styles.css?v=7" />
+  <link rel="stylesheet" href="styles.css?v=8" />
 </head>
 <body>
   <section class="auth-screen" id="authScreen">
@@ -69,6 +69,7 @@
         <button class="nav-item active" data-view="dashboard"><span>⌂</span> Dashboard</button>
         <button class="nav-item" data-view="accounts"><span>▣</span> Accounts</button>
         <button class="nav-item" data-view="transactions"><span>↕</span> Transactions</button>
+        <button class="nav-item" data-view="reconcile"><span>✓</span> Reconcile</button>
         <button class="nav-item" data-view="calendar"><span>▦</span> Calendar</button>
         <button class="nav-item" data-view="recurring"><span>↻</span> Recurring</button>
         <button class="nav-item" data-view="budgets"><span>◎</span> Budgets</button>
@@ -220,6 +221,53 @@
         </section>
       </section>
 
+      <section class="view" id="reconcileView">
+        <div class="section-toolbar">
+          <div>
+            <p class="section-copy">Compare Ledgerly with a bank or credit-card statement, mark the transactions that have cleared, and finish only when the difference is zero.</p>
+            <p class="section-note">For credit cards, enter the statement balance as a negative amount, matching the way the card balance appears in Ledgerly.</p>
+          </div>
+        </div>
+
+        <section class="panel reconciliation-setup-panel">
+          <div class="panel-heading">
+            <div><p class="eyebrow">Statement</p><h2>Reconcile an account</h2></div>
+            <div class="reconciliation-last-status" id="reconcileLastStatus"></div>
+          </div>
+          <div class="reconciliation-form-grid">
+            <label class="field"><span>Account</span><select id="reconcileAccount"></select></label>
+            <label class="field"><span>Statement ending date</span><input id="reconcileStatementDate" type="date" required /></label>
+            <label class="field"><span>Statement ending balance</span><div class="money-input"><span class="aed-symbol" aria-hidden="true"></span><input id="reconcileStatementBalance" type="number" step="0.01" inputmode="decimal" placeholder="0.00" /></div></label>
+            <label class="field reconciliation-notes-field"><span>Statement note <span class="optional-label">Optional</span></span><input id="reconcileNotes" type="text" maxlength="300" placeholder="e.g. Visa statement ending August 2026" /></label>
+          </div>
+          <p class="form-error" id="reconcileFormError" role="alert"></p>
+        </section>
+
+        <div class="summary-grid reconciliation-summary-grid" id="reconcileSummary"></div>
+
+        <section class="panel reconciliation-transactions-panel">
+          <div class="panel-heading reconciliation-list-heading">
+            <div><p class="eyebrow">Statement activity</p><h2>Clear transactions</h2></div>
+            <div class="reconciliation-toolbar-actions">
+              <label class="compact-check"><input id="reconcileShowReconciled" type="checkbox" /> Show previously reconciled</label>
+              <button class="secondary-button" id="reconcileMarkAllButton" type="button">Mark all shown cleared</button>
+              <button class="secondary-button" id="reconcileUnclearAllButton" type="button">Unclear pending</button>
+            </div>
+          </div>
+          <div class="reconciliation-help">Tick only transactions that appear on the selected statement. Transfers can be reconciled independently for each account.</div>
+          <div id="reconcileTransactionsList"></div>
+          <div class="reconciliation-complete-bar">
+            <div><strong id="reconcileDifferenceLabel">Enter a statement balance</strong><span id="reconcileCompletionHint">The Finish button becomes available when the difference is zero.</span></div>
+            <button class="primary-button" id="completeReconciliationButton" type="button" disabled>Finish reconciliation</button>
+          </div>
+        </section>
+
+        <section class="panel">
+          <div class="panel-heading"><div><p class="eyebrow">Audit trail</p><h2>Reconciliation history</h2></div></div>
+          <div id="reconciliationHistory"></div>
+        </section>
+      </section>
+
       <section class="view" id="budgetsView">
         <div class="section-toolbar">
           <p class="section-copy">Set monthly or yearly maximum spending targets for expense categories and compare them with actual spending.</p>
@@ -269,7 +317,7 @@
           </section>
           <section class="panel">
             <div class="panel-heading"><div><p class="eyebrow">Exports</p><h2>Download your data</h2></div></div>
-            <p class="muted">JSON preserves accounts, categories, budgets, recurring schedules, and transactions. CSV creates a spreadsheet-friendly transaction list.</p>
+            <p class="muted">JSON preserves accounts, categories, budgets, recurring schedules, reconciliations, and transactions. CSV creates a spreadsheet-friendly transaction list.</p>
             <div class="button-row"><button class="secondary-button" id="exportButton">Export JSON backup</button><button class="secondary-button" id="exportCsvButton">Export transactions CSV</button></div>
           </section>
         </div>
@@ -282,14 +330,14 @@
           </section>
           <section class="panel danger-panel">
             <div class="panel-heading"><div><p class="eyebrow">Danger zone</p><h2>Reset financial data</h2></div></div>
-            <p class="muted">Deletes accounts, transactions, categories, budgets, and recurring schedules for the current user.</p>
+            <p class="muted">Deletes accounts, transactions, categories, budgets, recurring schedules, and reconciliation history for the current user.</p>
             <button class="danger-button" id="resetButton">Reset application</button>
           </section>
         </div>
 
         <section class="panel info-panel">
           <h2>How balances work</h2>
-          <p>Opening balance plus income minus expenses determines each account balance. Transfers reduce the source and increase the destination without changing total net worth. Credit-card purchases push the card balance further below zero; card payments move it toward zero.</p>
+          <p>Opening balance plus income minus expenses determines each account balance. Transfers reduce the source and increase the destination without changing total net worth. Credit-card purchases push the card balance further below zero; card payments move it toward zero. Reconciliation compares cleared activity with an external statement and does not change balances.</p>
         </section>
       </section>
     </main>

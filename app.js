@@ -55,6 +55,7 @@ let receiptPreviewObjectUrl = "";
 let calendarCursor = new Date(new Date().getFullYear(), new Date().getMonth(), 1);
 let selectedCalendarDate = todayISO();
 let postingRecurringEntries = false;
+let reconciliationBusy = false;
 
 const el = Object.fromEntries([...document.querySelectorAll("[id]")].map((node) => [node.id, node]));
 
@@ -67,6 +68,7 @@ async function initialize() {
   el.entryDate.value = todayISO();
   el.recurringStartDate.value = todayISO();
   el.reportMonth.value = todayISO().slice(0, 7);
+  el.reconcileStatementDate.value = todayISO();
   bindEvents();
 
   if (!configuredForCloud) {
@@ -143,6 +145,11 @@ function bindEvents() {
   el.openTransactionButton.addEventListener("click", () => openTransactionModal());
   el.openTransactionImportButton.addEventListener("click", openTransactionImportModal);
   el.openRecurringButton.addEventListener("click", () => openRecurringModal());
+  [el.reconcileAccount, el.reconcileStatementDate, el.reconcileStatementBalance].forEach((input) => input.addEventListener("input", renderReconciliation));
+  el.reconcileShowReconciled.addEventListener("change", renderReconciliation);
+  el.reconcileMarkAllButton.addEventListener("click", () => bulkSetReconciliationCleared(true));
+  el.reconcileUnclearAllButton.addEventListener("click", () => bulkSetReconciliationCleared(false));
+  el.completeReconciliationButton.addEventListener("click", completeReconciliation);
   el.calendarPreviousMonth.addEventListener("click", () => moveCalendarMonth(-1));
   el.calendarNextMonth.addEventListener("click", () => moveCalendarMonth(1));
   el.calendarTodayButton.addEventListener("click", showCalendarToday);
@@ -210,6 +217,9 @@ function bindEvents() {
       "toggle-recurring": () => toggleRecurringEntry(id),
       "post-recurring": () => postRecurringOccurrenceById(id, actionTarget.dataset.date),
       "delete-recurring": () => deleteRecurringEntry(id),
+      "open-reconcile-account": () => openReconciliationForAccount(id),
+      "toggle-reconciliation-cleared": () => toggleTransactionCleared(id, actionTarget.dataset.accountId),
+      "undo-reconciliation": () => undoReconciliation(id),
     };
     if (actions[action]) await actions[action]();
   });
@@ -310,23 +320,27 @@ function setAuthBusy(busy) {
 function showAuthError(message) { el.authError.textContent = message; }
 
 async function loadCloudState() {
-  const [accountsResult, categoriesResult, transactionsResult, budgetsResult, recurringResult] = await Promise.all([
+  const [accountsResult, categoriesResult, transactionsResult, budgetsResult, recurringResult, reconciliationsResult, clearingsResult] = await Promise.all([
     supabase.from("accounts").select("*").order("created_at", { ascending: true }),
     supabase.from("categories").select("*").order("kind").order("name"),
     supabase.from("transactions").select("*").order("entry_date", { ascending: false }).order("created_at", { ascending: false }),
     supabase.from("budgets").select("*").order("created_at", { ascending: true }),
     supabase.from("recurring_entries").select("*").order("created_at", { ascending: true }),
+    supabase.from("reconciliations").select("*").order("statement_date", { ascending: false }).order("completed_at", { ascending: false }),
+    supabase.from("transaction_clearings").select("*").order("created_at", { ascending: true }),
   ]);
-  [accountsResult, categoriesResult, transactionsResult, budgetsResult, recurringResult].forEach((result) => {
+  [accountsResult, categoriesResult, transactionsResult, budgetsResult, recurringResult, reconciliationsResult, clearingsResult].forEach((result) => {
     if (result.error) throw result.error;
   });
   state = {
-    version: 3,
+    version: 4,
     accounts: accountsResult.data || [],
     categories: categoriesResult.data || [],
     transactions: transactionsResult.data || [],
     budgets: budgetsResult.data || [],
     recurringEntries: recurringResult.data || [],
+    reconciliations: reconciliationsResult.data || [],
+    transactionClearings: clearingsResult.data || [],
   };
 }
 
@@ -338,23 +352,25 @@ async function seedDefaultCategories() {
 }
 
 function emptyState() {
-  return { version: 3, accounts: [], categories: [], transactions: [], budgets: [], recurringEntries: [] };
+  return { version: 4, accounts: [], categories: [], transactions: [], budgets: [], recurringEntries: [], reconciliations: [], transactionClearings: [] };
 }
 
 function normalizeState(value) {
   return {
-    version: 3,
+    version: 4,
     accounts: Array.isArray(value?.accounts) ? value.accounts : [],
     categories: Array.isArray(value?.categories) ? value.categories : [],
     transactions: Array.isArray(value?.transactions) ? value.transactions : [],
     budgets: Array.isArray(value?.budgets) ? value.budgets : [],
     recurringEntries: Array.isArray(value?.recurringEntries) ? value.recurringEntries : Array.isArray(value?.recurring_entries) ? value.recurring_entries : [],
+    reconciliations: Array.isArray(value?.reconciliations) ? value.reconciliations : [],
+    transactionClearings: Array.isArray(value?.transactionClearings) ? value.transactionClearings : Array.isArray(value?.transaction_clearings) ? value.transaction_clearings : [],
   };
 }
 
 function defaultLocalState() {
   return {
-    version: 3,
+    version: 4,
     accounts: [
       localRow({ name: "Current Account", type: "current", opening_balance: 0, color: ACCOUNT_COLORS.current, include_in_net_worth: true }),
       localRow({ name: "Savings", type: "savings", opening_balance: 0, color: ACCOUNT_COLORS.savings, include_in_net_worth: true }),
@@ -364,6 +380,8 @@ function defaultLocalState() {
     transactions: [],
     budgets: [],
     recurringEntries: [],
+    reconciliations: [],
+    transactionClearings: [],
   };
 }
 
@@ -434,7 +452,7 @@ function migrateLegacyState(legacy) {
       to_account_id: transaction.toAccountId || transaction.to_account_id || null,
     });
   });
-  return { version: 3, accounts, categories, transactions, budgets: [], recurringEntries: [] };
+  return { version: 4, accounts, categories, transactions, budgets: [], recurringEntries: [], reconciliations: [], transactionClearings: [] };
 }
 
 function persistLocal() {
@@ -483,10 +501,11 @@ function switchView(view) {
   activeView = view;
   document.querySelectorAll(".view").forEach((section) => section.classList.toggle("active", section.id === `${view}View`));
   document.querySelectorAll(".nav-item").forEach((button) => button.classList.toggle("active", button.dataset.view === view));
-  const titles = { dashboard: "Dashboard", accounts: "Accounts", transactions: "Transactions", calendar: "Calendar", recurring: "Recurring", budgets: "Budgets", reports: "Reports", categories: "Categories", settings: "Data & settings" };
+  const titles = { dashboard: "Dashboard", accounts: "Accounts", transactions: "Transactions", reconcile: "Reconcile", calendar: "Calendar", recurring: "Recurring", budgets: "Budgets", reports: "Reports", categories: "Categories", settings: "Data & settings" };
   el.pageTitle.textContent = titles[view] || "Ledgerly";
   el.sidebar.classList.remove("open");
   if (view === "reports") renderReports();
+  if (view === "reconcile") renderReconciliation();
   if (view === "calendar") renderCalendar();
   if (view === "recurring") renderRecurringEntries();
 }
@@ -496,6 +515,7 @@ function render() {
   renderSummary();
   renderAccounts();
   renderTransactions();
+  renderReconciliation();
   renderCalendar();
   renderRecurringEntries();
   renderCategoryChart();
@@ -545,6 +565,7 @@ function renderAccounts() {
         <h3>${escapeHTML(account.name)}</h3>
         <p class="large-balance">${formatMoneyHTML(balance)}</p>
         <p class="opening-balance">Starting balance: ${formatMoneyHTML(number(account.opening_balance))}${account.include_in_net_worth === false ? " · excluded from net worth" : ""}</p>
+        <button class="account-reconcile-button" data-action="open-reconcile-account" data-id="${account.id}" type="button">✓ Reconcile account</button>
       </article>`;
   }).join("");
 }
@@ -592,11 +613,12 @@ function transactionListHTML(items, showActions) {
     const subtitle = transaction.type === "transfer" ? transactionAccountText(transaction) : `${category?.name || "Uncategorized"} · ${transactionAccountText(transaction)}`;
     const sign = transaction.type === "expense" ? "−" : transaction.type === "income" ? "+" : "";
     const remarks = String(transaction.remarks || "").trim();
+    const reconciliationBadge = transactionReconciliationBadgeHTML(transaction);
     const receiptAction = transaction.receipt_path ? `<button class="row-action receipt-action" data-action="open-receipt" data-id="${transaction.id}" aria-label="Open receipt" title="Open receipt">▧</button>` : "";
     return `<div class="transaction-row">
       <div class="transaction-main">
         <span class="transaction-icon ${transaction.type}">${transaction.type === "expense" ? "↓" : transaction.type === "income" ? "↑" : "⇄"}</span>
-        <div style="min-width:0"><div class="transaction-title">${escapeHTML(title)}</div><div class="transaction-subtitle">${escapeHTML(subtitle)}${transaction.recurring_entry_id ? ' · <span class="recurring-indicator">Recurring</span>' : ""}${transaction.receipt_path ? ' · <span class="receipt-indicator">Receipt</span>' : ""}</div>${remarks ? `<div class="transaction-remarks">${escapeHTML(remarks)}</div>` : ""}</div>
+        <div style="min-width:0"><div class="transaction-title">${escapeHTML(title)}</div><div class="transaction-subtitle">${escapeHTML(subtitle)}${transaction.recurring_entry_id ? ' · <span class="recurring-indicator">Recurring</span>' : ""}${transaction.receipt_path ? ' · <span class="receipt-indicator">Receipt</span>' : ""}${reconciliationBadge}</div>${remarks ? `<div class="transaction-remarks">${escapeHTML(remarks)}</div>` : ""}</div>
       </div>
       <div class="transaction-meta account-column">${escapeHTML(transactionAccountText(transaction))}</div>
       <div class="transaction-meta">${formatDate(transaction.entry_date)}</div>
@@ -605,6 +627,402 @@ function transactionListHTML(items, showActions) {
     </div>`;
   }).join("")}</div>`;
 }
+
+function openReconciliationForAccount(accountId) {
+  if (!state.accounts.some((account) => account.id === accountId)) return;
+  switchView("reconcile");
+  el.reconcileAccount.value = accountId;
+  el.reconcileStatementBalance.value = "";
+  el.reconcileNotes.value = "";
+  renderReconciliation();
+  window.scrollTo({ top: 0, behavior: "smooth" });
+}
+
+function renderReconciliation() {
+  if (!el.reconcileSummary) return;
+  if (!state.accounts.length) {
+    el.reconcileAccount.innerHTML = '<option value="">No accounts available</option>';
+    el.reconcileSummary.innerHTML = "";
+    el.reconcileTransactionsList.innerHTML = emptyHTML("No accounts to reconcile", "Add an account first, then return here with a statement balance.");
+    el.reconciliationHistory.innerHTML = emptyHTML("No reconciliation history", "Completed reconciliations will appear here.");
+    el.reconcileLastStatus.textContent = "";
+    el.completeReconciliationButton.disabled = true;
+    return;
+  }
+
+  if (!state.accounts.some((account) => account.id === el.reconcileAccount.value)) {
+    el.reconcileAccount.value = state.accounts[0].id;
+  }
+  const accountId = el.reconcileAccount.value;
+  const account = accountById(accountId);
+  const statementDate = el.reconcileStatementDate.value || todayISO();
+  const hasStatementBalance = String(el.reconcileStatementBalance.value || "").trim() !== "";
+  const statementBalance = number(el.reconcileStatementBalance.value);
+  const ledgerBalance = calculateAccountBalance(accountId, statementDate);
+  const clearedBalance = calculateClearedBalance(accountId, statementDate);
+  const difference = hasStatementBalance ? statementBalance - clearedBalance : null;
+  const allTransactions = reconciliationTransactions(accountId, statementDate);
+  const pendingCount = allTransactions.filter((transaction) => {
+    const clearing = clearingFor(transaction.id, accountId);
+    return !clearing?.reconciliation_id && !clearing?.is_cleared;
+  }).length;
+  const clearedPendingCount = allTransactions.filter((transaction) => {
+    const clearing = clearingFor(transaction.id, accountId);
+    return !clearing?.reconciliation_id && clearing?.is_cleared;
+  }).length;
+
+  el.reconcileSummary.innerHTML = [
+    reconciliationMoneyCard("Book balance", ledgerBalance, `All entries through ${formatDate(statementDate)}`, tone(ledgerBalance)),
+    reconciliationMoneyCard("Cleared balance", clearedBalance, `${clearedPendingCount} newly cleared transaction${clearedPendingCount === 1 ? "" : "s"}`, tone(clearedBalance)),
+    reconciliationMoneyCard("Statement balance", statementBalance, hasStatementBalance ? `Ending ${formatDate(statementDate)}` : "Enter the balance from your statement", tone(statementBalance), hasStatementBalance),
+    reconciliationMoneyCard("Difference", difference || 0, hasStatementBalance ? "Statement minus cleared balance" : "Waiting for statement balance", difference === null ? "" : Math.abs(difference) < 0.005 ? "positive" : "negative", difference !== null),
+  ].join("");
+
+  const last = latestReconciliation(accountId);
+  const statementDateIsNew = !last || statementDate > last.statement_date;
+  el.reconcileLastStatus.innerHTML = last
+    ? `<span class="reconciliation-status-badge">Last reconciled ${formatDate(last.statement_date)} · ${formatMoneyHTML(last.statement_balance)}</span>`
+    : '<span class="reconciliation-status-badge pending">Not reconciled yet</span>';
+
+  const showReconciled = el.reconcileShowReconciled.checked;
+  const visibleTransactions = allTransactions.filter((transaction) => showReconciled || !clearingFor(transaction.id, accountId)?.reconciliation_id);
+  el.reconcileTransactionsList.innerHTML = visibleTransactions.length
+    ? `<div class="reconciliation-transaction-list">${visibleTransactions.map((transaction) => reconciliationTransactionHTML(transaction, accountId)).join("")}</div>`
+    : emptyHTML(showReconciled ? "No transactions through this date" : "No pending transactions", showReconciled ? "Add entries or choose a later statement date." : "All transactions through this date have already been reconciled.");
+
+  const canFinish = hasStatementBalance && Math.abs(difference) < 0.005 && statementDateIsNew && !reconciliationBusy;
+  el.completeReconciliationButton.disabled = !canFinish;
+  el.reconcileMarkAllButton.disabled = reconciliationBusy || !visibleTransactions.some((transaction) => !clearingFor(transaction.id, accountId)?.reconciliation_id);
+  el.reconcileUnclearAllButton.disabled = reconciliationBusy || !allTransactions.some((transaction) => {
+    const clearing = clearingFor(transaction.id, accountId);
+    return clearing?.is_cleared && !clearing?.reconciliation_id;
+  });
+  if (!statementDateIsNew) {
+    el.reconcileDifferenceLabel.textContent = "Choose a date after the last reconciliation";
+    el.reconcileCompletionHint.textContent = `The latest completed statement ends ${formatDate(last.statement_date)}.`;
+  } else if (!hasStatementBalance) {
+    el.reconcileDifferenceLabel.textContent = "Enter a statement balance";
+    el.reconcileCompletionHint.textContent = `${pendingCount} transaction${pendingCount === 1 ? "" : "s"} not yet cleared.`;
+  } else if (Math.abs(difference) < 0.005) {
+    el.reconcileDifferenceLabel.textContent = "Difference is zero — ready to finish";
+    el.reconcileCompletionHint.textContent = "Finishing locks the cleared transactions into this statement history.";
+  } else {
+    el.reconcileDifferenceLabel.textContent = `${formatMoneyText(difference)} difference remaining`;
+    el.reconcileCompletionHint.textContent = difference > 0 ? "The statement is higher than the cleared balance. Look for missing income or an uncleared debit." : "The statement is lower than the cleared balance. Look for missing expenses or an incorrectly cleared entry.";
+  }
+
+  renderReconciliationHistory(accountId);
+}
+
+function reconciliationMoneyCard(label, value, detail, className = "", hasValue = true) {
+  const display = hasValue ? formatMoneyHTML(value) : '<span class="reconciliation-not-entered">—</span>';
+  return `<article class="summary-card"><p class="card-label">${escapeHTML(label)}</p><p class="card-value ${className}">${display}</p><p class="card-detail">${escapeHTML(detail)}</p></article>`;
+}
+
+function reconciliationTransactions(accountId, statementDate) {
+  return sortedTransactions().filter((transaction) => transaction.entry_date <= statementDate && transactionEffectForAccount(transaction, accountId) !== 0);
+}
+
+function reconciliationTransactionHTML(transaction, accountId) {
+  const clearing = clearingFor(transaction.id, accountId);
+  const reconciled = Boolean(clearing?.reconciliation_id);
+  const checked = Boolean(clearing?.is_cleared);
+  const effect = transactionEffectForAccount(transaction, accountId);
+  const category = categoryById(transaction.category_id);
+  const title = transaction.description || (transaction.type === "transfer" ? "Account transfer" : category?.name || capitalize(transaction.type));
+  const subtitle = transaction.type === "transfer"
+    ? reconciliationTransferText(transaction, accountId)
+    : `${category?.name || "Uncategorized"} · ${formatDate(transaction.entry_date)}`;
+  const reconciliation = reconciled ? reconciliationById(clearing.reconciliation_id) : null;
+  const status = reconciled
+    ? `<span class="reconciliation-row-status reconciled">Reconciled ${reconciliation ? formatDate(reconciliation.statement_date) : ""}</span>`
+    : checked
+      ? '<span class="reconciliation-row-status cleared">Cleared</span>'
+      : '<span class="reconciliation-row-status outstanding">Outstanding</span>';
+  return `<div class="reconciliation-transaction-row ${reconciled ? "locked" : ""}">
+    <label class="reconciliation-check" title="${reconciled ? "Undo the reconciliation to change this item" : checked ? "Mark as outstanding" : "Mark as cleared"}">
+      <input type="checkbox" ${checked ? "checked" : ""} ${reconciled || reconciliationBusy ? "disabled" : ""} data-action="toggle-reconciliation-cleared" data-id="${transaction.id}" data-account-id="${accountId}" />
+      <span aria-hidden="true"></span>
+    </label>
+    <span class="transaction-icon ${transaction.type}">${transaction.type === "expense" ? "↓" : transaction.type === "income" ? "↑" : "⇄"}</span>
+    <div class="reconciliation-transaction-copy"><strong>${escapeHTML(title)}</strong><span>${escapeHTML(subtitle)}</span>${transaction.remarks ? `<small>${escapeHTML(transaction.remarks)}</small>` : ""}</div>
+    <div class="reconciliation-row-status-wrap">${status}</div>
+    <div class="reconciliation-effect ${tone(effect)}">${effect > 0 ? "+" : effect < 0 ? "−" : ""}${formatMoneyHTML(Math.abs(effect))}</div>
+  </div>`;
+}
+
+function reconciliationTransferText(transaction, accountId) {
+  if (transaction.from_account_id === accountId) return `Transfer to ${accountById(transaction.to_account_id)?.name || "Unknown account"} · ${formatDate(transaction.entry_date)}`;
+  return `Transfer from ${accountById(transaction.from_account_id)?.name || "Unknown account"} · ${formatDate(transaction.entry_date)}`;
+}
+
+function renderReconciliationHistory(accountId) {
+  const history = [...state.reconciliations]
+    .filter((item) => item.account_id === accountId)
+    .sort((a, b) => String(b.statement_date).localeCompare(String(a.statement_date)) || String(b.completed_at).localeCompare(String(a.completed_at)));
+  if (!history.length) {
+    el.reconciliationHistory.innerHTML = emptyHTML("No completed reconciliations", "When the difference reaches zero, finish the reconciliation to create an audit record.");
+    return;
+  }
+  el.reconciliationHistory.innerHTML = `<div class="reconciliation-history-list">${history.map((item) => {
+    const transactionCount = state.transactionClearings.filter((clearing) => clearing.reconciliation_id === item.id).length;
+    return `<article class="reconciliation-history-row">
+      <div class="reconciliation-history-date"><strong>${formatDate(item.statement_date)}</strong><span>${escapeHTML(item.notes || "Statement reconciliation")}</span></div>
+      <div><span class="history-label">Statement</span><strong>${formatMoneyHTML(item.statement_balance)}</strong></div>
+      <div><span class="history-label">Book balance</span><strong>${formatMoneyHTML(item.ledger_balance)}</strong></div>
+      <div><span class="history-label">Transactions</span><strong>${transactionCount.toLocaleString("en-AE")}</strong></div>
+      <button class="row-action wide danger" data-action="undo-reconciliation" data-id="${item.id}" type="button">Undo</button>
+    </article>`;
+  }).join("")}</div>`;
+}
+
+async function toggleTransactionCleared(transactionId, accountId) {
+  if (reconciliationBusy) return;
+  const transaction = state.transactions.find((item) => item.id === transactionId);
+  if (!transaction || transactionEffectForAccount(transaction, accountId) === 0) return;
+  const existing = clearingFor(transactionId, accountId);
+  if (existing?.reconciliation_id) return showToast("This transaction is locked by a completed reconciliation.", true);
+  await saveClearingStates([{ transactionId, accountId }], !existing?.is_cleared);
+}
+
+async function bulkSetReconciliationCleared(isCleared) {
+  if (reconciliationBusy) return;
+  const accountId = el.reconcileAccount.value;
+  const statementDate = el.reconcileStatementDate.value || todayISO();
+  const pairs = reconciliationTransactions(accountId, statementDate)
+    .filter((transaction) => {
+      const clearing = clearingFor(transaction.id, accountId);
+      return !clearing?.reconciliation_id && Boolean(clearing?.is_cleared) !== isCleared;
+    })
+    .map((transaction) => ({ transactionId: transaction.id, accountId }));
+  if (!pairs.length) return;
+  await saveClearingStates(pairs, isCleared);
+}
+
+async function saveClearingStates(pairs, isCleared) {
+  reconciliationBusy = true;
+  renderReconciliation();
+  const now = new Date().toISOString();
+  try {
+    if (mode === "cloud") {
+      setSyncStatus("syncing", "Saving cleared transactions");
+      const rows = pairs.map(({ transactionId, accountId }) => ({
+        user_id: user.id,
+        transaction_id: transactionId,
+        account_id: accountId,
+        is_cleared: isCleared,
+        cleared_at: isCleared ? now : null,
+        reconciliation_id: null,
+      }));
+      const { data, error } = await supabase.from("transaction_clearings")
+        .upsert(rows, { onConflict: "user_id,transaction_id,account_id" })
+        .select();
+      if (error) throw error;
+      mergeTransactionClearings(data || []);
+      setSyncStatus("cloud", "Cloud synchronized");
+    } else {
+      pairs.forEach(({ transactionId, accountId }) => {
+        const index = state.transactionClearings.findIndex((item) => item.transaction_id === transactionId && item.account_id === accountId);
+        if (index >= 0) {
+          state.transactionClearings[index] = { ...state.transactionClearings[index], is_cleared: isCleared, cleared_at: isCleared ? now : null, reconciliation_id: null, updated_at: now };
+        } else {
+          state.transactionClearings.push(localRow({ transaction_id: transactionId, account_id: accountId, is_cleared: isCleared, cleared_at: isCleared ? now : null, reconciliation_id: null }));
+        }
+      });
+      persistLocal();
+    }
+  } catch (error) {
+    setSyncStatus(mode === "cloud" ? "local" : "local", mode === "cloud" ? "Sync error" : "Local browser only");
+    showToast(friendlyError(error), true);
+  } finally {
+    reconciliationBusy = false;
+    render();
+  }
+}
+
+function mergeTransactionClearings(rows) {
+  const incoming = new Map(rows.map((row) => [`${row.transaction_id}:${row.account_id}`, row]));
+  state.transactionClearings = state.transactionClearings.map((row) => incoming.get(`${row.transaction_id}:${row.account_id}`) || row);
+  const existingKeys = new Set(state.transactionClearings.map((row) => `${row.transaction_id}:${row.account_id}`));
+  rows.forEach((row) => {
+    const key = `${row.transaction_id}:${row.account_id}`;
+    if (!existingKeys.has(key)) state.transactionClearings.push(row);
+  });
+}
+
+async function completeReconciliation() {
+  if (reconciliationBusy) return;
+  el.reconcileFormError.textContent = "";
+  const accountId = el.reconcileAccount.value;
+  const statementDate = el.reconcileStatementDate.value;
+  const balanceText = String(el.reconcileStatementBalance.value || "").trim();
+  const notes = el.reconcileNotes.value.trim();
+  if (!accountId) return showFormError(el.reconcileFormError, "Choose an account.");
+  if (!statementDate) return showFormError(el.reconcileFormError, "Choose the statement ending date.");
+  if (!balanceText) return showFormError(el.reconcileFormError, "Enter the statement ending balance.");
+  if (notes.length > 300) return showFormError(el.reconcileFormError, "Statement note must be 300 characters or fewer.");
+  const last = latestReconciliation(accountId);
+  if (last && statementDate <= last.statement_date) return showFormError(el.reconcileFormError, `Choose a statement date after ${formatDate(last.statement_date)}, or undo that reconciliation first.`);
+  const statementBalance = number(balanceText);
+  const clearedBalance = calculateClearedBalance(accountId, statementDate);
+  const ledgerBalance = calculateAccountBalance(accountId, statementDate);
+  const difference = statementBalance - clearedBalance;
+  if (Math.abs(difference) >= 0.005) return showFormError(el.reconcileFormError, `The difference must be zero before finishing. Current difference: ${formatMoneyText(difference)}.`);
+
+  const pendingClearings = state.transactionClearings.filter((clearing) => {
+    if (clearing.account_id !== accountId || !clearing.is_cleared || clearing.reconciliation_id) return false;
+    const transaction = state.transactions.find((item) => item.id === clearing.transaction_id);
+    return transaction && transaction.entry_date <= statementDate && transactionEffectForAccount(transaction, accountId) !== 0;
+  });
+  const row = {
+    account_id: accountId,
+    statement_date: statementDate,
+    statement_balance: statementBalance,
+    cleared_balance: clearedBalance,
+    ledger_balance: ledgerBalance,
+    difference,
+    notes,
+    completed_at: new Date().toISOString(),
+  };
+
+  reconciliationBusy = true;
+  renderReconciliation();
+  let inserted = null;
+  try {
+    inserted = await insertRow("reconciliations", row);
+    const clearingIds = pendingClearings.map((item) => item.id);
+    if (mode === "cloud" && clearingIds.length) {
+      setSyncStatus("syncing", "Finishing reconciliation");
+      const { data, error } = await supabase.from("transaction_clearings")
+        .update({ reconciliation_id: inserted.id, cleared_at: new Date().toISOString() })
+        .in("id", clearingIds)
+        .select();
+      if (error) throw error;
+      mergeTransactionClearings(data || []);
+      setSyncStatus("cloud", "Cloud synchronized");
+    } else if (mode === "local") {
+      state.transactionClearings = state.transactionClearings.map((item) => clearingIds.includes(item.id) ? { ...item, reconciliation_id: inserted.id, updated_at: new Date().toISOString() } : item);
+    }
+    state.reconciliations.unshift(inserted);
+    persistLocal();
+    el.reconcileStatementBalance.value = "";
+    el.reconcileNotes.value = "";
+    showToast(`Reconciliation completed for ${accountById(accountId)?.name || "account"}.`);
+  } catch (error) {
+    if (inserted?.id) {
+      try { await deleteRow("reconciliations", inserted.id); } catch (rollbackError) { console.warn("Could not roll back reconciliation", rollbackError); }
+    }
+    showFormError(el.reconcileFormError, friendlyError(error));
+  } finally {
+    reconciliationBusy = false;
+    render();
+  }
+}
+
+async function undoReconciliation(id) {
+  if (reconciliationBusy) return;
+  const reconciliation = reconciliationById(id);
+  if (!reconciliation) return;
+  const account = accountById(reconciliation.account_id);
+  if (!confirm(`Undo the ${formatDate(reconciliation.statement_date)} reconciliation for ${account?.name || "this account"}? The linked transactions will become outstanding again.`)) return;
+  reconciliationBusy = true;
+  try {
+    if (mode === "cloud") {
+      setSyncStatus("syncing", "Undoing reconciliation");
+      const { data, error } = await supabase.from("transaction_clearings")
+        .update({ reconciliation_id: null, is_cleared: false, cleared_at: null })
+        .eq("reconciliation_id", id)
+        .select();
+      if (error) throw error;
+      mergeTransactionClearings(data || []);
+      await deleteRow("reconciliations", id);
+      setSyncStatus("cloud", "Cloud synchronized");
+    } else {
+      state.transactionClearings = state.transactionClearings.map((item) => item.reconciliation_id === id ? { ...item, reconciliation_id: null, is_cleared: false, cleared_at: null, updated_at: new Date().toISOString() } : item);
+    }
+    state.reconciliations = state.reconciliations.filter((item) => item.id !== id);
+    persistLocal();
+    el.reconcileAccount.value = reconciliation.account_id;
+    el.reconcileStatementDate.value = reconciliation.statement_date;
+    el.reconcileStatementBalance.value = number(reconciliation.statement_balance).toFixed(2);
+    el.reconcileNotes.value = reconciliation.notes || "";
+    showToast("Reconciliation undone. Review the transactions and finish again when ready.");
+  } catch (error) {
+    showToast(friendlyError(error), true);
+  } finally {
+    reconciliationBusy = false;
+    render();
+  }
+}
+
+function calculateClearedBalance(accountId, throughDate) {
+  const account = accountById(accountId);
+  if (!account) return 0;
+  return state.transactions.reduce((balance, transaction) => {
+    if (throughDate && transaction.entry_date > throughDate) return balance;
+    const effect = transactionEffectForAccount(transaction, accountId);
+    if (!effect) return balance;
+    const clearing = clearingFor(transaction.id, accountId);
+    return clearing?.is_cleared ? balance + effect : balance;
+  }, number(account.opening_balance));
+}
+
+function transactionEffectForAccount(transaction, accountId) {
+  const amount = number(transaction.amount);
+  if (transaction.type === "income" && transaction.account_id === accountId) return amount;
+  if (transaction.type === "expense" && transaction.account_id === accountId) return -amount;
+  if (transaction.type === "transfer" && transaction.from_account_id === accountId) return -amount;
+  if (transaction.type === "transfer" && transaction.to_account_id === accountId) return amount;
+  return 0;
+}
+
+function affectedAccountIds(transaction) {
+  return transaction.type === "transfer"
+    ? [transaction.from_account_id, transaction.to_account_id].filter(Boolean)
+    : [transaction.account_id].filter(Boolean);
+}
+
+function clearingFor(transactionId, accountId) {
+  return state.transactionClearings.find((item) => item.transaction_id === transactionId && item.account_id === accountId);
+}
+
+function reconciliationById(id) {
+  return state.reconciliations.find((item) => item.id === id);
+}
+
+function latestReconciliation(accountId) {
+  return [...state.reconciliations]
+    .filter((item) => item.account_id === accountId)
+    .sort((a, b) => String(b.statement_date).localeCompare(String(a.statement_date)) || String(b.completed_at).localeCompare(String(a.completed_at)))[0] || null;
+}
+
+function transactionHasReconciledSide(transaction) {
+  return affectedAccountIds(transaction).some((accountId) => Boolean(clearingFor(transaction.id, accountId)?.reconciliation_id));
+}
+
+function transactionReconciliationBadgeHTML(transaction) {
+  const statuses = affectedAccountIds(transaction).map((accountId) => clearingFor(transaction.id, accountId)).filter(Boolean);
+  if (!statuses.length) return "";
+  const reconciledCount = statuses.filter((item) => item.reconciliation_id).length;
+  const clearedCount = statuses.filter((item) => item.is_cleared).length;
+  if (reconciledCount === affectedAccountIds(transaction).length) return ' · <span class="reconciled-indicator">Reconciled</span>';
+  if (reconciledCount) return ' · <span class="reconciled-indicator partial">Partly reconciled</span>';
+  if (clearedCount) return ' · <span class="cleared-indicator">Cleared</span>';
+  return "";
+}
+
+async function cleanupTransactionClearingsForTransaction(transactionId, transaction) {
+  const validAccounts = new Set(affectedAccountIds(transaction));
+  const stale = state.transactionClearings.filter((item) => item.transaction_id === transactionId && !validAccounts.has(item.account_id) && !item.reconciliation_id);
+  if (!stale.length) return;
+  if (mode === "cloud") {
+    const { error } = await supabase.from("transaction_clearings").delete().in("id", stale.map((item) => item.id));
+    if (error) throw error;
+  }
+  const staleIds = new Set(stale.map((item) => item.id));
+  state.transactionClearings = state.transactionClearings.filter((item) => !staleIds.has(item.id));
+}
+
 
 function renderCategoryChart() {
   const month = todayISO().slice(0, 7);
@@ -1321,6 +1739,9 @@ function renderSelectors() {
   const calendarAccountPrevious = el.calendarAccountFilter.value;
   el.calendarAccountFilter.innerHTML = `<option value="all">All accounts</option>${state.accounts.map((account) => `<option value="${account.id}">${escapeHTML(account.name)}</option>`).join("")}`;
   if ([...el.calendarAccountFilter.options].some((option) => option.value === calendarAccountPrevious)) el.calendarAccountFilter.value = calendarAccountPrevious;
+  const reconcileAccountPrevious = el.reconcileAccount.value;
+  el.reconcileAccount.innerHTML = state.accounts.map((account) => `<option value="${account.id}">${escapeHTML(account.name)} (${formatMoneyText(calculateAccountBalance(account.id))})</option>`).join("") || `<option value="">No accounts available</option>`;
+  if ([...el.reconcileAccount.options].some((option) => option.value === reconcileAccountPrevious)) el.reconcileAccount.value = reconcileAccountPrevious;
   const importAccountPrevious = el.importDefaultAccount.value;
   el.importDefaultAccount.innerHTML = `<option value="">Use account names from file</option>${state.accounts.map((account) => `<option value="${account.id}">${escapeHTML(account.name)}</option>`).join("")}`;
   if ([...el.importDefaultAccount.options].some((option) => option.value === importAccountPrevious)) el.importDefaultAccount.value = importAccountPrevious;
@@ -1369,6 +1790,7 @@ function openTransactionModal(id = null, presetDate = "") {
   if (id) {
     const transaction = state.transactions.find((item) => item.id === id);
     if (!transaction) return;
+    if (transactionHasReconciledSide(transaction)) return showToast("Undo the related reconciliation before editing this entry.", true);
     type = transaction.type;
     el.transactionId.value = id;
     el.entryAmount.value = number(transaction.amount);
@@ -1434,7 +1856,9 @@ async function handleTransactionSubmit(event) {
         receiptChanges = { receipt_path: null, receipt_name: null, receipt_mime_type: null, receipt_size: null };
       }
       const updated = await updateRow("transactions", id, { ...base, ...receiptChanges });
-      state.transactions = state.transactions.map((item) => item.id === id ? { ...item, ...updated } : item);
+      const mergedTransaction = { ...existing, ...updated };
+      state.transactions = state.transactions.map((item) => item.id === id ? mergedTransaction : item);
+      await cleanupTransactionClearingsForTransaction(id, mergedTransaction);
       if ((selectedReceiptFile || removeExistingReceipt) && existing?.receipt_path && existing.receipt_path !== updated.receipt_path) {
         await removeReceiptFile(existing.receipt_path, false);
       }
@@ -1800,8 +2224,8 @@ async function handleCategorySubmit(event) {
 async function deleteAccount(id) {
   const account = state.accounts.find((item) => item.id === id);
   if (!account) return;
-  const inUse = state.transactions.some((transaction) => [transaction.account_id, transaction.from_account_id, transaction.to_account_id].includes(id)) || state.recurringEntries.some((rule) => [rule.account_id, rule.from_account_id, rule.to_account_id].includes(id));
-  if (inUse) return showToast("Delete or move this account's transactions and recurring schedules first.", true);
+  const inUse = state.transactions.some((transaction) => [transaction.account_id, transaction.from_account_id, transaction.to_account_id].includes(id)) || state.recurringEntries.some((rule) => [rule.account_id, rule.from_account_id, rule.to_account_id].includes(id)) || state.reconciliations.some((item) => item.account_id === id);
+  if (inUse) return showToast("Delete or move this account's transactions, recurring schedules, and reconciliation history first.", true);
   if (!confirm(`Delete ${account.name}?`)) return;
   try {
     await deleteRow("accounts", id);
@@ -1812,6 +2236,7 @@ async function deleteAccount(id) {
 
 async function deleteTransaction(id) {
   const transaction = state.transactions.find((item) => item.id === id);
+  if (transaction && transactionHasReconciledSide(transaction)) return showToast("Undo the related reconciliation before deleting this entry.", true);
   const warning = transaction?.recurring_entry_id
     ? "Delete this entry? It came from a recurring schedule and may be posted again while that schedule remains active."
     : "Delete this entry?";
@@ -1819,6 +2244,7 @@ async function deleteTransaction(id) {
   try {
     await deleteRow("transactions", id);
     state.transactions = state.transactions.filter((item) => item.id !== id);
+    state.transactionClearings = state.transactionClearings.filter((item) => item.transaction_id !== id);
     const receiptRemoved = transaction?.receipt_path ? await removeReceiptFile(transaction.receipt_path, false) : true;
     persistLocal(); render();
     showToast(receiptRemoved ? "Entry deleted." : "Entry deleted, but its receipt file could not be cleaned up.", !receiptRemoved);
@@ -2374,7 +2800,7 @@ function exportJSON() {
 }
 
 function exportCSV() {
-  const header = ["Date", "Type", "Description", "Remarks", "Category", "Account", "From account", "To account", "Amount", "Currency", "Recurring schedule ID", "Scheduled date", "Receipt filename"];
+  const header = ["Date", "Type", "Description", "Remarks", "Category", "Account", "From account", "To account", "Amount", "Currency", "Cleared accounts", "Reconciled accounts", "Recurring schedule ID", "Scheduled date", "Receipt filename"];
   const rows = sortedTransactions().map((transaction) => [
     transaction.entry_date,
     transaction.type,
@@ -2386,6 +2812,8 @@ function exportCSV() {
     accountById(transaction.to_account_id)?.name || "",
     number(transaction.amount).toFixed(2),
     CURRENCY,
+    affectedAccountIds(transaction).filter((accountId) => clearingFor(transaction.id, accountId)?.is_cleared).map((accountId) => accountById(accountId)?.name || "").filter(Boolean).join(" | "),
+    affectedAccountIds(transaction).filter((accountId) => clearingFor(transaction.id, accountId)?.reconciliation_id).map((accountId) => accountById(accountId)?.name || "").filter(Boolean).join(" | "),
     transaction.recurring_entry_id || "",
     transaction.scheduled_date || "",
     transaction.receipt_name || "",
@@ -2416,13 +2844,13 @@ async function importJSON(event) {
 
 async function replaceCloudState(imported) {
   setSyncStatus("syncing", "Restoring backup");
-  for (const table of ["transactions", "budgets", "recurring_entries", "accounts", "categories"]) {
+  for (const table of ["transaction_clearings", "reconciliations", "transactions", "budgets", "recurring_entries", "accounts", "categories"]) {
     const { error } = await supabase.from(table).delete().eq("user_id", user.id);
     if (error) throw error;
   }
   const clean = sanitizeImportedState(imported);
   const withUser = (rows) => rows.map((row) => ({ ...row, user_id: user.id }));
-  for (const [table, rows] of [["categories", clean.categories], ["accounts", clean.accounts], ["recurring_entries", clean.recurringEntries], ["budgets", clean.budgets], ["transactions", clean.transactions]]) {
+  for (const [table, rows] of [["categories", clean.categories], ["accounts", clean.accounts], ["recurring_entries", clean.recurringEntries], ["budgets", clean.budgets], ["transactions", clean.transactions], ["reconciliations", clean.reconciliations], ["transaction_clearings", clean.transactionClearings]]) {
     if (!rows.length) continue;
     const { error } = await supabase.from(table).insert(withUser(rows));
     if (error) throw error;
@@ -2439,12 +2867,14 @@ function sanitizeImportedState(imported) {
   };
   const clean = normalizeState(imported);
   return {
-    version: 3,
+    version: 4,
     accounts: clean.accounts.map(strip),
     categories: clean.categories.map(strip),
     transactions: clean.transactions.map(strip),
     budgets: clean.budgets.map(strip),
     recurringEntries: clean.recurringEntries.map(strip),
+    reconciliations: clean.reconciliations.map(strip),
+    transactionClearings: clean.transactionClearings.map(strip),
   };
 }
 
@@ -2453,7 +2883,7 @@ async function resetApplication() {
   try {
     if (mode === "cloud") {
       setSyncStatus("syncing", "Resetting data");
-      for (const table of ["transactions", "budgets", "recurring_entries", "accounts", "categories"]) {
+      for (const table of ["transaction_clearings", "reconciliations", "transactions", "budgets", "recurring_entries", "accounts", "categories"]) {
         const { error } = await supabase.from(table).delete().eq("user_id", user.id);
         if (error) throw error;
       }
@@ -2493,6 +2923,8 @@ function showToast(message, isError = false) {
 function friendlyError(error) {
   const message = String(error?.message || error || "Something went wrong.");
   if (message.includes("Failed to fetch")) return "Could not reach Supabase. Check your connection and project configuration.";
+  if ((message.includes("reconciliations") || message.includes("transaction_clearings")) && (message.includes("does not exist") || message.includes("schema cache"))) return "Account reconciliation is not ready. Run supabase/add-account-reconciliation.sql in the Supabase SQL Editor.";
+  if (message.includes("reconciliations_user_id_account_id_statement_date_key") || (message.includes("duplicate key") && message.includes("reconciliations"))) return "This account already has a completed reconciliation for that statement date. Undo it before creating another.";
   if (message.includes("duplicate key")) return "A record with the same name or category already exists.";
   if (message.includes("recurring_entries") && (message.includes("does not exist") || message.includes("schema cache"))) return "Recurring schedules are not ready. Run supabase/add-recurring-entries.sql in the Supabase SQL Editor.";
   if ((message.includes("recurring_entry_id") || message.includes("scheduled_date")) && message.includes("column")) return "Recurring transaction columns are not ready. Run supabase/add-recurring-entries.sql in the Supabase SQL Editor.";
