@@ -1,0 +1,5 @@
+﻿Date,Type,Amount,Description,Category,Account,From Account,To Account,Currency
+2026-07-01,Expense,125.5,Weekly groceries,Groceries,Visa Card,,,AED
+2026-07-05,Income,15000.0,Monthly salary,Salary,Current Account,,,AED
+2026-07-10,Transfer,3000.0,Move money to savings,,,Current Account,Savings,AED
+2026-07-15,Transfer,1200.0,Credit card payment,,,Current Account,Visa Card,AED
