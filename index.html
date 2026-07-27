@@ -7,7 +7,7 @@
   <meta name="description" content="Ledgerly is a multi-account personal finance tracker with budgets, reports, and optional Supabase cloud sync." />
   <title>Ledgerly — Personal Finance</title>
   <link rel="manifest" href="manifest.webmanifest" />
-  <link rel="stylesheet" href="styles.css?v=5" />
+  <link rel="stylesheet" href="styles.css?v=6" />
 </head>
 <body>
   <section class="auth-screen" id="authScreen">
@@ -68,6 +68,7 @@
         <button class="nav-item active" data-view="dashboard"><span>⌂</span> Dashboard</button>
         <button class="nav-item" data-view="accounts"><span>▣</span> Accounts</button>
         <button class="nav-item" data-view="transactions"><span>↕</span> Transactions</button>
+        <button class="nav-item" data-view="calendar"><span>▦</span> Calendar</button>
         <button class="nav-item" data-view="budgets"><span>◎</span> Budgets</button>
         <button class="nav-item" data-view="reports"><span>⌁</span> Reports</button>
         <button class="nav-item" data-view="categories"><span>◇</span> Categories</button>
@@ -163,6 +164,39 @@
             <label><span>Month</span><input id="transactionMonthFilter" type="month" /></label>
           </div>
           <div id="allTransactions"></div>
+        </section>
+      </section>
+
+
+      <section class="view" id="calendarView">
+        <div class="calendar-toolbar">
+          <div class="calendar-navigation" aria-label="Calendar navigation">
+            <button class="icon-button" id="calendarPreviousMonth" type="button" aria-label="Previous month">‹</button>
+            <div class="calendar-month-copy"><p class="eyebrow">Calendar</p><h2 id="calendarMonthLabel"></h2></div>
+            <button class="icon-button" id="calendarNextMonth" type="button" aria-label="Next month">›</button>
+            <button class="secondary-button" id="calendarTodayButton" type="button">Today</button>
+          </div>
+          <label class="calendar-account-filter"><span>Account</span><select id="calendarAccountFilter"><option value="all">All accounts</option></select></label>
+        </div>
+
+        <div class="summary-grid calendar-summary-grid" id="calendarSummary"></div>
+
+        <section class="panel calendar-panel">
+          <div class="calendar-scroll">
+            <div class="calendar-weekdays" aria-hidden="true">
+              <span>Sun</span><span>Mon</span><span>Tue</span><span>Wed</span><span>Thu</span><span>Fri</span><span>Sat</span>
+            </div>
+            <div class="calendar-grid" id="calendarGrid" aria-label="Monthly transaction calendar"></div>
+          </div>
+        </section>
+
+        <section class="panel calendar-day-panel">
+          <div class="panel-heading calendar-day-heading">
+            <div><p class="eyebrow">Selected day</p><h2 id="calendarDayHeading"></h2></div>
+            <button class="primary-button" id="calendarAddEntryButton" type="button">+ Add entry for this day</button>
+          </div>
+          <div class="calendar-day-summary" id="calendarDaySummary"></div>
+          <div id="calendarDayTransactions"></div>
         </section>
       </section>
 
@@ -386,6 +420,6 @@
   </div>
 
   <div class="toast" id="toast" role="status" aria-live="polite"></div>
-  <script type="module" src="app.js?v=5"></script>
+  <script type="module" src="app.js?v=6"></script>
 </body>
 </html>

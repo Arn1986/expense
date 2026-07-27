@@ -52,6 +52,8 @@ let spreadsheetModulePromise = null;
 let selectedReceiptFile = null;
 let removeExistingReceipt = false;
 let receiptPreviewObjectUrl = "";
+let calendarCursor = new Date(new Date().getFullYear(), new Date().getMonth(), 1);
+let selectedCalendarDate = todayISO();
 
 const el = Object.fromEntries([...document.querySelectorAll("[id]")].map((node) => [node.id, node]));
 
@@ -138,6 +140,13 @@ function bindEvents() {
 
   el.openTransactionButton.addEventListener("click", () => openTransactionModal());
   el.openTransactionImportButton.addEventListener("click", openTransactionImportModal);
+  el.calendarPreviousMonth.addEventListener("click", () => moveCalendarMonth(-1));
+  el.calendarNextMonth.addEventListener("click", () => moveCalendarMonth(1));
+  el.calendarTodayButton.addEventListener("click", showCalendarToday);
+  el.calendarAccountFilter.addEventListener("input", renderCalendar);
+  el.calendarAddEntryButton.addEventListener("click", () => openTransactionModal(null, selectedCalendarDate));
+  el.calendarGrid.addEventListener("click", handleCalendarClick);
+  el.calendarGrid.addEventListener("keydown", handleCalendarKeydown);
   el.openAccountButton.addEventListener("click", () => openAccountModal());
   el.openBudgetButton.addEventListener("click", () => openBudgetModal());
   el.openCategoryButton.addEventListener("click", () => openCategoryModal());
@@ -444,10 +453,11 @@ function switchView(view) {
   activeView = view;
   document.querySelectorAll(".view").forEach((section) => section.classList.toggle("active", section.id === `${view}View`));
   document.querySelectorAll(".nav-item").forEach((button) => button.classList.toggle("active", button.dataset.view === view));
-  const titles = { dashboard: "Dashboard", accounts: "Accounts", transactions: "Transactions", budgets: "Budgets", reports: "Reports", categories: "Categories", settings: "Data & settings" };
+  const titles = { dashboard: "Dashboard", accounts: "Accounts", transactions: "Transactions", calendar: "Calendar", budgets: "Budgets", reports: "Reports", categories: "Categories", settings: "Data & settings" };
   el.pageTitle.textContent = titles[view] || "Ledgerly";
   el.sidebar.classList.remove("open");
   if (view === "reports") renderReports();
+  if (view === "calendar") renderCalendar();
 }
 
 function render() {
@@ -455,6 +465,7 @@ function render() {
   renderSummary();
   renderAccounts();
   renderTransactions();
+  renderCalendar();
   renderCategoryChart();
   renderCashFlowChart();
   renderBudgets();
@@ -573,6 +584,142 @@ function renderCashFlowChart() {
   el.cashFlowChart.innerHTML = cashFlowBarsHTML(monthSeries(6, new Date()));
 }
 
+
+function moveCalendarMonth(offset) {
+  calendarCursor = new Date(calendarCursor.getFullYear(), calendarCursor.getMonth() + offset, 1);
+  const selected = new Date(`${selectedCalendarDate}T12:00:00`);
+  if (selected.getFullYear() !== calendarCursor.getFullYear() || selected.getMonth() !== calendarCursor.getMonth()) {
+    selectedCalendarDate = validISODate(calendarCursor.getFullYear(), calendarCursor.getMonth() + 1, 1);
+  }
+  renderCalendar();
+}
+
+function showCalendarToday() {
+  const today = new Date();
+  calendarCursor = new Date(today.getFullYear(), today.getMonth(), 1);
+  selectedCalendarDate = todayISO();
+  renderCalendar();
+}
+
+function handleCalendarClick(event) {
+  const addButton = event.target.closest("[data-calendar-add]");
+  if (addButton) {
+    selectCalendarDate(addButton.dataset.calendarAdd);
+    openTransactionModal(null, selectedCalendarDate);
+    return;
+  }
+  const dayButton = event.target.closest("[data-calendar-date]");
+  if (dayButton) selectCalendarDate(dayButton.dataset.calendarDate);
+}
+
+function handleCalendarKeydown(event) {
+  if (!['Enter', ' '].includes(event.key)) return;
+  const dayButton = event.target.closest("[data-calendar-date]");
+  if (!dayButton) return;
+  event.preventDefault();
+  selectCalendarDate(dayButton.dataset.calendarDate);
+}
+
+function selectCalendarDate(date) {
+  if (!date) return;
+  selectedCalendarDate = date;
+  const selected = new Date(`${date}T12:00:00`);
+  if (selected.getFullYear() !== calendarCursor.getFullYear() || selected.getMonth() !== calendarCursor.getMonth()) {
+    calendarCursor = new Date(selected.getFullYear(), selected.getMonth(), 1);
+  }
+  renderCalendar();
+}
+
+function renderCalendar() {
+  if (!el.calendarGrid) return;
+  const year = calendarCursor.getFullYear();
+  const month = calendarCursor.getMonth();
+  const monthKey = `${year}-${String(month + 1).padStart(2, "0")}`;
+  const accountId = el.calendarAccountFilter.value || "all";
+  const monthEntries = state.transactions.filter((transaction) => transaction.entry_date?.startsWith(monthKey) && transactionMatchesAccount(transaction, accountId));
+  const monthIncome = sumTransactions(monthEntries, "income");
+  const monthExpenses = sumTransactions(monthEntries, "expense");
+  const activeDays = new Set(monthEntries.map((transaction) => transaction.entry_date)).size;
+  const transferCount = monthEntries.filter((transaction) => transaction.type === "transfer").length;
+
+  el.calendarMonthLabel.textContent = new Intl.DateTimeFormat("en-US", { month: "long", year: "numeric" }).format(calendarCursor);
+  el.calendarSummary.innerHTML = [
+    summaryCard("Income", monthIncome, `${monthEntries.filter((item) => item.type === "income").length} entries`, "positive"),
+    summaryCard("Expenses", monthExpenses, `${monthEntries.filter((item) => item.type === "expense").length} entries`, monthExpenses ? "negative" : ""),
+    summaryCard("Net cash flow", monthIncome - monthExpenses, "Income minus expenses", tone(monthIncome - monthExpenses)),
+    summaryCard("Activity", activeDays, `${transferCount} transfer${transferCount === 1 ? "" : "s"} · ${activeDays} active day${activeDays === 1 ? "" : "s"}`, "", false),
+  ].join("");
+
+  const first = new Date(year, month, 1);
+  const gridStart = new Date(year, month, 1 - first.getDay());
+  const cells = [];
+  for (let index = 0; index < 42; index += 1) {
+    const date = new Date(gridStart.getFullYear(), gridStart.getMonth(), gridStart.getDate() + index);
+    const iso = localISODate(date);
+    const dayEntries = state.transactions.filter((transaction) => transaction.entry_date === iso && transactionMatchesAccount(transaction, accountId));
+    const income = sumTransactions(dayEntries, "income");
+    const expenses = sumTransactions(dayEntries, "expense");
+    const transfers = dayEntries.filter((transaction) => transaction.type === "transfer").length;
+    const isCurrentMonth = date.getMonth() === month;
+    const classes = [
+      "calendar-day",
+      isCurrentMonth ? "" : "outside-month",
+      iso === todayISO() ? "today" : "",
+      iso === selectedCalendarDate ? "selected" : "",
+      dayEntries.length ? "has-activity" : "",
+    ].filter(Boolean).join(" ");
+    const aria = `${formatDate(iso)}. ${income ? `${formatMoneyText(income)} income. ` : ""}${expenses ? `${formatMoneyText(expenses)} expenses. ` : ""}${transfers ? `${transfers} transfers.` : ""}`;
+    cells.push(`<div class="${classes}">
+      <button class="calendar-day-body" type="button" data-calendar-date="${iso}" aria-label="${escapeHTML(aria)}">
+        <span class="calendar-day-number">${date.getDate()}</span>
+        <span class="calendar-day-totals">
+          ${income ? `<span class="calendar-day-total income"><span>+</span>${formatMoneyCompactHTML(income)}</span>` : ""}
+          ${expenses ? `<span class="calendar-day-total expense"><span>−</span>${formatMoneyCompactHTML(expenses)}</span>` : ""}
+          ${transfers ? `<span class="calendar-transfer-count">⇄ ${transfers}</span>` : ""}
+          ${!dayEntries.length ? `<span class="calendar-no-activity">No entries</span>` : ""}
+        </span>
+      </button>
+      <button class="calendar-day-add" type="button" data-calendar-add="${iso}" aria-label="Add entry on ${escapeHTML(formatDate(iso))}" title="Add entry">+</button>
+    </div>`);
+  }
+  el.calendarGrid.innerHTML = cells.join("");
+  renderSelectedCalendarDay(accountId);
+}
+
+function renderSelectedCalendarDay(accountId = "all") {
+  const entries = sortedTransactions().filter((transaction) => transaction.entry_date === selectedCalendarDate && transactionMatchesAccount(transaction, accountId));
+  const income = sumTransactions(entries, "income");
+  const expenses = sumTransactions(entries, "expense");
+  const transfers = entries.filter((transaction) => transaction.type === "transfer").length;
+  el.calendarDayHeading.textContent = formatDate(selectedCalendarDate);
+  el.calendarDaySummary.innerHTML = [
+    dayMetricHTML("Income", income, "positive"),
+    dayMetricHTML("Expenses", expenses, expenses ? "negative" : ""),
+    dayMetricHTML("Net cash flow", income - expenses, tone(income - expenses)),
+    dayMetricHTML("Transfers", transfers, "", false),
+  ].join("");
+  el.calendarDayTransactions.innerHTML = entries.length
+    ? transactionListHTML(entries, true)
+    : emptyHTML("No entries on this day", "Use Add entry for this day to record an expense, income, or transfer.");
+}
+
+function transactionMatchesAccount(transaction, accountId) {
+  return accountId === "all" || [transaction.account_id, transaction.from_account_id, transaction.to_account_id].includes(accountId);
+}
+
+function dayMetricHTML(label, value, className = "", money = true) {
+  return `<div class="calendar-day-metric"><span>${escapeHTML(label)}</span><strong class="${className}">${money ? formatMoneyHTML(value) : escapeHTML(value)}</strong></div>`;
+}
+
+function localISODate(date) {
+  return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`;
+}
+
+function formatMoneyCompactHTML(value) {
+  const absolute = Math.abs(number(value));
+  return `<span class="money compact-money"><span class="aed-symbol" aria-hidden="true"></span><span class="money-number">${escapeHTML(compactAmountFormatter.format(absolute))}</span></span>`;
+}
+
 function renderBudgets() {
   const monthKey = todayISO().slice(0, 7);
   const metrics = budgetMetrics("monthly", monthKey);
@@ -675,6 +822,9 @@ function renderSelectors() {
   const filterPrevious = el.transactionAccountFilter.value;
   el.transactionAccountFilter.innerHTML = `<option value="all">All accounts</option>${state.accounts.map((account) => `<option value="${account.id}">${escapeHTML(account.name)}</option>`).join("")}`;
   if ([...el.transactionAccountFilter.options].some((option) => option.value === filterPrevious)) el.transactionAccountFilter.value = filterPrevious;
+  const calendarAccountPrevious = el.calendarAccountFilter.value;
+  el.calendarAccountFilter.innerHTML = `<option value="all">All accounts</option>${state.accounts.map((account) => `<option value="${account.id}">${escapeHTML(account.name)}</option>`).join("")}`;
+  if ([...el.calendarAccountFilter.options].some((option) => option.value === calendarAccountPrevious)) el.calendarAccountFilter.value = calendarAccountPrevious;
   const importAccountPrevious = el.importDefaultAccount.value;
   el.importDefaultAccount.innerHTML = `<option value="">Use account names from file</option>${state.accounts.map((account) => `<option value="${account.id}">${escapeHTML(account.name)}</option>`).join("")}`;
   if ([...el.importDefaultAccount.options].some((option) => option.value === importAccountPrevious)) el.importDefaultAccount.value = importAccountPrevious;
@@ -701,12 +851,12 @@ function setEntryType(type) {
   renderEntryCategories(type);
 }
 
-function openTransactionModal(id = null) {
+function openTransactionModal(id = null, presetDate = "") {
   if (!state.accounts.length) return showToast("Add an account before recording an entry.", true);
   clearReceiptFormState();
   el.transactionForm.reset();
   el.transactionId.value = "";
-  el.entryDate.value = todayISO();
+  el.entryDate.value = presetDate || todayISO();
   el.transactionFormError.textContent = "";
   el.receiptFileHelp.textContent = mode === "cloud"
     ? "Receipts are stored privately in your Supabase project and are available on your signed-in devices."
