@@ -3,6 +3,14 @@ import { SUPABASE_URL, SUPABASE_PUBLISHABLE_KEY } from "./config.js";
 const STORAGE_KEY = "ledgerly-data-v2-local";
 const LEGACY_STORAGE_KEY = "ledgerly-data-v1";
 const CURRENCY = "AED";
+const BASE_CURRENCY = "AED";
+const SUPPORTED_CURRENCIES = [
+  ["AED", "UAE dirham"], ["PHP", "Philippine peso"], ["USD", "US dollar"],
+  ["EUR", "Euro"], ["GBP", "British pound"], ["SAR", "Saudi riyal"],
+  ["QAR", "Qatari riyal"], ["OMR", "Omani rial"], ["BHD", "Bahraini dinar"],
+  ["KWD", "Kuwaiti dinar"], ["INR", "Indian rupee"], ["JPY", "Japanese yen"],
+  ["SGD", "Singapore dollar"], ["CAD", "Canadian dollar"], ["AUD", "Australian dollar"],
+];
 const RECEIPT_BUCKET = "receipts";
 const CARD_ARTWORK_BUCKET = "card-artwork";
 const MAX_RECEIPT_BYTES = 8 * 1024 * 1024;
@@ -14,6 +22,7 @@ const DASHBOARD_WIDGETS = [
   { id: "income", label: "Income this month", description: "Monthly money received" },
   { id: "expenses", label: "Expenses this month", description: "Monthly money spent" },
   { id: "cash-flow", label: "Net cash flow", description: "Income minus expenses" },
+  { id: "financial-health", label: "Financial health", description: "Savings, reserves, budgets, and debt indicators" },
   { id: "accounts", label: "Account balances", description: "Current balance of your accounts" },
   { id: "budgets", label: "Budget progress", description: "Monthly category budget usage" },
   { id: "credit-cards", label: "Credit-card overview", description: "Debt, utilization, and statement status" },
@@ -100,6 +109,7 @@ async function initialize() {
   el.reportMonth.value = todayISO().slice(0, 7);
   el.reconcileStatementDate.value = todayISO();
   el.billDueDate.value = todayISO();
+  el.exchangeRateDate.value = todayISO();
   bindEvents();
 
   if (!configuredForCloud) {
@@ -174,6 +184,15 @@ function bindEvents() {
   });
 
   el.openTransactionButton.addEventListener("click", () => openTransactionModal());
+  el.openExchangeRateButton.addEventListener("click", () => openExchangeRateModal());
+  el.exchangeRateForm.addEventListener("submit", handleExchangeRateSubmit);
+  el.exchangeRateCurrency.addEventListener("change", updateExchangeRateModalCurrency);
+  el.accountCurrency.addEventListener("change", updateAccountCurrencyFields);
+  [el.entryAccount, el.transferFromAccount, el.transferToAccount, el.entryDate].forEach((input) => input.addEventListener("change", () => updateTransactionCurrencyFields("account")));
+  el.entryAmount.addEventListener("input", () => updateTransactionCurrencyFields("amount"));
+  el.entryUnitsPerBase.addEventListener("input", () => updateTransactionCurrencyFields("rate"));
+  el.transferExchangeRate.addEventListener("input", () => updateTransactionCurrencyFields("rate"));
+  el.transferDestinationAmount.addEventListener("input", () => updateTransactionCurrencyFields("destination"));
   el.openDashboardCustomizationButton.addEventListener("click", openDashboardCustomizationModal);
   el.dashboardCustomizationForm.addEventListener("submit", saveDashboardCustomization);
   el.resetDashboardCustomizationButton.addEventListener("click", resetDashboardCustomizationDraft);
@@ -193,6 +212,9 @@ function bindEvents() {
   el.reminderButton.addEventListener("click", toggleReminderPopover);
   el.closeReminderPopover.addEventListener("click", closeReminderPopover);
   [el.reconcileAccount, el.reconcileStatementDate, el.reconcileStatementBalance].forEach((input) => input.addEventListener("input", renderReconciliation));
+  [el.recurringAccount, el.recurringFromAccount].forEach((input) => input.addEventListener("change", updateAuxiliaryCurrencyFields));
+  el.billAccount.addEventListener("change", updateAuxiliaryCurrencyFields);
+  el.creditCardStatementAccount.addEventListener("change", updateAuxiliaryCurrencyFields);
   el.reconcileShowReconciled.addEventListener("change", renderReconciliation);
   el.reconcileMarkAllButton.addEventListener("click", () => bulkSetReconciliationCleared(true));
   el.reconcileUnclearAllButton.addEventListener("click", () => bulkSetReconciliationCleared(false));
@@ -307,6 +329,8 @@ function bindEvents() {
       "open-reconcile-account": () => openReconciliationForAccount(id),
       "toggle-reconciliation-cleared": () => toggleTransactionCleared(id, actionTarget.dataset.accountId),
       "undo-reconciliation": () => undoReconciliation(id),
+      "edit-exchange-rate": () => openExchangeRateModal(id),
+      "delete-exchange-rate": () => deleteExchangeRate(id),
     };
     if (actions[action]) await actions[action]();
   });
@@ -408,7 +432,7 @@ function setAuthBusy(busy) {
 function showAuthError(message) { el.authError.textContent = message; }
 
 async function loadCloudState() {
-  const [accountsResult, categoriesResult, transactionsResult, transactionSplitsResult, budgetsResult, recurringResult, billsResult, reconciliationsResult, clearingsResult, cardStatementsResult, importRulesResult, preferencesResult] = await Promise.all([
+  const [accountsResult, categoriesResult, transactionsResult, transactionSplitsResult, budgetsResult, recurringResult, billsResult, reconciliationsResult, clearingsResult, cardStatementsResult, importRulesResult, exchangeRatesResult, preferencesResult] = await Promise.all([
     supabase.from("accounts").select("*").order("created_at", { ascending: true }),
     supabase.from("categories").select("*").order("kind").order("name"),
     supabase.from("transactions").select("*").order("entry_date", { ascending: false }).order("created_at", { ascending: false }),
@@ -420,13 +444,14 @@ async function loadCloudState() {
     supabase.from("transaction_clearings").select("*").order("created_at", { ascending: true }),
     supabase.from("credit_card_statements").select("*").order("statement_date", { ascending: false }),
     supabase.from("import_rules").select("*").order("priority", { ascending: true }).order("created_at", { ascending: true }),
+    supabase.from("exchange_rates").select("*").order("effective_date", { ascending: false }).order("created_at", { ascending: false }),
     supabase.from("user_preferences").select("*").eq("user_id", user.id).maybeSingle(),
   ]);
-  [accountsResult, categoriesResult, transactionsResult, transactionSplitsResult, budgetsResult, recurringResult, billsResult, reconciliationsResult, clearingsResult, cardStatementsResult, importRulesResult, preferencesResult].forEach((result) => {
+  [accountsResult, categoriesResult, transactionsResult, transactionSplitsResult, budgetsResult, recurringResult, billsResult, reconciliationsResult, clearingsResult, cardStatementsResult, importRulesResult, exchangeRatesResult, preferencesResult].forEach((result) => {
     if (result.error) throw result.error;
   });
   state = {
-    version: 9,
+    version: 10,
     accounts: accountsResult.data || [],
     categories: categoriesResult.data || [],
     transactions: transactionsResult.data || [],
@@ -438,6 +463,7 @@ async function loadCloudState() {
     transactionClearings: clearingsResult.data || [],
     creditCardStatements: cardStatementsResult.data || [],
     importRules: importRulesResult.data || [],
+    exchangeRates: exchangeRatesResult.data || [],
     preferences: normalizePreferences(preferencesResult.data),
   };
 }
@@ -450,15 +476,22 @@ async function seedDefaultCategories() {
 }
 
 function emptyState() {
-  return { version: 9, accounts: [], categories: [], transactions: [], transactionSplits: [], budgets: [], recurringEntries: [], bills: [], reconciliations: [], transactionClearings: [], creditCardStatements: [], importRules: [], preferences: defaultPreferences() };
+  return { version: 10, accounts: [], categories: [], transactions: [], transactionSplits: [], budgets: [], recurringEntries: [], bills: [], reconciliations: [], transactionClearings: [], creditCardStatements: [], importRules: [], exchangeRates: [], preferences: defaultPreferences() };
 }
 
 function normalizeState(value) {
   return {
-    version: 9,
-    accounts: Array.isArray(value?.accounts) ? value.accounts : [],
+    version: 10,
+    accounts: Array.isArray(value?.accounts) ? value.accounts.map((account) => ({ ...account, currency_code: normalizeCurrencyCode(account.currency_code || BASE_CURRENCY) })) : [],
     categories: Array.isArray(value?.categories) ? value.categories : [],
-    transactions: Array.isArray(value?.transactions) ? value.transactions : [],
+    transactions: Array.isArray(value?.transactions) ? value.transactions.map((transaction) => ({
+      ...transaction,
+      destination_amount: transaction.type === "transfer" ? (number(transaction.destination_amount) > 0 ? number(transaction.destination_amount) : number(transaction.amount)) : null,
+      exchange_rate: transaction.type === "transfer" ? (number(transaction.exchange_rate) > 0 ? number(transaction.exchange_rate) : 1) : transaction.exchange_rate ?? null,
+      base_currency_code: normalizeCurrencyCode(transaction.base_currency_code || BASE_CURRENCY),
+      base_amount: transaction.type === "transfer" ? (transaction.base_amount ?? null) : (transaction.base_amount ?? transaction.amount),
+      exchange_rate_to_base: transaction.exchange_rate_to_base ?? 1,
+    })) : [],
     transactionSplits: Array.isArray(value?.transactionSplits) ? value.transactionSplits : Array.isArray(value?.transaction_splits) ? value.transaction_splits : [],
     budgets: Array.isArray(value?.budgets) ? value.budgets : [],
     recurringEntries: Array.isArray(value?.recurringEntries) ? value.recurringEntries : Array.isArray(value?.recurring_entries) ? value.recurring_entries : [],
@@ -467,6 +500,7 @@ function normalizeState(value) {
     transactionClearings: Array.isArray(value?.transactionClearings) ? value.transactionClearings : Array.isArray(value?.transaction_clearings) ? value.transaction_clearings : [],
     creditCardStatements: Array.isArray(value?.creditCardStatements) ? value.creditCardStatements : Array.isArray(value?.credit_card_statements) ? value.credit_card_statements : [],
     importRules: Array.isArray(value?.importRules) ? value.importRules : Array.isArray(value?.import_rules) ? value.import_rules : [],
+    exchangeRates: Array.isArray(value?.exchangeRates) ? value.exchangeRates : Array.isArray(value?.exchange_rates) ? value.exchange_rates : [],
     preferences: normalizePreferences(value?.preferences || value?.user_preferences),
   };
 }
@@ -500,11 +534,11 @@ function dashboardWidgets() {
 
 function defaultLocalState() {
   return {
-    version: 9,
+    version: 10,
     accounts: [
-      localRow({ name: "Current Account", type: "current", opening_balance: 0, color: ACCOUNT_COLORS.current, include_in_net_worth: true }),
-      localRow({ name: "Savings", type: "savings", opening_balance: 0, color: ACCOUNT_COLORS.savings, include_in_net_worth: true }),
-      localRow({ name: "Cash", type: "cash", opening_balance: 0, color: ACCOUNT_COLORS.cash, include_in_net_worth: true }),
+      localRow({ name: "Current Account", type: "current", opening_balance: 0, currency_code: BASE_CURRENCY, color: ACCOUNT_COLORS.current, include_in_net_worth: true }),
+      localRow({ name: "Savings", type: "savings", opening_balance: 0, currency_code: BASE_CURRENCY, color: ACCOUNT_COLORS.savings, include_in_net_worth: true }),
+      localRow({ name: "Cash", type: "cash", opening_balance: 0, currency_code: BASE_CURRENCY, color: ACCOUNT_COLORS.cash, include_in_net_worth: true }),
     ],
     categories: defaultCategoryRows().map(localRow),
     transactions: [],
@@ -516,6 +550,7 @@ function defaultLocalState() {
     transactionClearings: [],
     creditCardStatements: [],
     importRules: [],
+    exchangeRates: [],
     preferences: defaultPreferences(),
   };
 }
@@ -587,7 +622,7 @@ function migrateLegacyState(legacy) {
       to_account_id: transaction.toAccountId || transaction.to_account_id || null,
     });
   });
-  return { version: 9, accounts, categories, transactions, transactionSplits: [], budgets: [], recurringEntries: [], bills: [], reconciliations: [], transactionClearings: [], creditCardStatements: [], importRules: [], preferences: defaultPreferences() };
+  return { version: 10, accounts: accounts.map((account) => ({ ...account, currency_code: BASE_CURRENCY })), categories, transactions: transactions.map((transaction) => ({ ...transaction, destination_amount: transaction.type === "transfer" ? transaction.amount : null, exchange_rate: transaction.type === "transfer" ? 1 : null, base_amount: transaction.type === "transfer" ? null : transaction.amount, base_currency_code: BASE_CURRENCY, exchange_rate_to_base: 1 })), transactionSplits: [], budgets: [], recurringEntries: [], bills: [], reconciliations: [], transactionClearings: [], creditCardStatements: [], importRules: [], exchangeRates: [], preferences: defaultPreferences() };
 }
 
 function persistLocal() {
@@ -636,10 +671,11 @@ function switchView(view) {
   activeView = view;
   document.querySelectorAll(".view").forEach((section) => section.classList.toggle("active", section.id === `${view}View`));
   document.querySelectorAll(".nav-item").forEach((button) => button.classList.toggle("active", button.dataset.view === view));
-  const titles = { dashboard: "Dashboard", accounts: "Accounts", creditcards: "Credit cards", transactions: "Transactions", rules: "Import rules", reconcile: "Reconcile", calendar: "Calendar", recurring: "Recurring", bills: "Bills & reminders", budgets: "Budgets", reports: "Reports", categories: "Categories", settings: "Data & settings" };
+  const titles = { dashboard: "Dashboard", accounts: "Accounts", creditcards: "Credit cards", transactions: "Transactions", rules: "Import rules", reconcile: "Reconcile", calendar: "Calendar", recurring: "Recurring", bills: "Bills & reminders", budgets: "Budgets", reports: "Reports", health: "Financial health", categories: "Categories", settings: "Data & settings" };
   el.pageTitle.textContent = titles[view] || "Ledgerly";
   el.sidebar.classList.remove("open");
   if (view === "reports") renderReports();
+  if (view === "health") renderFinancialHealth();
   if (view === "rules") renderImportRules();
   if (view === "creditcards") renderCreditCards();
   if (view === "reconcile") renderReconciliation();
@@ -666,7 +702,9 @@ function render() {
   renderBudgets();
   renderCategories();
   renderReports();
+  renderFinancialHealth();
   renderSettings();
+  renderExchangeRates();
 }
 
 function applyDashboardPreferences() {
@@ -742,6 +780,125 @@ async function saveDashboardCustomization(event) {
   }
 }
 
+
+function normalizeCurrencyCode(value) {
+  const code = String(value || BASE_CURRENCY).trim().toUpperCase();
+  return /^[A-Z]{3}$/.test(code) ? code : BASE_CURRENCY;
+}
+
+function currencyLabel(code) {
+  const normalized = normalizeCurrencyCode(code);
+  return SUPPORTED_CURRENCIES.find(([item]) => item === normalized)?.[1] || normalized;
+}
+
+function currencyOptionsHTML(selected = BASE_CURRENCY, includeBase = true) {
+  const normalized = normalizeCurrencyCode(selected);
+  return SUPPORTED_CURRENCIES.filter(([code]) => includeBase || code !== BASE_CURRENCY)
+    .map(([code, label]) => `<option value="${code}" ${code === normalized ? "selected" : ""}>${code} — ${escapeHTML(label)}</option>`).join("");
+}
+
+function accountCurrency(accountOrId) {
+  const account = typeof accountOrId === "string" ? accountById(accountOrId) : accountOrId;
+  return normalizeCurrencyCode(account?.currency_code || BASE_CURRENCY);
+}
+
+function currencyPrefixHTML(code) {
+  const normalized = normalizeCurrencyCode(code);
+  if (normalized === BASE_CURRENCY) return '<span class="aed-symbol" aria-hidden="true"></span>';
+  const symbols = { PHP: "₱", USD: "$", EUR: "€", GBP: "£", INR: "₹", JPY: "¥", SGD: "S$", CAD: "C$", AUD: "A$", SAR: "SAR", QAR: "QAR", OMR: "OMR", BHD: "BHD", KWD: "KWD" };
+  return `<span class="currency-code-symbol" aria-hidden="true">${escapeHTML(symbols[normalized] || normalized)}</span>`;
+}
+
+function formatCurrencyText(value, code = BASE_CURRENCY) {
+  const amount = number(value);
+  const normalized = normalizeCurrencyCode(code);
+  const sign = amount < 0 ? "−" : "";
+  return `${sign}${normalized} ${amountFormatter.format(Math.abs(amount))}`;
+}
+
+function formatCurrencyCompactText(value, code = BASE_CURRENCY) {
+  const amount = number(value);
+  const normalized = normalizeCurrencyCode(code);
+  const sign = amount < 0 ? "−" : "";
+  return `${sign}${normalized} ${compactAmountFormatter.format(Math.abs(amount))}`;
+}
+
+function formatCurrencyHTML(value, code = BASE_CURRENCY) {
+  const amount = number(value);
+  const normalized = normalizeCurrencyCode(code);
+  const sign = amount < 0 ? '<span class="money-sign" aria-hidden="true">−</span>' : "";
+  const accessible = escapeHTML(formatCurrencyText(amount, normalized));
+  return `<span class="money" role="text" aria-label="${accessible}">${sign}${currencyPrefixHTML(normalized)}<span class="money-number">${amountFormatter.format(Math.abs(amount))}</span></span>`;
+}
+
+function sortedExchangeRates(currency = "") {
+  const normalized = currency ? normalizeCurrencyCode(currency) : "";
+  return [...(state.exchangeRates || [])]
+    .filter((rate) => !normalized || normalizeCurrencyCode(rate.currency_code) === normalized)
+    .sort((a, b) => String(b.effective_date).localeCompare(String(a.effective_date)) || String(b.created_at || "").localeCompare(String(a.created_at || "")));
+}
+
+function exchangeRateFor(currency, date = todayISO()) {
+  const normalized = normalizeCurrencyCode(currency);
+  if (normalized === BASE_CURRENCY) return 1;
+  const rates = sortedExchangeRates(normalized);
+  const applicable = date ? rates.find((rate) => rate.effective_date <= date) : rates[0];
+  const value = number(applicable?.units_per_base);
+  return value > 0 ? value : null;
+}
+
+function amountToBase(amount, currency, date = todayISO(), explicitUnitsPerBase = null) {
+  const normalized = normalizeCurrencyCode(currency);
+  const rate = normalized === BASE_CURRENCY ? 1 : number(explicitUnitsPerBase) > 0 ? number(explicitUnitsPerBase) : exchangeRateFor(normalized, date);
+  return rate && rate > 0 ? number(amount) / rate : null;
+}
+
+function baseToCurrency(amount, currency, date = todayISO()) {
+  const rate = exchangeRateFor(currency, date);
+  return rate ? number(amount) * rate : null;
+}
+
+function crossCurrencyRate(fromCurrency, toCurrency, date = todayISO()) {
+  const fromRate = exchangeRateFor(fromCurrency, date);
+  const toRate = exchangeRateFor(toCurrency, date);
+  return fromRate && toRate ? toRate / fromRate : null;
+}
+
+function transactionCurrency(transaction) {
+  if (transaction.type === "transfer") return accountCurrency(transaction.from_account_id);
+  return accountCurrency(transaction.account_id);
+}
+
+function transferDestinationAmount(transaction) {
+  return number(transaction.destination_amount) > 0 ? number(transaction.destination_amount) : number(transaction.amount);
+}
+
+function transactionBaseAmount(transaction) {
+  if (!transaction || transaction.type === "transfer") return 0;
+  if (number(transaction.base_amount) > 0) return number(transaction.base_amount);
+  return amountToBase(transaction.amount, transactionCurrency(transaction), transaction.entry_date, transaction.exchange_rate_to_base) ?? 0;
+}
+
+function allocationBaseAmount(transaction, allocation) {
+  const total = number(transaction.amount);
+  const base = transactionBaseAmount(transaction);
+  return total > 0 ? number(allocation.amount) * (base / total) : 0;
+}
+
+function accountBalanceInBase(account, throughDate = null) {
+  const nativeBalance = calculateAccountBalance(account.id, throughDate);
+  return amountToBase(nativeBalance, accountCurrency(account), throughDate || todayISO());
+}
+
+function missingRateCurrencies(date = todayISO()) {
+  return [...new Set(state.accounts.map(accountCurrency).filter((currency) => currency !== BASE_CURRENCY && !exchangeRateFor(currency, date)))];
+}
+
+function inputCurrencyLabel(code) {
+  const normalized = normalizeCurrencyCode(code);
+  return normalized === BASE_CURRENCY ? "AED" : normalized;
+}
+
 function renderSummary() {
   const month = todayISO().slice(0, 7);
   const monthTx = state.transactions.filter((item) => item.entry_date?.startsWith(month));
@@ -750,7 +907,8 @@ function renderSummary() {
   const netWorth = calculateNetWorth();
   const cashFlow = income - expenses;
   const budget = budgetMetrics("monthly", month);
-  el.summaryNetWorth.innerHTML = summaryCard("Net worth", netWorth, `${state.accounts.filter((a) => a.include_in_net_worth !== false).length} included accounts`, tone(netWorth));
+  const missingRates = missingRateCurrencies();
+  el.summaryNetWorth.innerHTML = summaryCard("Net worth", netWorth, missingRates.length ? `AED value excludes ${missingRates.join(", ")} until a rate is added` : `${state.accounts.filter((a) => a.include_in_net_worth !== false).length} included accounts`, tone(netWorth));
   el.summaryIncome.innerHTML = summaryCard("Income this month", income, `${monthTx.filter((item) => item.type === "income").length} entries`, "positive");
   el.summaryExpenses.innerHTML = summaryCard("Expenses this month", expenses, budget.total ? `${Math.round((expenses / budget.total) * 100)}% of monthly budget` : `${monthTx.filter((item) => item.type === "expense").length} entries`, expenses ? "negative" : "");
   el.summaryCashFlow.innerHTML = summaryCard("Net cash flow", cashFlow, "Income minus expenses", tone(cashFlow));
@@ -776,9 +934,10 @@ function renderAccounts() {
           </div>
         </div>
         <h3>${escapeHTML(account.name)}</h3>
-        <p class="large-balance">${formatMoneyHTML(balance)}</p>
-        <p class="opening-balance">Starting balance: ${formatMoneyHTML(number(account.opening_balance))}${account.include_in_net_worth === false ? " · excluded from net worth" : ""}</p>
-        ${account.type === "credit" ? `<p class="account-credit-meta">${number(account.credit_limit) > 0 ? `${creditCardUtilization(account).toFixed(1)}% of ${formatMoneyHTML(account.credit_limit)} limit` : "Credit limit not configured"}</p>` : ""}
+        <p class="large-balance">${formatCurrencyHTML(balance, accountCurrency(account))}</p>
+        <p class="opening-balance">Starting balance: ${formatCurrencyHTML(number(account.opening_balance), accountCurrency(account))}${account.include_in_net_worth === false ? " · excluded from net worth" : ""}</p>
+        ${accountCurrency(account) !== BASE_CURRENCY ? `<p class="account-base-equivalent">${accountBalanceInBase(account) == null ? `Add a ${accountCurrency(account)} exchange rate` : `AED equivalent: ${formatMoneyHTML(accountBalanceInBase(account))}`}</p>` : ""}
+        ${account.type === "credit" ? `<p class="account-credit-meta">${number(account.credit_limit) > 0 ? `${creditCardUtilization(account).toFixed(1)}% of ${formatCurrencyHTML(account.credit_limit, accountCurrency(account))} limit` : "Credit limit not configured"}</p>` : ""}
         <div class="account-card-footer-actions"><button class="account-reconcile-button" data-action="open-reconcile-account" data-id="${account.id}" type="button">✓ Reconcile</button>${account.type === "credit" ? `<button class="account-reconcile-button" data-action="add-credit-card-statement" data-id="${account.id}" type="button">▤ Statement</button>` : ""}</div>
       </article>`;
   }).join("");
@@ -789,7 +948,7 @@ function accountRowHTML(account) {
   return `<div class="account-row">
     <span class="account-icon" style="--account-color:${safeColor(account.color)}">${escapeHTML(account.name.slice(0, 1).toUpperCase())}</span>
     <div class="account-details"><strong>${escapeHTML(account.name)}</strong><span>${escapeHTML(account.type)}</span></div>
-    <span class="account-balance ${tone(balance)}">${formatMoneyHTML(balance)}</span>
+    <span class="account-balance ${tone(balance)}">${formatCurrencyHTML(balance, accountCurrency(account))}</span>
   </div>`;
 }
 
@@ -800,6 +959,11 @@ function creditCardAccounts() {
 
 function creditCardDebt(account) {
   return Math.max(0, -calculateAccountBalance(account.id));
+}
+
+function creditCardDebtInBase(account) {
+  const value = amountToBase(creditCardDebt(account), accountCurrency(account), todayISO());
+  return value == null ? 0 : value;
 }
 
 function creditCardAvailableCredit(account) {
@@ -860,9 +1024,9 @@ async function hydrateCreditCardArtwork() {
 function renderCreditCards() {
   if (!el.creditCardsGrid) return;
   const cards = creditCardAccounts();
-  const totalDebt = cards.reduce((sum, account) => sum + creditCardDebt(account), 0);
-  const totalLimit = cards.reduce((sum, account) => sum + Math.max(0, number(account.credit_limit)), 0);
-  const available = cards.reduce((sum, account) => sum + creditCardAvailableCredit(account), 0);
+  const totalDebt = cards.reduce((sum, account) => sum + creditCardDebtInBase(account), 0);
+  const totalLimit = cards.reduce((sum, account) => sum + (amountToBase(Math.max(0, number(account.credit_limit)), accountCurrency(account), todayISO()) || 0), 0);
+  const available = cards.reduce((sum, account) => sum + (amountToBase(creditCardAvailableCredit(account), accountCurrency(account), todayISO()) || 0), 0);
   const utilization = totalLimit ? (totalDebt / totalLimit) * 100 : 0;
   const openStatements = state.creditCardStatements.map((statement) => creditCardStatementStatus(statement));
   const attentionCount = openStatements.filter((item) => ["overdue", "due-soon"].includes(item.key)).length;
@@ -903,7 +1067,7 @@ function creditCardDashboardRowHTML(account) {
   return `<div class="credit-card-dashboard-row">
     <span class="card-network-mini" style="${creditCardVisualStyle(account)}">${creditCardBrandHTML(account, true)}</span>
     <div class="credit-card-dashboard-copy"><strong>${escapeHTML(account.name)}</strong><span>${escapeHTML(cardNetworkLabel(account.card_network))}${lastFour}${number(account.credit_limit) > 0 ? ` · ${utilization.toFixed(1)}% utilized` : " · Credit limit not set"}${status ? ` · ${escapeHTML(status.label)}` : ""}</span></div>
-    <div class="credit-card-dashboard-amount"><strong>${formatMoneyHTML(debt)}</strong><span>owed</span></div>
+    <div class="credit-card-dashboard-amount"><strong>${formatCurrencyHTML(debt, accountCurrency(account))}</strong><span>owed</span></div>
   </div>`;
 }
 
@@ -929,12 +1093,12 @@ function creditCardAccountCardHTML(account) {
       <div class="credit-card-brand-row"><span class="credit-card-chip"></span>${creditCardBrandHTML(account)}</div>
       <p class="credit-card-display-name">${escapeHTML(account.name)}</p>
       <span class="credit-card-balance-label">Current debt</span>
-      <strong class="credit-card-current-debt">${formatMoneyHTML(debt)}</strong>
+      <strong class="credit-card-current-debt">${formatCurrencyHTML(debt, accountCurrency(account))}</strong>
       <span class="credit-card-last-four">${escapeHTML(lastFour)}</span>
     </div>
     <div class="credit-card-limit-section">
-      <div class="credit-card-metric"><span>Credit limit</span><strong>${limit ? formatMoneyHTML(limit) : "Not set"}</strong></div>
-      <div class="credit-card-metric"><span>Available</span><strong class="positive">${limit ? formatMoneyHTML(available) : "—"}</strong></div>
+      <div class="credit-card-metric"><span>Credit limit</span><strong>${limit ? formatCurrencyHTML(limit, accountCurrency(account)) : "Not set"}</strong></div>
+      <div class="credit-card-metric"><span>Available</span><strong class="positive">${limit ? formatCurrencyHTML(available, accountCurrency(account)) : "—"}</strong></div>
       <div class="credit-card-metric"><span>Utilization</span><strong class="${utilization >= 70 ? "negative" : utilization >= 30 ? "warning" : "positive"}">${limit ? `${utilization.toFixed(1)}%` : "—"}</strong></div>
       <div class="credit-utilization-track"><span class="${utilization >= 70 ? "high" : utilization >= 30 ? "medium" : ""}" style="width:${Math.min(100, utilization)}%"></span></div>
     </div>
@@ -944,7 +1108,7 @@ function creditCardAccountCardHTML(account) {
     </div>
     ${latest ? `<div class="credit-card-latest-statement">
       <div class="credit-card-statement-title"><div><span>Latest statement</span><strong>${formatDate(latest.statement_date)}</strong></div><span class="credit-card-status ${status.key}">${escapeHTML(status.label)}</span></div>
-      <div class="credit-card-statement-figures"><span>Due ${formatMoneyHTML(latest.statement_balance)}</span><span>Paid ${formatMoneyHTML(status.paid)}</span><span>Remaining ${formatMoneyHTML(status.outstanding)}</span></div>
+      <div class="credit-card-statement-figures"><span>Due ${formatCurrencyHTML(latest.statement_balance, accountCurrency(account))}</span><span>Paid ${formatCurrencyHTML(status.paid, accountCurrency(account))}</span><span>Remaining ${formatCurrencyHTML(status.outstanding, accountCurrency(account))}</span></div>
       <div class="credit-payment-track"><span style="width:${progress}%"></span></div>
       <p>${escapeHTML(status.detail)}</p>
     </div>` : `<div class="credit-card-latest-statement empty"><strong>No statement saved</strong><p>Add a statement to track its due date, minimum payment, and payment progress.</p></div>`}
@@ -962,10 +1126,10 @@ function creditCardStatementRowHTML(statement) {
   const status = creditCardStatementStatus(statement);
   return `<div class="credit-card-statement-row">
     <div class="credit-card-statement-account"><span class="card-network-mini" style="${creditCardVisualStyle(account)}">${creditCardBrandHTML(account, true)}</span><div><strong>${escapeHTML(account.name)}</strong><span>Statement ${formatDate(statement.statement_date)}</span></div></div>
-    <div><span class="history-label">Amount due</span><strong>${formatMoneyHTML(statement.statement_balance)}</strong></div>
-    <div><span class="history-label">Minimum</span><strong>${formatMoneyHTML(statement.minimum_payment)}</strong></div>
+    <div><span class="history-label">Amount due</span><strong>${formatCurrencyHTML(statement.statement_balance, accountCurrency(statement.account_id))}</strong></div>
+    <div><span class="history-label">Minimum</span><strong>${formatCurrencyHTML(statement.minimum_payment, accountCurrency(statement.account_id))}</strong></div>
     <div><span class="history-label">Due date</span><strong>${formatDate(statement.due_date)}</strong></div>
-    <div><span class="history-label">Paid</span><strong>${formatMoneyHTML(status.paid)}</strong></div>
+    <div><span class="history-label">Paid</span><strong>${formatCurrencyHTML(status.paid, accountCurrency(account))}</strong></div>
     <div class="credit-card-statement-status-cell"><span class="credit-card-status ${status.key}">${escapeHTML(status.label)}</span><small>${escapeHTML(status.detail)}</small></div>
     <div class="row-actions"><button class="row-action" data-action="edit-credit-card-statement" data-id="${statement.id}" aria-label="Edit card statement">✎</button><button class="row-action danger" data-action="delete-credit-card-statement" data-id="${statement.id}" aria-label="Delete card statement">×</button></div>
   </div>`;
@@ -1002,7 +1166,7 @@ function creditCardStatementStatus(statement) {
   let paidInFullDate = "";
   let minimumPaidDate = minimum === 0 ? statement.statement_date : "";
   for (const transaction of payments) {
-    paid += number(transaction.amount);
+    paid += transferDestinationAmount(transaction);
     if (!minimumPaidDate && paid + 0.005 >= minimum) minimumPaidDate = transaction.entry_date;
     if (!paidInFullDate && paid + 0.005 >= amountDue) paidInFullDate = transaction.entry_date;
   }
@@ -1010,7 +1174,8 @@ function creditCardStatementStatus(statement) {
   const dueIn = daysBetweenISO(todayISO(), statement.due_date);
   let key = "open";
   let label = "Open";
-  let detail = `${formatMoneyText(outstanding)} remains due by ${formatDate(statement.due_date)}.`;
+  const statementCurrency = accountCurrency(statement.account_id);
+  let detail = `${formatCurrencyText(outstanding, statementCurrency)} remains due by ${formatDate(statement.due_date)}.`;
   if (amountDue <= 0.005 || paid + 0.005 >= amountDue) {
     key = paidInFullDate && paidInFullDate > statement.due_date ? "paid-late" : "paid";
     label = key === "paid-late" ? "Paid late" : "Paid";
@@ -1019,16 +1184,16 @@ function creditCardStatementStatus(statement) {
     key = "overdue";
     label = "Overdue";
     detail = minimum > 0
-      ? `${formatMoneyText(Math.max(0, minimum - paid))} is still needed to meet the minimum payment.`
-      : `${formatMoneyText(outstanding)} remains unpaid after the due date.`;
+      ? `${formatCurrencyText(Math.max(0, minimum - paid), statementCurrency)} is still needed to meet the minimum payment.`
+      : `${formatCurrencyText(outstanding, statementCurrency)} remains unpaid after the due date.`;
   } else if (minimum > 0 && paid + 0.005 >= minimum) {
     key = "minimum-paid";
     label = "Minimum paid";
-    detail = `${formatMoneyText(outstanding)} remains on the statement after the minimum payment.`;
+    detail = `${formatCurrencyText(outstanding, statementCurrency)} remains on the statement after the minimum payment.`;
   } else if (dueIn >= 0 && dueIn <= 7) {
     key = "due-soon";
     label = dueIn === 0 ? "Due today" : "Due soon";
-    detail = `${formatMoneyText(Math.max(0, minimum - paid))} is needed for the minimum payment${dueIn === 0 ? " today" : ` in ${dueIn} day${dueIn === 1 ? "" : "s"}`}.`;
+    detail = `${formatCurrencyText(Math.max(0, minimum - paid), statementCurrency)} is needed for the minimum payment${dueIn === 0 ? " today" : ` in ${dueIn} day${dueIn === 1 ? "" : "s"}`}.`;
   }
   return { key, label, detail, paid, outstanding, paidInFullDate, minimumPaidDate, payments };
 }
@@ -1100,7 +1265,7 @@ function transactionListHTML(items, showActions) {
     const splitCount = splitsForTransaction(transaction.id).length;
     const categorySummary = transactionCategorySummary(transaction);
     const title = transaction.description || (transaction.type === "transfer" ? "Account transfer" : splitCount ? "Split transaction" : category?.name || capitalize(transaction.type));
-    const subtitle = transaction.type === "transfer" ? transactionAccountText(transaction) : `${categorySummary} · ${transactionAccountText(transaction)}`;
+    const subtitle = transaction.type === "transfer" ? `${transactionAccountText(transaction)}${accountCurrency(transaction.from_account_id) !== accountCurrency(transaction.to_account_id) ? ` · ${formatCurrencyText(transaction.amount, accountCurrency(transaction.from_account_id))} → ${formatCurrencyText(transferDestinationAmount(transaction), accountCurrency(transaction.to_account_id))}` : ""}` : `${categorySummary} · ${transactionAccountText(transaction)}`;
     const sign = transaction.type === "expense" ? "−" : transaction.type === "income" ? "+" : "";
     const remarks = String(transaction.remarks || "").trim();
     const reconciliationBadge = transactionReconciliationBadgeHTML(transaction);
@@ -1112,7 +1277,7 @@ function transactionListHTML(items, showActions) {
       </div>
       <div class="transaction-meta account-column">${escapeHTML(transactionAccountText(transaction))}</div>
       <div class="transaction-meta">${formatDate(transaction.entry_date)}</div>
-      <div class="amount ${transaction.type}">${sign}${formatMoneyHTML(number(transaction.amount))}</div>
+      <div class="amount ${transaction.type}">${sign}${formatCurrencyHTML(number(transaction.amount), transactionCurrency(transaction))}${transaction.type === "transfer" && accountCurrency(transaction.from_account_id) !== accountCurrency(transaction.to_account_id) ? `<small>→ ${formatCurrencyText(transferDestinationAmount(transaction), accountCurrency(transaction.to_account_id))}</small>` : ""}</div>
       <div class="row-actions">${receiptAction}${showActions ? `<button class="row-action" data-action="edit-transaction" data-id="${transaction.id}" aria-label="Edit entry">✎</button><button class="row-action danger" data-action="delete-transaction" data-id="${transaction.id}" aria-label="Delete entry">×</button>` : ""}</div>
     </div>`;
   }).join("")}</div>`;
@@ -1145,6 +1310,7 @@ function renderReconciliation() {
   }
   const accountId = el.reconcileAccount.value;
   const account = accountById(accountId);
+  setCurrencyInputPrefix(el.reconcileCurrency, accountCurrency(account));
   const statementDate = el.reconcileStatementDate.value || todayISO();
   const hasStatementBalance = String(el.reconcileStatementBalance.value || "").trim() !== "";
   const statementBalance = number(el.reconcileStatementBalance.value);
@@ -1162,16 +1328,16 @@ function renderReconciliation() {
   }).length;
 
   el.reconcileSummary.innerHTML = [
-    reconciliationMoneyCard("Book balance", ledgerBalance, `All entries through ${formatDate(statementDate)}`, tone(ledgerBalance)),
-    reconciliationMoneyCard("Cleared balance", clearedBalance, `${clearedPendingCount} newly cleared transaction${clearedPendingCount === 1 ? "" : "s"}`, tone(clearedBalance)),
-    reconciliationMoneyCard("Statement balance", statementBalance, hasStatementBalance ? `Ending ${formatDate(statementDate)}` : "Enter the balance from your statement", tone(statementBalance), hasStatementBalance),
-    reconciliationMoneyCard("Difference", difference || 0, hasStatementBalance ? "Statement minus cleared balance" : "Waiting for statement balance", difference === null ? "" : Math.abs(difference) < 0.005 ? "positive" : "negative", difference !== null),
+    reconciliationMoneyCard("Book balance", ledgerBalance, `All entries through ${formatDate(statementDate)}`, tone(ledgerBalance), true, accountCurrency(account)),
+    reconciliationMoneyCard("Cleared balance", clearedBalance, `${clearedPendingCount} newly cleared transaction${clearedPendingCount === 1 ? "" : "s"}`, tone(clearedBalance), true, accountCurrency(account)),
+    reconciliationMoneyCard("Statement balance", statementBalance, hasStatementBalance ? `Ending ${formatDate(statementDate)}` : "Enter the balance from your statement", tone(statementBalance), hasStatementBalance, accountCurrency(account)),
+    reconciliationMoneyCard("Difference", difference || 0, hasStatementBalance ? "Statement minus cleared balance" : "Waiting for statement balance", difference === null ? "" : Math.abs(difference) < 0.005 ? "positive" : "negative", difference !== null, accountCurrency(account)),
   ].join("");
 
   const last = latestReconciliation(accountId);
   const statementDateIsNew = !last || statementDate > last.statement_date;
   el.reconcileLastStatus.innerHTML = last
-    ? `<span class="reconciliation-status-badge">Last reconciled ${formatDate(last.statement_date)} · ${formatMoneyHTML(last.statement_balance)}</span>`
+    ? `<span class="reconciliation-status-badge">Last reconciled ${formatDate(last.statement_date)} · ${formatCurrencyHTML(last.statement_balance, accountCurrency(account))}</span>`
     : '<span class="reconciliation-status-badge pending">Not reconciled yet</span>';
 
   const showReconciled = el.reconcileShowReconciled.checked;
@@ -1197,15 +1363,15 @@ function renderReconciliation() {
     el.reconcileDifferenceLabel.textContent = "Difference is zero — ready to finish";
     el.reconcileCompletionHint.textContent = "Finishing locks the cleared transactions into this statement history.";
   } else {
-    el.reconcileDifferenceLabel.textContent = `${formatMoneyText(difference)} difference remaining`;
+    el.reconcileDifferenceLabel.textContent = `${formatCurrencyText(difference, accountCurrency(account))} difference remaining`;
     el.reconcileCompletionHint.textContent = difference > 0 ? "The statement is higher than the cleared balance. Look for missing income or an uncleared debit." : "The statement is lower than the cleared balance. Look for missing expenses or an incorrectly cleared entry.";
   }
 
   renderReconciliationHistory(accountId);
 }
 
-function reconciliationMoneyCard(label, value, detail, className = "", hasValue = true) {
-  const display = hasValue ? formatMoneyHTML(value) : '<span class="reconciliation-not-entered">—</span>';
+function reconciliationMoneyCard(label, value, detail, className = "", hasValue = true, currency = BASE_CURRENCY) {
+  const display = hasValue ? formatCurrencyHTML(value, currency) : '<span class="reconciliation-not-entered">—</span>';
   return `<article class="summary-card"><p class="card-label">${escapeHTML(label)}</p><p class="card-value ${className}">${display}</p><p class="card-detail">${escapeHTML(detail)}</p></article>`;
 }
 
@@ -1238,7 +1404,7 @@ function reconciliationTransactionHTML(transaction, accountId) {
     <span class="transaction-icon ${transaction.type}">${transaction.type === "expense" ? "↓" : transaction.type === "income" ? "↑" : "⇄"}</span>
     <div class="reconciliation-transaction-copy"><strong>${escapeHTML(title)}</strong><span>${escapeHTML(subtitle)}</span>${transaction.remarks ? `<small>${escapeHTML(transaction.remarks)}</small>` : ""}</div>
     <div class="reconciliation-row-status-wrap">${status}</div>
-    <div class="reconciliation-effect ${tone(effect)}">${effect > 0 ? "+" : effect < 0 ? "−" : ""}${formatMoneyHTML(Math.abs(effect))}</div>
+    <div class="reconciliation-effect ${tone(effect)}">${effect > 0 ? "+" : effect < 0 ? "−" : ""}${formatCurrencyHTML(Math.abs(effect), accountCurrency(accountId))}</div>
   </div>`;
 }
 
@@ -1259,8 +1425,8 @@ function renderReconciliationHistory(accountId) {
     const transactionCount = state.transactionClearings.filter((clearing) => clearing.reconciliation_id === item.id).length;
     return `<article class="reconciliation-history-row">
       <div class="reconciliation-history-date"><strong>${formatDate(item.statement_date)}</strong><span>${escapeHTML(item.notes || "Statement reconciliation")}</span></div>
-      <div><span class="history-label">Statement</span><strong>${formatMoneyHTML(item.statement_balance)}</strong></div>
-      <div><span class="history-label">Book balance</span><strong>${formatMoneyHTML(item.ledger_balance)}</strong></div>
+      <div><span class="history-label">Statement</span><strong>${formatCurrencyHTML(item.statement_balance, accountCurrency(item.account_id))}</strong></div>
+      <div><span class="history-label">Book balance</span><strong>${formatCurrencyHTML(item.ledger_balance, accountCurrency(item.account_id))}</strong></div>
       <div><span class="history-label">Transactions</span><strong>${transactionCount.toLocaleString("en-AE")}</strong></div>
       <button class="row-action wide danger" data-action="undo-reconciliation" data-id="${item.id}" type="button">Undo</button>
     </article>`;
@@ -1358,7 +1524,7 @@ async function completeReconciliation() {
   const clearedBalance = calculateClearedBalance(accountId, statementDate);
   const ledgerBalance = calculateAccountBalance(accountId, statementDate);
   const difference = statementBalance - clearedBalance;
-  if (Math.abs(difference) >= 0.005) return showFormError(el.reconcileFormError, `The difference must be zero before finishing. Current difference: ${formatMoneyText(difference)}.`);
+  if (Math.abs(difference) >= 0.005) return showFormError(el.reconcileFormError, `The difference must be zero before finishing. Current difference: ${formatCurrencyText(difference, accountCurrency(accountId))}.`);
 
   const pendingClearings = state.transactionClearings.filter((clearing) => {
     if (clearing.account_id !== accountId || !clearing.is_cleared || clearing.reconciliation_id) return false;
@@ -1463,7 +1629,7 @@ function transactionEffectForAccount(transaction, accountId) {
   if (transaction.type === "income" && transaction.account_id === accountId) return amount;
   if (transaction.type === "expense" && transaction.account_id === accountId) return -amount;
   if (transaction.type === "transfer" && transaction.from_account_id === accountId) return -amount;
-  if (transaction.type === "transfer" && transaction.to_account_id === accountId) return amount;
+  if (transaction.type === "transfer" && transaction.to_account_id === accountId) return transferDestinationAmount(transaction);
   return 0;
 }
 
@@ -1536,8 +1702,8 @@ function renderRecurringEntries() {
   const upcoming = plannedOccurrencesBetween(todayISO(), inThirtyDays);
   const activeCount = entries.filter((item) => item.active !== false).length;
   const autoCount = entries.filter((item) => item.active !== false && item.auto_post !== false).length;
-  const upcomingExpenses = upcoming.filter((item) => item.rule.type === "expense").reduce((sum, item) => sum + number(item.rule.amount), 0);
-  const upcomingIncome = upcoming.filter((item) => item.rule.type === "income").reduce((sum, item) => sum + number(item.rule.amount), 0);
+  const upcomingExpenses = upcoming.filter((item) => item.rule.type === "expense").reduce((sum, item) => sum + (amountToBase(item.rule.amount, accountCurrency(item.rule.account_id), item.date) || 0), 0);
+  const upcomingIncome = upcoming.filter((item) => item.rule.type === "income").reduce((sum, item) => sum + (amountToBase(item.rule.amount, accountCurrency(item.rule.account_id), item.date) || 0), 0);
 
   el.recurringSummary.innerHTML = [
     summaryCard("Active schedules", activeCount, `${autoCount} post automatically`, activeCount ? "positive" : "", false),
@@ -1586,7 +1752,7 @@ function recurringCardHTML(rule) {
       ${rule.remarks ? `<div class="recurring-card-remarks">${escapeHTML(rule.remarks)}</div>` : ""}
     </div>
     <div class="recurring-card-side">
-      <div class="recurring-card-amount amount ${rule.type}">${sign}${formatMoneyHTML(rule.amount)}</div>
+      <div class="recurring-card-amount amount ${rule.type}">${sign}${formatCurrencyHTML(rule.amount, rule.type === "transfer" ? accountCurrency(rule.from_account_id) : accountCurrency(rule.account_id))}</div>
       <div class="recurring-card-actions">
         ${dueDate ? `<button class="row-action wide" data-action="post-recurring" data-id="${rule.id}" data-date="${dueDate}" title="Post the due occurrence">Post due</button>` : ""}
         <button class="row-action wide" data-action="toggle-recurring" data-id="${rule.id}">${active ? "Pause" : "Resume"}</button>
@@ -1619,6 +1785,7 @@ function setRecurringType(type) {
   el.recurringAccountLabel.textContent = type === "income" ? "Add to account" : "Pay from account";
   el.recurringCategoryLabel.textContent = type === "income" ? "Income category" : "Expense category";
   renderRecurringCategories(type);
+  updateAuxiliaryCurrencyFields();
 }
 
 function updateRecurringIntervalUnit() {
@@ -1680,6 +1847,7 @@ function openRecurringModal(id = null, presetType = "expense") {
   }
   updateRecurringIntervalUnit();
   updateRecurringEndDateVisibility();
+  updateAuxiliaryCurrencyFields();
   openModal(el.recurringModal);
   el.recurringAmount.focus();
 }
@@ -1823,7 +1991,7 @@ async function postRecurringOccurrenceById(id, date) {
 }
 
 function transactionFromRecurring(rule, date) {
-  return {
+  const row = {
     type: rule.type,
     amount: number(rule.amount),
     entry_date: date,
@@ -1835,7 +2003,31 @@ function transactionFromRecurring(rule, date) {
     category_id: rule.type === "transfer" ? null : rule.category_id,
     from_account_id: rule.type === "transfer" ? rule.from_account_id : null,
     to_account_id: rule.type === "transfer" ? rule.to_account_id : null,
+    destination_amount: null,
+    exchange_rate: null,
+    base_currency_code: BASE_CURRENCY,
+    base_amount: null,
+    exchange_rate_to_base: null,
   };
+  if (rule.type === "transfer") {
+    const fromCurrency = accountCurrency(rule.from_account_id);
+    const toCurrency = accountCurrency(rule.to_account_id);
+    const rate = fromCurrency === toCurrency ? 1 : crossCurrencyRate(fromCurrency, toCurrency, date);
+    if (!(rate > 0)) throw new Error(`Add dated exchange rates for ${fromCurrency} and ${toCurrency} before posting this recurring transfer.`);
+    row.exchange_rate = rate;
+    row.destination_amount = roundMoney(row.amount * row.exchange_rate);
+    const units = fromCurrency === BASE_CURRENCY ? 1 : exchangeRateFor(fromCurrency, date);
+    if (!(units > 0)) throw new Error(`Add a dated exchange rate for ${fromCurrency} before posting this recurring transfer.`);
+    row.exchange_rate_to_base = units;
+    row.base_amount = amountToBase(row.amount, fromCurrency, date, row.exchange_rate_to_base);
+  } else {
+    const currency = accountCurrency(rule.account_id);
+    const units = currency === BASE_CURRENCY ? 1 : exchangeRateFor(currency, date);
+    if (!(units > 0)) throw new Error(`Add a dated exchange rate for ${currency} before posting this recurring entry.`);
+    row.exchange_rate_to_base = units;
+    row.base_amount = amountToBase(row.amount, currency, date, units);
+  }
+  return row;
 }
 
 function transactionOccurrenceKey(transaction) {
@@ -1993,7 +2185,7 @@ function billReminderItems() {
   return openOneTimeBills()
     .filter((bill) => !bill.snoozed_until || bill.snoozed_until <= today)
     .filter((bill) => bill.due_date <= addDaysISO(today, Math.max(0, Math.trunc(number(bill.reminder_days_before) || 0))))
-    .map((bill) => ({ kind: "bill", date: bill.due_date, amount: number(bill.amount), bill, title: bill.name, status: billStatusInfo(bill) }));
+    .map((bill) => ({ kind: "bill", date: bill.due_date, amount: number(bill.amount), currency: accountCurrency(bill.account_id), bill, title: bill.name, status: billStatusInfo(bill) }));
 }
 
 function recurringBillReminderItems() {
@@ -2009,6 +2201,7 @@ function recurringBillReminderItems() {
       kind: "recurring",
       date,
       amount: number(rule.amount),
+      currency: accountCurrency(rule.account_id),
       rule,
       title: rule.description || categoryById(rule.category_id)?.name || "Recurring expense",
       status: date < today
@@ -2029,7 +2222,7 @@ function creditCardReminderItems() {
     if (days > 7) return [];
     const account = accountById(statement.account_id);
     if (!account) return [];
-    return [{ kind: "card", date: statement.due_date, amount: status.outstanding, statement, account, title: `${account.name} payment`, status: days < 0 ? { ...status, key: "overdue", label: "Overdue" } : status }];
+    return [{ kind: "card", date: statement.due_date, amount: status.outstanding, currency: accountCurrency(account), statement, account, title: `${account.name} payment`, status: days < 0 ? { ...status, key: "overdue", label: "Overdue" } : status }];
   });
 }
 
@@ -2045,11 +2238,11 @@ function renderBills() {
   const overdue = open.filter((bill) => bill.due_date < today);
   const dueToday = open.filter((bill) => bill.due_date === today);
   const nextSeven = open.filter((bill) => bill.due_date >= today && bill.due_date <= addDaysISO(today, 7));
-  const nextThirtyAmount = open.filter((bill) => bill.due_date >= today && bill.due_date <= addDaysISO(today, 30)).reduce((sum, bill) => sum + number(bill.amount), 0);
+  const nextThirtyAmount = open.filter((bill) => bill.due_date >= today && bill.due_date <= addDaysISO(today, 30)).reduce((sum, bill) => sum + (amountToBase(bill.amount, accountCurrency(bill.account_id), bill.due_date) || 0), 0);
   el.billSummary.innerHTML = [
-    summaryCard("Overdue", overdue.length, overdue.length ? `${formatMoneyText(overdue.reduce((sum, bill) => sum + number(bill.amount), 0))} outstanding` : "Nothing overdue", overdue.length ? "negative" : "positive", false),
-    summaryCard("Due today", dueToday.length, dueToday.length ? `${formatMoneyText(dueToday.reduce((sum, bill) => sum + number(bill.amount), 0))} due` : "No bills today", dueToday.length ? "warning" : "", false),
-    summaryCard("Next 7 days", nextSeven.length, `${formatMoneyText(nextSeven.reduce((sum, bill) => sum + number(bill.amount), 0))} scheduled`, nextSeven.length ? "warning" : "", false),
+    summaryCard("Overdue", overdue.length, overdue.length ? `${formatMoneyText(overdue.reduce((sum, bill) => sum + (amountToBase(bill.amount, accountCurrency(bill.account_id), bill.due_date) || 0), 0))} outstanding` : "Nothing overdue", overdue.length ? "negative" : "positive", false),
+    summaryCard("Due today", dueToday.length, dueToday.length ? `${formatMoneyText(dueToday.reduce((sum, bill) => sum + (amountToBase(bill.amount, accountCurrency(bill.account_id), bill.due_date) || 0), 0))} due` : "No bills today", dueToday.length ? "warning" : "", false),
+    summaryCard("Next 7 days", nextSeven.length, `${formatMoneyText(nextSeven.reduce((sum, bill) => sum + (amountToBase(bill.amount, accountCurrency(bill.account_id), bill.due_date) || 0), 0))} scheduled`, nextSeven.length ? "warning" : "", false),
     summaryCard("Next 30 days", nextThirtyAmount, `${open.filter((bill) => bill.due_date >= today && bill.due_date <= addDaysISO(today, 30)).length} one-time bills`, nextThirtyAmount ? "negative" : ""),
   ].join("");
 
@@ -2082,7 +2275,7 @@ function billRowHTML(bill) {
   return `<article class="bill-row ${status.key}">
     <div class="bill-date-block"><span>${new Intl.DateTimeFormat("en-US", { month: "short" }).format(new Date(`${bill.due_date}T12:00:00`))}</span><strong>${Number(bill.due_date.slice(8, 10))}</strong></div>
     <div class="bill-main"><div class="bill-title-line"><strong>${escapeHTML(bill.name)}</strong><span class="bill-status ${status.key}">${escapeHTML(status.label)}</span></div><span>${escapeHTML(category?.name || "Uncategorized")} · ${escapeHTML(account?.name || "No account")} · ${escapeHTML(status.detail)}</span>${bill.notes ? `<small>${escapeHTML(bill.notes)}</small>` : ""}</div>
-    <strong class="bill-amount">${formatMoneyHTML(bill.amount)}</strong>
+    <strong class="bill-amount">${formatCurrencyHTML(bill.amount, accountCurrency(bill.account_id))}</strong>
     <div class="bill-actions">${bill.status === "paid" ? `<button class="secondary-button" data-action="reopen-bill" data-id="${bill.id}" type="button">Reopen</button>` : `<button class="primary-button" data-action="record-bill-payment" data-id="${bill.id}" type="button">Record payment</button><button class="secondary-button" data-action="mark-bill-paid" data-id="${bill.id}" type="button">Mark paid</button><button class="row-action" data-action="snooze-bill" data-id="${bill.id}" title="Snooze reminder for one day">Zz</button>`}<button class="row-action" data-action="edit-bill" data-id="${bill.id}" aria-label="Edit bill">✎</button><button class="row-action danger" data-action="delete-bill" data-id="${bill.id}" aria-label="Delete bill">×</button></div>
   </article>`;
 }
@@ -2094,7 +2287,7 @@ function recurringBillRowHTML(rule) {
   return `<article class="bill-row recurring-bill-row ${active ? "" : "paused"}">
     <div class="bill-date-block"><span>${next ? new Intl.DateTimeFormat("en-US", { month: "short" }).format(new Date(`${next}T12:00:00`)) : "—"}</span><strong>${next ? Number(next.slice(8, 10)) : "—"}</strong></div>
     <div class="bill-main"><div class="bill-title-line"><strong>${escapeHTML(rule.description || categoryById(rule.category_id)?.name || "Recurring expense")}</strong><span class="bill-status ${active ? "upcoming" : "snoozed"}">${active ? "Recurring" : "Paused"}</span></div><span>${escapeHTML(recurringTargetText(rule))} · ${escapeHTML(recurringScheduleText(rule))}</span><small>Reminder ${number(rule.reminder_days_before) ? `${number(rule.reminder_days_before)} day${number(rule.reminder_days_before) === 1 ? "" : "s"} before` : "on the due date"}</small></div>
-    <strong class="bill-amount">${formatMoneyHTML(rule.amount)}</strong>
+    <strong class="bill-amount">${formatCurrencyHTML(rule.amount, accountCurrency(rule.account_id))}</strong>
     <div class="bill-actions">${due ? `<button class="primary-button" data-action="post-recurring" data-id="${rule.id}" data-date="${due}" type="button">Post due</button>` : ""}<button class="secondary-button" data-action="edit-recurring" data-id="${rule.id}" type="button">Edit</button></div>
   </article>`;
 }
@@ -2102,10 +2295,10 @@ function recurringBillRowHTML(rule) {
 function renderDashboardBills() {
   if (!el.dashboardBills) return;
   const today = todayISO();
-  const upcomingOneTime = openOneTimeBills().filter((bill) => bill.due_date <= addDaysISO(today, 14)).map((bill) => ({ kind: "bill", date: bill.due_date, title: bill.name, amount: bill.amount, id: bill.id, status: billStatusInfo(bill) }));
-  const upcomingRecurring = plannedOccurrencesBetween(today, addDaysISO(today, 14)).filter((item) => item.rule.type === "expense").map(({ rule, date }) => ({ kind: "recurring", date, title: rule.description || categoryById(rule.category_id)?.name || "Recurring expense", amount: rule.amount, id: rule.id, status: { key: date === today ? "due-today" : "upcoming", label: date === today ? "Due today" : "Planned" } }));
+  const upcomingOneTime = openOneTimeBills().filter((bill) => bill.due_date <= addDaysISO(today, 14)).map((bill) => ({ kind: "bill", date: bill.due_date, title: bill.name, amount: bill.amount, currency: accountCurrency(bill.account_id), id: bill.id, status: billStatusInfo(bill) }));
+  const upcomingRecurring = plannedOccurrencesBetween(today, addDaysISO(today, 14)).filter((item) => item.rule.type === "expense").map(({ rule, date }) => ({ kind: "recurring", date, title: rule.description || categoryById(rule.category_id)?.name || "Recurring expense", amount: rule.amount, currency: accountCurrency(rule.account_id), id: rule.id, status: { key: date === today ? "due-today" : "upcoming", label: date === today ? "Due today" : "Planned" } }));
   const items = [...upcomingOneTime, ...upcomingRecurring].sort((a, b) => a.date.localeCompare(b.date)).slice(0, 6);
-  el.dashboardBills.innerHTML = items.length ? `<div class="dashboard-bill-list">${items.map((item) => `<div class="dashboard-bill-row"><span class="dashboard-bill-date">${formatDate(item.date)}</span><div><strong>${escapeHTML(item.title)}</strong><span class="bill-status ${item.status.key}">${escapeHTML(item.status.label)}</span></div><strong>${formatMoneyHTML(item.amount)}</strong>${item.kind === "bill" ? `<button class="text-button" data-action="record-bill-payment" data-id="${item.id}" type="button">Pay</button>` : ""}</div>`).join("")}</div>` : emptyHTML("No bills in the next 14 days", "Upcoming one-time and recurring bills will appear here.");
+  el.dashboardBills.innerHTML = items.length ? `<div class="dashboard-bill-list">${items.map((item) => `<div class="dashboard-bill-row"><span class="dashboard-bill-date">${formatDate(item.date)}</span><div><strong>${escapeHTML(item.title)}</strong><span class="bill-status ${item.status.key}">${escapeHTML(item.status.label)}</span></div><strong>${formatCurrencyHTML(item.amount, item.currency || BASE_CURRENCY)}</strong>${item.kind === "bill" ? `<button class="text-button" data-action="record-bill-payment" data-id="${item.id}" type="button">Pay</button>` : ""}</div>`).join("")}</div>` : emptyHTML("No bills in the next 14 days", "Upcoming one-time and recurring bills will appear here.");
 }
 
 function openBillModal(id = null) {
@@ -2130,6 +2323,7 @@ function openBillModal(id = null) {
   } else {
     el.billModalTitle.textContent = "Add one-time bill";
   }
+  updateAuxiliaryCurrencyFields();
   openModal(el.billModal);
   el.billName.focus();
 }
@@ -2178,6 +2372,7 @@ function recordBillPayment(id) {
   el.entryCategory.value = bill.category_id || "";
   el.entryDescription.value = bill.name || "";
   el.entryRemarks.value = bill.notes || "";
+  updateTransactionCurrencyFields("account");
   updateSplitSummary();
 }
 
@@ -2245,7 +2440,7 @@ function reminderItemHTML(item) {
     : item.kind === "recurring"
       ? (item.date <= todayISO() ? `<button class="text-button" data-action="post-recurring" data-id="${item.rule.id}" data-date="${item.date}" type="button">Post</button>` : "")
       : `<button class="text-button" data-action="record-credit-card-payment" data-id="${item.account.id}" type="button">Pay</button>`;
-  return `<div class="reminder-item"><span class="reminder-item-icon ${item.status.key}">!</span><div><strong>${escapeHTML(item.title)}</strong><span>${formatDate(item.date)} · ${escapeHTML(item.status.label)} · ${formatMoneyText(item.amount)}</span></div>${action}</div>`;
+  return `<div class="reminder-item"><span class="reminder-item-icon ${item.status.key}">!</span><div><strong>${escapeHTML(item.title)}</strong><span>${formatDate(item.date)} · ${escapeHTML(item.status.label)} · ${formatCurrencyText(item.amount, item.currency || BASE_CURRENCY)}</span></div>${action}</div>`;
 }
 
 function toggleReminderPopover() {
@@ -2267,7 +2462,7 @@ function showReminderNoticeOnce() {
 }
 
 function oneTimeBillsAgendaHTML(bills) {
-  return `<div class="bill-calendar-agenda"><div class="planned-agenda-heading"><strong>Bill reminders</strong><span>One-time bills do not affect balances until paid</span></div>${bills.map((bill) => { const status = billStatusInfo(bill); return `<div class="planned-row"><div class="planned-row-main"><span class="card-reminder-icon due">$</span><div class="planned-row-copy"><strong>${escapeHTML(bill.name)}</strong><span>${escapeHTML(accountById(bill.account_id)?.name || "No account")} · ${escapeHTML(categoryById(bill.category_id)?.name || "Uncategorized")}</span></div></div><div class="planned-row-side"><span class="bill-status ${status.key}">${escapeHTML(status.label)}</span><strong>${formatMoneyHTML(bill.amount)}</strong><button class="secondary-button" data-action="record-bill-payment" data-id="${bill.id}" type="button">Record payment</button></div></div>`; }).join("")}</div>`;
+  return `<div class="bill-calendar-agenda"><div class="planned-agenda-heading"><strong>Bill reminders</strong><span>One-time bills do not affect balances until paid</span></div>${bills.map((bill) => { const status = billStatusInfo(bill); return `<div class="planned-row"><div class="planned-row-main"><span class="card-reminder-icon due">$</span><div class="planned-row-copy"><strong>${escapeHTML(bill.name)}</strong><span>${escapeHTML(accountById(bill.account_id)?.name || "No account")} · ${escapeHTML(categoryById(bill.category_id)?.name || "Uncategorized")}</span></div></div><div class="planned-row-side"><span class="bill-status ${status.key}">${escapeHTML(status.label)}</span><strong>${formatCurrencyHTML(bill.amount, accountCurrency(bill.account_id))}</strong><button class="secondary-button" data-action="record-bill-payment" data-id="${bill.id}" type="button">Record payment</button></div></div>`; }).join("")}</div>`;
 }
 
 function moveCalendarMonth(offset) {
@@ -2353,8 +2548,8 @@ function renderCalendar() {
     const income = sumTransactions(dayEntries, "income");
     const expenses = sumTransactions(dayEntries, "expense");
     const transfers = dayEntries.filter((transaction) => transaction.type === "transfer").length;
-    const plannedIncome = planned.filter((item) => item.rule.type === "income").reduce((sum, item) => sum + number(item.rule.amount), 0);
-    const plannedExpenses = planned.filter((item) => item.rule.type === "expense").reduce((sum, item) => sum + number(item.rule.amount), 0);
+    const plannedIncome = planned.filter((item) => item.rule.type === "income").reduce((sum, item) => sum + (amountToBase(item.rule.amount, accountCurrency(item.rule.account_id), item.date) || 0), 0);
+    const plannedExpenses = planned.filter((item) => item.rule.type === "expense").reduce((sum, item) => sum + (amountToBase(item.rule.amount, accountCurrency(item.rule.account_id), item.date) || 0), 0);
     const plannedTransfers = planned.filter((item) => item.rule.type === "transfer").length;
     const isCurrentMonth = date.getMonth() === month;
     const hasActivity = dayEntries.length || planned.length || cardEvents.length || bills.length;
@@ -2376,7 +2571,7 @@ function renderCalendar() {
           ${plannedIncome ? `<span class="calendar-planned-total income">Planned +${formatMoneyCompactHTML(plannedIncome)}</span>` : ""}
           ${plannedExpenses ? `<span class="calendar-planned-total expense">Planned −${formatMoneyCompactHTML(plannedExpenses)}</span>` : ""}
           ${plannedTransfers ? `<span class="calendar-planned-count">Planned ⇄ ${plannedTransfers}</span>` : ""}
-          ${bills.slice(0, 2).map((bill) => `<span class="calendar-bill-reminder ${bill.due_date < todayISO() ? "overdue" : ""}">Bill ${formatMoneyCompactHTML(bill.amount)}</span>`).join("")}
+          ${bills.slice(0, 2).map((bill) => `<span class="calendar-bill-reminder ${bill.due_date < todayISO() ? "overdue" : ""}">Bill ${formatMoneyCompactHTML(amountToBase(bill.amount, accountCurrency(bill.account_id), bill.due_date) || 0)}</span>`).join("")}
           ${cardEvents.slice(0, 2).map((item) => `<span class="calendar-card-reminder ${item.type === "payment-due" ? "due" : "close"}">${item.type === "payment-due" ? "Card due" : "Card closes"}</span>`).join("")}
           ${!hasActivity ? `<span class="calendar-no-activity">No entries</span>` : ""}
         </span>
@@ -2450,7 +2645,7 @@ function creditCardCalendarAgendaHTML(events) {
       const status = event.status;
       const title = isDue ? `${event.account.name} payment due` : `${event.account.name} statement closes`;
       const detail = event.statement
-        ? `${formatMoneyText(event.statement.statement_balance)} statement · minimum ${formatMoneyText(event.statement.minimum_payment)}`
+        ? `${formatCurrencyText(event.statement.statement_balance, accountCurrency(event.account))} statement · minimum ${formatCurrencyText(event.statement.minimum_payment, accountCurrency(event.account))}`
         : isDue ? "Configured monthly payment reminder" : "Configured monthly statement closing date";
       return `<div class="card-reminder-row">
         <div class="planned-row-main"><span class="card-reminder-icon ${isDue ? "due" : "close"}">${isDue ? "!" : "▤"}</span><div class="planned-row-copy"><strong>${escapeHTML(title)}</strong><span>${escapeHTML(detail)}</span></div></div>
@@ -2475,7 +2670,7 @@ function plannedAgendaHTML(planned) {
         </div>
         <div class="planned-row-side">
           <span class="planned-label">Planned</span>
-          <span class="amount ${rule.type}">${sign}${formatMoneyHTML(rule.amount)}</span>
+          <span class="amount ${rule.type}">${sign}${formatCurrencyHTML(rule.amount, rule.type === "transfer" ? accountCurrency(rule.from_account_id) : accountCurrency(rule.account_id))}</span>
           ${canPost ? `<button class="secondary-button" data-action="post-recurring" data-id="${rule.id}" data-date="${date}" type="button">Post now</button>` : ""}
         </div>
       </div>`;
@@ -2588,13 +2783,205 @@ function renderReports() {
   el.reportMonth.parentElement.querySelector("span").textContent = period === "yearly" ? "Year anchor" : "Month";
 }
 
+
+function recurringMonthlyBaseAmount(rule) {
+  if (rule.type !== "expense" || rule.active === false) return 0;
+  const account = accountById(rule.account_id);
+  if (!account) return 0;
+  const base = amountToBase(rule.amount, accountCurrency(account), todayISO());
+  if (base == null) return 0;
+  const interval = Math.max(1, number(rule.interval_value) || 1);
+  const factors = { daily: 30.4375 / interval, weekly: (52 / 12) / interval, monthly: 1 / interval, yearly: (1 / 12) / interval };
+  return base * (factors[rule.frequency] || 0);
+}
+
+function financialHealthData() {
+  const series = monthSeries(3, new Date());
+  const monthsWithActivity = series.filter((item) => item.income > 0 || item.expenses > 0);
+  const divisor = Math.max(monthsWithActivity.length, 1);
+  const averageIncome = monthsWithActivity.reduce((sum, item) => sum + item.income, 0) / divisor;
+  const averageExpenses = monthsWithActivity.reduce((sum, item) => sum + item.expenses, 0) / divisor;
+  const averageNet = averageIncome - averageExpenses;
+  const savingsRate = averageIncome > 0 ? (averageNet / averageIncome) * 100 : 0;
+  const liquidAssets = state.accounts.filter((account) => ["current", "savings", "cash"].includes(account.type)).reduce((sum, account) => {
+    const converted = accountBalanceInBase(account);
+    return sum + Math.max(0, converted == null ? 0 : converted);
+  }, 0);
+  const emergencyMonths = averageExpenses > 0 ? liquidAssets / averageExpenses : 0;
+  const cards = creditCardAccounts();
+  const cardDebt = cards.reduce((sum, account) => sum + creditCardDebtInBase(account), 0);
+  const cardLimit = cards.reduce((sum, account) => sum + (amountToBase(Math.max(0, number(account.credit_limit)), accountCurrency(account), todayISO()) || 0), 0);
+  const utilization = cardLimit > 0 ? (cardDebt / cardLimit) * 100 : 0;
+  const month = todayISO().slice(0, 7);
+  const monthlyBudgets = state.budgets.filter((budget) => budget.period === "monthly");
+  const budgetsOnTrack = monthlyBudgets.filter((budget) => spendingForBudget(budget, month) <= number(budget.amount)).length;
+  const budgetOnTrackRate = monthlyBudgets.length ? (budgetsOnTrack / monthlyBudgets.length) * 100 : 100;
+  const recurringCommitments = state.recurringEntries.reduce((sum, rule) => sum + recurringMonthlyBaseAmount(rule), 0);
+  const commitmentsRate = averageIncome > 0 ? (recurringCommitments / averageIncome) * 100 : 0;
+
+  const savingsPoints = savingsRate >= 20 ? 30 : savingsRate > 0 ? Math.max(3, (savingsRate / 20) * 30) : 0;
+  const reservePoints = Math.min(25, Math.max(0, (emergencyMonths / 6) * 25));
+  const debtPoints = !cards.length || cardLimit <= 0 ? 14 : utilization <= 30 ? 20 : utilization >= 90 ? 0 : Math.max(0, 20 * (1 - (utilization - 30) / 60));
+  const budgetPoints = monthlyBudgets.length ? (budgetOnTrackRate / 100) * 15 : 10;
+  const cashFlowPoints = averageNet >= 0 ? 10 : Math.max(0, 10 + (averageNet / Math.max(averageExpenses, 1)) * 10);
+  const score = Math.round(Math.max(0, Math.min(100, savingsPoints + reservePoints + debtPoints + budgetPoints + cashFlowPoints)));
+  const label = score >= 80 ? "Strong" : score >= 65 ? "Stable" : score >= 45 ? "Needs attention" : "At risk";
+  return {
+    score, label, averageIncome, averageExpenses, averageNet, savingsRate, liquidAssets, emergencyMonths,
+    cardDebt, cardLimit, utilization, monthlyBudgets, budgetsOnTrack, budgetOnTrackRate,
+    recurringCommitments, commitmentsRate,
+    breakdown: [
+      ["Savings rate", savingsPoints, 30], ["Emergency reserve", reservePoints, 25],
+      ["Credit-card usage", debtPoints, 20], ["Budget control", budgetPoints, 15], ["Cash-flow direction", cashFlowPoints, 10],
+    ],
+  };
+}
+
+function healthMetricCard(label, valueHTML, detail, toneClass = "") {
+  return `<article class="health-metric-card"><span>${escapeHTML(label)}</span><strong class="${toneClass}">${valueHTML}</strong><small>${escapeHTML(detail)}</small></article>`;
+}
+
+function healthRecommendationsFor(data) {
+  const items = [];
+  if (data.savingsRate < 0) items.push(["Restore positive cash flow", "Average expenses are above average income. Review the largest categories and upcoming recurring commitments.", "urgent"]);
+  else if (data.savingsRate < 10) items.push(["Raise the savings rate", "Aim to keep at least 10% of income after regular expenses before increasing discretionary spending.", "warning"]);
+  else items.push(["Protect your savings momentum", `Your recent savings rate is ${data.savingsRate.toFixed(1)}%. Keep directing the surplus toward reserves and goals.`, "good"]);
+  if (data.emergencyMonths < 1) items.push(["Build a first-month reserve", "Liquid accounts cover less than one average month of expenses. A one-month buffer is a useful first milestone.", "urgent"]);
+  else if (data.emergencyMonths < 3) items.push(["Continue building reserves", `Liquid funds cover about ${data.emergencyMonths.toFixed(1)} months. Consider working toward three to six months.`, "warning"]);
+  else items.push(["Emergency reserve is progressing", `Liquid funds cover about ${data.emergencyMonths.toFixed(1)} months of recent expenses.`, "good"]);
+  if (data.utilization > 70) items.push(["Reduce card utilization", `Combined card utilization is ${data.utilization.toFixed(1)}%. Prioritize high-balance cards and avoid adding new revolving debt.`, "urgent"]);
+  else if (data.utilization > 30) items.push(["Watch card utilization", `Combined utilization is ${data.utilization.toFixed(1)}%. Paying balances before statement dates can reduce it.`, "warning"]);
+  if (data.monthlyBudgets.length && data.budgetsOnTrack < data.monthlyBudgets.length) items.push(["Review over-budget categories", `${data.monthlyBudgets.length - data.budgetsOnTrack} monthly budget${data.monthlyBudgets.length - data.budgetsOnTrack === 1 ? " is" : "s are"} above the current limit.`, "warning"]);
+  if (data.commitmentsRate > 60) items.push(["Recurring commitments are high", `${data.commitmentsRate.toFixed(1)}% of average income is committed to recurring expenses. Review subscriptions and fixed bills.`, "warning"]);
+  return items.slice(0, 5);
+}
+
+function renderFinancialHealth() {
+  if (!el.healthHero || !el.dashboardHealthSummary) return;
+  const data = financialHealthData();
+  const scoreTone = data.score >= 80 ? "positive" : data.score >= 65 ? "" : data.score >= 45 ? "warning" : "negative";
+  el.healthHero.innerHTML = `<article class="health-score-card ${scoreTone}"><div class="health-score-ring" style="--health-score:${data.score}"><strong>${data.score}</strong><span>/ 100</span></div><div><p class="eyebrow">Overall score</p><h2>${escapeHTML(data.label)}</h2><p>Based on the last three months of AED-converted activity, liquid reserves, budget status, and credit-card usage.</p></div></article>`;
+  el.healthMetrics.innerHTML = [
+    healthMetricCard("Average savings rate", `${data.savingsRate.toFixed(1)}%`, `${formatMoneyText(data.averageNet)} average monthly surplus`, tone(data.savingsRate)),
+    healthMetricCard("Emergency reserve", `${data.emergencyMonths.toFixed(1)} months`, `${formatMoneyText(data.liquidAssets)} in liquid accounts`, data.emergencyMonths >= 3 ? "positive" : data.emergencyMonths < 1 ? "negative" : "warning"),
+    healthMetricCard("Credit utilization", `${data.utilization.toFixed(1)}%`, data.cardLimit ? `${formatMoneyText(data.cardDebt)} of ${formatMoneyText(data.cardLimit)}` : "Add card limits for a complete calculation", data.utilization > 70 ? "negative" : data.utilization > 30 ? "warning" : "positive"),
+    healthMetricCard("Budgets on track", data.monthlyBudgets.length ? `${data.budgetsOnTrack}/${data.monthlyBudgets.length}` : "Not set", data.monthlyBudgets.length ? `${data.budgetOnTrackRate.toFixed(0)}% within limits` : "Create monthly budgets to measure this", data.budgetOnTrackRate >= 80 ? "positive" : "warning"),
+    healthMetricCard("Recurring commitments", formatMoneyText(data.recurringCommitments), data.averageIncome ? `${data.commitmentsRate.toFixed(1)}% of average income` : "Add income history for a ratio", data.commitmentsRate > 60 ? "negative" : data.commitmentsRate > 40 ? "warning" : ""),
+    healthMetricCard("Average monthly flow", formatMoneyText(data.averageNet), `${formatMoneyText(data.averageIncome)} income · ${formatMoneyText(data.averageExpenses)} expenses`, tone(data.averageNet)),
+  ].join("");
+  const recommendations = healthRecommendationsFor(data);
+  el.healthRecommendations.innerHTML = `<div class="health-recommendation-list">${recommendations.map(([title, copy, status]) => `<article class="health-recommendation ${status}"><span aria-hidden="true">${status === "good" ? "✓" : status === "urgent" ? "!" : "→"}</span><div><strong>${escapeHTML(title)}</strong><p>${escapeHTML(copy)}</p></div></article>`).join("")}</div>`;
+  el.healthScoreBreakdown.innerHTML = `<div class="health-breakdown-list">${data.breakdown.map(([label, points, maximum]) => `<div class="health-breakdown-row"><div><strong>${escapeHTML(label)}</strong><span>${points.toFixed(1)} of ${maximum} points</span></div><div class="health-breakdown-track"><span style="width:${Math.min(100, (points / maximum) * 100)}%"></span></div></div>`).join("")}</div>`;
+  const missing = missingRateCurrencies();
+  const currencies = [...new Set(state.accounts.map(accountCurrency))];
+  el.healthCurrencyCoverage.innerHTML = missing.length
+    ? `<div class="currency-warning"><strong>Exchange rate needed</strong><span>Add a current rate for ${escapeHTML(missing.join(", "))}. Those accounts are excluded from AED net worth and health calculations until a rate exists.</span></div>`
+    : `<div class="currency-ok"><strong>All account currencies are covered</strong><span>${escapeHTML(currencies.join(", "))} balances can be converted to AED using dated rates.</span></div>`;
+  el.dashboardHealthSummary.innerHTML = `<div class="dashboard-health-compact"><div class="dashboard-health-score ${scoreTone}"><strong>${data.score}</strong><span>${escapeHTML(data.label)}</span></div><div>${healthMetricCard("Savings rate", `${data.savingsRate.toFixed(1)}%`, "3-month average", tone(data.savingsRate))}${healthMetricCard("Reserve", `${data.emergencyMonths.toFixed(1)} months`, "Liquid funds", data.emergencyMonths >= 3 ? "positive" : "warning")}${healthMetricCard("Card use", `${data.utilization.toFixed(1)}%`, "Combined utilization", data.utilization > 70 ? "negative" : data.utilization > 30 ? "warning" : "positive")}</div></div>`;
+}
+
+function renderExchangeRates() {
+  if (!el.exchangeRatesList) return;
+  const foreignCurrencies = [...new Set(state.accounts.map(accountCurrency).filter((currency) => currency !== BASE_CURRENCY))];
+  const missing = missingRateCurrencies();
+  el.currencyRateSummary.innerHTML = missing.length
+    ? `<div class="currency-warning"><strong>Missing current rates: ${escapeHTML(missing.join(", "))}</strong><span>Add a rate so net worth and reports can include these accounts.</span></div>`
+    : foreignCurrencies.length ? `<div class="currency-ok"><strong>All foreign accounts have a rate</strong><span>AED remains the reporting and budget currency.</span></div>` : `<div class="currency-ok"><strong>AED is your only account currency</strong><span>Add a foreign-currency account whenever needed.</span></div>`;
+  const rates = sortedExchangeRates();
+  el.exchangeRatesList.innerHTML = rates.length ? `<div class="exchange-rate-list">${rates.map((rate) => `<article class="exchange-rate-row"><div><strong>1 AED = ${trimDecimal(rate.units_per_base, 8)} ${escapeHTML(rate.currency_code)}</strong><span>Effective ${formatDate(rate.effective_date)}${rate.notes ? ` · ${escapeHTML(rate.notes)}` : ""}</span></div><div class="row-actions"><button class="row-action" data-action="edit-exchange-rate" data-id="${rate.id}" aria-label="Edit exchange rate">✎</button><button class="row-action danger" data-action="delete-exchange-rate" data-id="${rate.id}" aria-label="Delete exchange rate">×</button></div></article>`).join("")}</div>` : emptyHTML("No foreign exchange rates", "Add a rate when you create an account in PHP or another currency.");
+}
+
+function openExchangeRateModal(id = null) {
+  el.exchangeRateForm.reset();
+  el.exchangeRateId.value = "";
+  el.exchangeRateDate.value = todayISO();
+  el.exchangeRateCurrency.innerHTML = currencyOptionsHTML("PHP", false);
+  el.exchangeRateCurrency.value = "PHP";
+  el.exchangeRateFormError.textContent = "";
+  if (id) {
+    const rate = state.exchangeRates.find((item) => item.id === id);
+    if (!rate) return;
+    el.exchangeRateId.value = id;
+    el.exchangeRateCurrency.value = normalizeCurrencyCode(rate.currency_code);
+    el.exchangeRateDate.value = rate.effective_date;
+    el.exchangeRateValue.value = number(rate.units_per_base);
+    el.exchangeRateNotes.value = rate.notes || "";
+    el.exchangeRateModalTitle.textContent = "Edit exchange rate";
+  } else {
+    const missing = missingRateCurrencies();
+    if (missing[0] && [...el.exchangeRateCurrency.options].some((option) => option.value === missing[0])) el.exchangeRateCurrency.value = missing[0];
+    el.exchangeRateModalTitle.textContent = "Add exchange rate";
+  }
+  updateExchangeRateModalCurrency();
+  openModal(el.exchangeRateModal);
+  el.exchangeRateValue.focus();
+}
+
+function updateExchangeRateModalCurrency() {
+  const currency = normalizeCurrencyCode(el.exchangeRateCurrency.value || "PHP");
+  el.exchangeRateValueCurrency.textContent = currency;
+  el.exchangeRateValueLabel.textContent = `AED to ${currency} rate`;
+}
+
+async function upsertExchangeRate(currency, effectiveDate, unitsPerBase, notes = "") {
+  const normalized = normalizeCurrencyCode(currency);
+  if (normalized === BASE_CURRENCY) return null;
+  const existing = state.exchangeRates.find((rate) => normalizeCurrencyCode(rate.currency_code) === normalized && rate.effective_date === effectiveDate);
+  const row = { currency_code: normalized, units_per_base: number(unitsPerBase), effective_date: effectiveDate, notes: String(notes || "").slice(0, 200) };
+  if (existing) {
+    const updated = await updateRow("exchange_rates", existing.id, row);
+    state.exchangeRates = state.exchangeRates.map((item) => item.id === existing.id ? { ...item, ...updated } : item);
+    return updated;
+  }
+  const inserted = await insertRow("exchange_rates", row);
+  state.exchangeRates.push(inserted);
+  return inserted;
+}
+
+async function handleExchangeRateSubmit(event) {
+  event.preventDefault();
+  el.exchangeRateFormError.textContent = "";
+  const id = el.exchangeRateId.value;
+  const currency = normalizeCurrencyCode(el.exchangeRateCurrency.value);
+  const effectiveDate = el.exchangeRateDate.value;
+  const unitsPerBase = number(el.exchangeRateValue.value);
+  const notes = el.exchangeRateNotes.value.trim();
+  if (currency === BASE_CURRENCY) return showFormError(el.exchangeRateFormError, "AED is the base currency and always has a rate of 1.");
+  if (!effectiveDate) return showFormError(el.exchangeRateFormError, "Choose an effective date.");
+  if (!(unitsPerBase > 0)) return showFormError(el.exchangeRateFormError, "Enter a rate greater than zero.");
+  const duplicate = state.exchangeRates.some((rate) => rate.id !== id && normalizeCurrencyCode(rate.currency_code) === currency && rate.effective_date === effectiveDate);
+  if (duplicate) return showFormError(el.exchangeRateFormError, `A ${currency} rate already exists for this date.`);
+  try {
+    const row = { currency_code: currency, units_per_base: unitsPerBase, effective_date: effectiveDate, notes };
+    if (id) {
+      const updated = await updateRow("exchange_rates", id, row);
+      state.exchangeRates = state.exchangeRates.map((item) => item.id === id ? { ...item, ...updated } : item);
+      showToast("Exchange rate updated.");
+    } else {
+      state.exchangeRates.push(await insertRow("exchange_rates", row));
+      showToast("Exchange rate added.");
+    }
+    persistLocal(); closeModal(el.exchangeRateModal); render();
+  } catch (error) { showFormError(el.exchangeRateFormError, friendlyError(error)); }
+}
+
+async function deleteExchangeRate(id) {
+  const rate = state.exchangeRates.find((item) => item.id === id);
+  if (!rate || !confirm(`Delete the ${rate.currency_code} exchange rate for ${formatDate(rate.effective_date)}?`)) return;
+  try {
+    await deleteRow("exchange_rates", id);
+    state.exchangeRates = state.exchangeRates.filter((item) => item.id !== id);
+    persistLocal(); render(); showToast("Exchange rate deleted.");
+  } catch (error) { showToast(friendlyError(error), true); }
+}
+
 function renderSettings() {
   const cloud = mode === "cloud";
   el.settingsStatus.innerHTML = `<span class="status-dot"></span><div><strong>${cloud ? "Supabase cloud sync active" : "Local preview active"}</strong><span>${cloud ? `Signed in as ${escapeHTML(user?.email || "")}. Changes are saved to your Supabase database.` : "Data is currently saved only in this browser's localStorage and will not appear on another device."}</span></div>`;
 }
 
 function renderSelectors() {
-  const accountOptions = state.accounts.map((account) => `<option value="${account.id}">${escapeHTML(account.name)} (${formatMoneyText(calculateAccountBalance(account.id))})</option>`).join("");
+  const accountOptions = state.accounts.map((account) => `<option value="${account.id}">${escapeHTML(account.name)} (${escapeHTML(formatCurrencyText(calculateAccountBalance(account.id), accountCurrency(account)))})</option>`).join("");
   [el.entryAccount, el.transferFromAccount, el.transferToAccount, el.recurringAccount, el.recurringFromAccount, el.recurringToAccount, el.billAccount].forEach((select) => {
     const previous = select.value;
     select.innerHTML = accountOptions || `<option value="">No accounts available</option>`;
@@ -2607,7 +2994,7 @@ function renderSelectors() {
   el.calendarAccountFilter.innerHTML = `<option value="all">All accounts</option>${state.accounts.map((account) => `<option value="${account.id}">${escapeHTML(account.name)}</option>`).join("")}`;
   if ([...el.calendarAccountFilter.options].some((option) => option.value === calendarAccountPrevious)) el.calendarAccountFilter.value = calendarAccountPrevious;
   const reconcileAccountPrevious = el.reconcileAccount.value;
-  el.reconcileAccount.innerHTML = state.accounts.map((account) => `<option value="${account.id}">${escapeHTML(account.name)} (${formatMoneyText(calculateAccountBalance(account.id))})</option>`).join("") || `<option value="">No accounts available</option>`;
+  el.reconcileAccount.innerHTML = state.accounts.map((account) => `<option value="${account.id}">${escapeHTML(account.name)} (${escapeHTML(formatCurrencyText(calculateAccountBalance(account.id), accountCurrency(account)))})</option>`).join("") || `<option value="">No accounts available</option>`;
   if ([...el.reconcileAccount.options].some((option) => option.value === reconcileAccountPrevious)) el.reconcileAccount.value = reconcileAccountPrevious;
   const importAccountPrevious = el.importDefaultAccount.value;
   el.importDefaultAccount.innerHTML = `<option value="">Use account names from file</option>${state.accounts.map((account) => `<option value="${account.id}">${escapeHTML(account.name)}</option>`).join("")}`;
@@ -2620,6 +3007,26 @@ function renderSelectors() {
   const budgetPrevious = el.budgetCategory.value;
   el.budgetCategory.innerHTML = state.categories.filter((category) => category.kind === "expense").sort((a, b) => a.name.localeCompare(b.name)).map((category) => `<option value="${category.id}">${escapeHTML(category.name)}</option>`).join("") || `<option value="">No expense categories</option>`;
   if ([...el.budgetCategory.options].some((option) => option.value === budgetPrevious)) el.budgetCategory.value = budgetPrevious;
+  if (!el.accountCurrency.options.length) el.accountCurrency.innerHTML = currencyOptionsHTML(BASE_CURRENCY);
+  const rateCurrencyPrevious = el.exchangeRateCurrency.value || "PHP";
+  el.exchangeRateCurrency.innerHTML = currencyOptionsHTML(rateCurrencyPrevious, false);
+  if ([...el.exchangeRateCurrency.options].some((option) => option.value === rateCurrencyPrevious)) el.exchangeRateCurrency.value = rateCurrencyPrevious;
+  updateAuxiliaryCurrencyFields();
+}
+
+
+function updateAuxiliaryCurrencyFields() {
+  if (el.reconcileCurrency) setCurrencyInputPrefix(el.reconcileCurrency, accountCurrency(el.reconcileAccount.value));
+  if (el.recurringAmountCurrency) {
+    const recurringCurrency = el.recurringType.value === "transfer" ? accountCurrency(el.recurringFromAccount.value) : accountCurrency(el.recurringAccount.value);
+    setCurrencyInputPrefix(el.recurringAmountCurrency, recurringCurrency);
+  }
+  if (el.billAmountCurrency) setCurrencyInputPrefix(el.billAmountCurrency, accountCurrency(el.billAccount.value));
+  if (el.creditCardStatementCurrency) {
+    const cardCurrency = accountCurrency(el.creditCardStatementAccount.value);
+    setCurrencyInputPrefix(el.creditCardStatementCurrency, cardCurrency);
+    setCurrencyInputPrefix(el.creditCardMinimumCurrency, cardCurrency);
+  }
 }
 
 function renderEntryCategories(type) {
@@ -2664,7 +3071,7 @@ function transactionCategorySummary(transaction) {
   const allocations = transactionAllocations(transaction);
   if (!allocations.length) return "Uncategorized";
   if (allocations.length === 1) return categoryById(allocations[0].category_id)?.name || "Uncategorized";
-  const visible = allocations.slice(0, 3).map((allocation) => `${categoryById(allocation.category_id)?.name || "Uncategorized"} ${formatMoneyText(allocation.amount)}`);
+  const visible = allocations.slice(0, 3).map((allocation) => `${categoryById(allocation.category_id)?.name || "Uncategorized"} ${formatCurrencyText(allocation.amount, transactionCurrency(transaction))}`);
   return `Split: ${visible.join(" + ")}${allocations.length > 3 ? ` + ${allocations.length - 3} more` : ""}`;
 }
 
@@ -2690,7 +3097,8 @@ function addSplitRow(row = {}, deferSummary = false) {
   if (type === "transfer") return;
   const wrapper = document.createElement("div");
   wrapper.className = "split-row";
-  wrapper.innerHTML = `<label class="field"><span>Category</span><select class="split-category">${entryCategoryOptionsHTML(type, row.category_id || "")}</select></label><label class="field"><span>Amount</span><div class="money-input"><span class="aed-symbol" aria-hidden="true"></span><input class="split-amount" type="number" min="0.01" step="0.01" inputmode="decimal" value="${row.amount ? escapeHTML(number(row.amount).toFixed(2)) : ""}" placeholder="0.00" /></div></label><button class="row-action danger split-remove" type="button" data-remove-split aria-label="Remove split">×</button>`;
+  const currency = accountCurrency(el.entryAccount.value);
+  wrapper.innerHTML = `<label class="field"><span>Category</span><select class="split-category">${entryCategoryOptionsHTML(type, row.category_id || "")}</select></label><label class="field"><span>Amount</span><div class="money-input"><span class="currency-input-prefix" aria-hidden="true">${escapeHTML(currency)}</span><input class="split-amount" type="number" min="0.01" step="0.01" inputmode="decimal" value="${row.amount ? escapeHTML(number(row.amount).toFixed(2)) : ""}" placeholder="0.00" /></div></label><button class="row-action danger split-remove" type="button" data-remove-split aria-label="Remove split">×</button>`;
   el.entrySplitRows.append(wrapper);
   if (!deferSummary) updateSplitSummary();
 }
@@ -2715,7 +3123,8 @@ function collectSplitRows() {
   if (rows.some((row) => categoryById(row.category_id)?.kind !== type)) throw new Error(`Every split must use an ${type} category.`);
   const total = roundMoney(rows.reduce((sum, row) => sum + row.amount, 0));
   const transactionAmount = roundMoney(el.entryAmount.value);
-  if (Math.abs(total - transactionAmount) >= 0.005) throw new Error(`Split amounts must equal ${formatMoneyText(transactionAmount)}. ${formatMoneyText(transactionAmount - total)} remains.`);
+  const currency = accountCurrency(el.entryAccount.value);
+  if (Math.abs(total - transactionAmount) >= 0.005) throw new Error(`Split amounts must equal ${formatCurrencyText(transactionAmount, currency)}. ${formatCurrencyText(transactionAmount - total, currency)} remains.`);
   return rows;
 }
 
@@ -2727,8 +3136,9 @@ function updateSplitSummary() {
   const balanced = amount > 0 && Math.abs(remaining) < 0.005;
   el.entrySplitSummary.classList.toggle("balanced", balanced);
   el.entrySplitSummary.classList.toggle("unbalanced", !balanced && el.entrySplitEnabled.checked);
-  el.entrySplitTotal.textContent = formatMoneyText(total);
-  el.entrySplitRemaining.textContent = balanced ? "Balanced" : `${formatMoneyText(remaining)} remaining`;
+  const currency = accountCurrency(el.entryAccount.value);
+  el.entrySplitTotal.textContent = formatCurrencyText(total, currency);
+  el.entrySplitRemaining.textContent = balanced ? "Balanced" : `${formatCurrencyText(remaining, currency)} remaining`;
   ensureMinimumSplitRows();
 }
 
@@ -2753,6 +3163,79 @@ function setEntryType(type) {
   renderEntryCategories(type);
   if (type === "transfer") setSplitMode(false);
   else setSplitMode(el.entrySplitEnabled.checked);
+  updateTransactionCurrencyFields("type");
+}
+
+
+function setCurrencyInputPrefix(element, currency) {
+  if (!element) return;
+  const normalized = normalizeCurrencyCode(currency);
+  element.textContent = normalized;
+  element.dataset.currency = normalized;
+}
+
+function updateTransactionCurrencyFields(source = "account") {
+  if (!el.entryType) return;
+  const type = el.entryType.value;
+  const date = el.entryDate.value || todayISO();
+  if (type === "transfer") {
+    const fromCurrency = accountCurrency(el.transferFromAccount.value);
+    const toCurrency = accountCurrency(el.transferToAccount.value);
+    setCurrencyInputPrefix(el.entryAmountCurrency, fromCurrency);
+    el.entryAmountLabel.textContent = `Amount sent (${fromCurrency})`;
+    setCurrencyInputPrefix(el.transferDestinationCurrency, toCurrency);
+    el.transferRateLabel.textContent = `1 ${fromCurrency} equals`;
+    el.transferRateCurrency.textContent = toCurrency;
+    const crossCurrency = fromCurrency !== toCurrency;
+    el.transferFxPanel.hidden = !crossCurrency;
+    el.entryFxPanel.hidden = true;
+    if (!crossCurrency) {
+      el.transferDestinationAmount.value = el.entryAmount.value || "";
+      el.transferExchangeRate.value = "1";
+      el.transferFxPreview.textContent = `Same-currency transfer in ${fromCurrency}.`;
+      return;
+    }
+    const sourceAmount = number(el.entryAmount.value);
+    let rate = number(el.transferExchangeRate.value);
+    let destination = number(el.transferDestinationAmount.value);
+    if (["account", "type", "open"].includes(source) || !(rate > 0)) {
+      const suggested = crossCurrencyRate(fromCurrency, toCurrency, date);
+      if (suggested) rate = suggested;
+    }
+    if (source === "destination" && sourceAmount > 0 && destination > 0) rate = destination / sourceAmount;
+    else if (source === "rate" && sourceAmount > 0 && rate > 0) destination = sourceAmount * rate;
+    else if ((source === "amount" || source === "account" || source === "type" || source === "open") && sourceAmount > 0 && rate > 0) destination = sourceAmount * rate;
+    if (rate > 0) el.transferExchangeRate.value = trimDecimal(rate, 8);
+    if (destination > 0 && source !== "destination") el.transferDestinationAmount.value = roundMoney(destination).toFixed(2);
+    const baseSource = amountToBase(sourceAmount, fromCurrency, date);
+    const baseDestination = amountToBase(destination, toCurrency, date);
+    const difference = baseSource != null && baseDestination != null ? baseDestination - baseSource : null;
+    el.transferFxPreview.innerHTML = `${formatCurrencyText(sourceAmount, fromCurrency)} → ${formatCurrencyText(destination, toCurrency)} · Effective rate: 1 ${fromCurrency} = ${rate > 0 ? trimDecimal(rate, 6) : "—"} ${toCurrency}${difference != null ? ` · AED value difference ${formatMoneyText(difference)}` : ""}`;
+    return;
+  }
+
+  const currency = accountCurrency(el.entryAccount.value);
+  setCurrencyInputPrefix(el.entryAmountCurrency, currency);
+  el.entryAmountLabel.textContent = `Amount (${currency})`;
+  el.transferFxPanel.hidden = true;
+  const foreign = currency !== BASE_CURRENCY;
+  el.entryFxPanel.hidden = !foreign;
+  if (!foreign) {
+    el.entryUnitsPerBase.value = "1";
+    el.entryBaseAmountPreview.textContent = "Stored and reported in AED.";
+    return;
+  }
+  el.entryRateCurrency.textContent = currency;
+  let rate = number(el.entryUnitsPerBase.value);
+  if (["account", "type", "open"].includes(source) || !(rate > 0)) rate = exchangeRateFor(currency, date) || rate;
+  if (rate > 0) el.entryUnitsPerBase.value = trimDecimal(rate, 8);
+  const baseAmount = rate > 0 ? amountToBase(el.entryAmount.value, currency, date, rate) : null;
+  el.entryFxHelp.textContent = rate > 0 ? `Historical reports will use this rate for ${formatDate(date)}.` : `No ${currency} rate is saved for this date.`;
+  el.entryBaseAmountPreview.innerHTML = baseAmount != null ? `${formatCurrencyText(el.entryAmount.value, currency)} = ${formatMoneyHTML(baseAmount)} for budgets and reports.` : `Add a rate such as 1 AED = 15.50 ${currency}.`;
+}
+
+function trimDecimal(value, digits = 8) {
+  return Number(number(value).toFixed(digits)).toString();
 }
 
 function openTransactionModal(id = null, presetDate = "", billId = "") {
@@ -2765,6 +3248,9 @@ function openTransactionModal(id = null, presetDate = "", billId = "") {
   el.entrySplitRows.innerHTML = "";
   el.entrySplitEnabled.checked = false;
   el.entryDate.value = presetDate || todayISO();
+  el.entryUnitsPerBase.value = "";
+  el.transferDestinationAmount.value = "";
+  el.transferExchangeRate.value = "";
   el.transactionFormError.textContent = "";
   el.receiptFileHelp.textContent = mode === "cloud"
     ? "Receipts are stored privately in your Supabase project and are available on your signed-in devices."
@@ -2784,8 +3270,11 @@ function openTransactionModal(id = null, presetDate = "", billId = "") {
     if (type === "transfer") {
       el.transferFromAccount.value = transaction.from_account_id || "";
       el.transferToAccount.value = transaction.to_account_id || "";
+      el.transferDestinationAmount.value = transferDestinationAmount(transaction) || "";
+      el.transferExchangeRate.value = number(transaction.exchange_rate) > 0 ? number(transaction.exchange_rate) : "";
     } else {
       el.entryAccount.value = transaction.account_id || "";
+      el.entryUnitsPerBase.value = number(transaction.exchange_rate_to_base) > 0 ? number(transaction.exchange_rate_to_base) : "";
       const splits = splitsForTransaction(transaction.id);
       if (splits.length) setSplitMode(true, splits);
       else {
@@ -2800,6 +3289,7 @@ function openTransactionModal(id = null, presetDate = "", billId = "") {
     setSplitMode(false);
     el.transactionModalTitle.textContent = "Add entry";
   }
+  updateTransactionCurrencyFields(id ? "edit" : "open");
   openModal(el.transactionModal);
   el.entryAmount.focus();
 }
@@ -2816,6 +3306,8 @@ async function handleTransactionSubmit(event) {
   const base = {
     type, amount, entry_date: el.entryDate.value, description: el.entryDescription.value.trim(), remarks,
     account_id: null, category_id: null, from_account_id: null, to_account_id: null,
+    destination_amount: null, exchange_rate: null, base_amount: null,
+    base_currency_code: BASE_CURRENCY, exchange_rate_to_base: null,
   };
   if (!(amount > 0)) return showFormError(el.transactionFormError, "Enter an amount greater than zero.");
   if (!base.entry_date) return showFormError(el.transactionFormError, "Choose a transaction date.");
@@ -2827,6 +3319,22 @@ async function handleTransactionSubmit(event) {
     base.to_account_id = el.transferToAccount.value;
     if (!base.from_account_id || !base.to_account_id) return showFormError(el.transactionFormError, "Choose both transfer accounts.");
     if (base.from_account_id === base.to_account_id) return showFormError(el.transactionFormError, "Choose two different accounts.");
+    const sourceCurrency = accountCurrency(base.from_account_id);
+    const destinationCurrency = accountCurrency(base.to_account_id);
+    if (sourceCurrency === destinationCurrency) {
+      base.destination_amount = amount;
+      base.exchange_rate = 1;
+    } else {
+      base.destination_amount = number(el.transferDestinationAmount.value);
+      base.exchange_rate = number(el.transferExchangeRate.value) || (base.destination_amount / amount);
+      if (!(base.destination_amount > 0)) return showFormError(el.transactionFormError, "Enter the amount received in the destination account.");
+      if (!(base.exchange_rate > 0)) return showFormError(el.transactionFormError, "Enter a valid exchange rate.");
+    }
+    const sourceUnitsPerBase = exchangeRateFor(sourceCurrency, base.entry_date);
+    if (sourceCurrency === BASE_CURRENCY || sourceUnitsPerBase) {
+      base.exchange_rate_to_base = sourceCurrency === BASE_CURRENCY ? 1 : sourceUnitsPerBase;
+      base.base_amount = amountToBase(amount, sourceCurrency, base.entry_date, base.exchange_rate_to_base);
+    }
   } else {
     base.account_id = el.entryAccount.value;
     if (!base.account_id) return showFormError(el.transactionFormError, "Choose an account.");
@@ -2837,6 +3345,11 @@ async function handleTransactionSubmit(event) {
     }
     base.category_id = splitRows.length ? null : el.entryCategory.value || null;
     if (!splitRows.length && !base.category_id) return showFormError(el.transactionFormError, `Create or select an ${type} category.`);
+    const currency = accountCurrency(base.account_id);
+    const unitsPerBase = currency === BASE_CURRENCY ? 1 : number(el.entryUnitsPerBase.value) || exchangeRateFor(currency, base.entry_date);
+    if (currency !== BASE_CURRENCY && !(unitsPerBase > 0)) return showFormError(el.transactionFormError, `Add an exchange rate for ${currency} or enter one for this transaction.`);
+    base.exchange_rate_to_base = unitsPerBase;
+    base.base_amount = amountToBase(amount, currency, base.entry_date, unitsPerBase);
   }
 
   let newlyUploadedPath = "";
@@ -3369,6 +3882,9 @@ function openAccountModal(id = null) {
   el.accountOpeningBalance.value = "0";
   el.accountIncludeNetWorth.checked = true;
   el.accountType.value = "current";
+  el.accountCurrency.innerHTML = currencyOptionsHTML(BASE_CURRENCY);
+  el.accountCurrency.value = BASE_CURRENCY;
+  el.accountExchangeRate.value = "";
   el.accountColor.value = ACCOUNT_COLORS.current;
   el.accountCardNetwork.value = "visa";
   el.accountCardLastFour.value = "";
@@ -3383,7 +3899,9 @@ function openAccountModal(id = null) {
     el.accountId.value = id;
     el.accountName.value = account.name;
     el.accountType.value = account.type;
+    el.accountCurrency.value = accountCurrency(account);
     el.accountOpeningBalance.value = number(account.opening_balance);
+    el.accountExchangeRate.value = accountCurrency(account) === BASE_CURRENCY ? "" : exchangeRateFor(accountCurrency(account), todayISO()) || "";
     el.accountColor.value = safeColor(account.color);
     el.accountIncludeNetWorth.checked = account.include_in_net_worth !== false;
     el.accountCardNetwork.value = normalizeCardNetwork(account.card_network);
@@ -3397,9 +3915,25 @@ function openAccountModal(id = null) {
   } else {
     el.accountModalTitle.textContent = "Add account";
   }
+  updateAccountCurrencyFields();
   updateCreditCardAccountFields();
   openModal(el.accountModal);
   el.accountName.focus();
+}
+
+
+function updateAccountCurrencyFields() {
+  if (!el.accountCurrency) return;
+  const currency = normalizeCurrencyCode(el.accountCurrency.value || BASE_CURRENCY);
+  setCurrencyInputPrefix(el.accountOpeningCurrency, currency);
+  setCurrencyInputPrefix(el.accountCreditLimitCurrency, currency);
+  el.accountExchangeRateField.hidden = currency === BASE_CURRENCY;
+  el.accountExchangeRateCurrency.textContent = currency;
+  el.accountExchangeRateLabel.textContent = `Current ${currency} exchange rate`;
+  if (currency !== BASE_CURRENCY && !(number(el.accountExchangeRate.value) > 0)) {
+    const current = exchangeRateFor(currency, todayISO());
+    if (current) el.accountExchangeRate.value = trimDecimal(current, 8);
+  }
 }
 
 function updateCreditCardAccountFields() {
@@ -3569,6 +4103,7 @@ async function handleAccountSubmit(event) {
     name: el.accountName.value.trim(),
     type: el.accountType.value,
     opening_balance: number(el.accountOpeningBalance.value),
+    currency_code: normalizeCurrencyCode(el.accountCurrency.value),
     color: safeColor(el.accountColor.value),
     include_in_net_worth: el.accountIncludeNetWorth.checked,
     credit_limit: isCreditCard ? creditLimit : null,
@@ -3579,6 +4114,16 @@ async function handleAccountSubmit(event) {
     card_accent_color: isCreditCard ? safeColor(el.accountCardAccentColor.value || "#0f172a") : null,
   };
   if (!row.name) return showFormError(el.accountFormError, "Enter an account name.");
+  if (existing && accountCurrency(existing) !== row.currency_code) {
+    const used = state.transactions.some((transaction) => [transaction.account_id, transaction.from_account_id, transaction.to_account_id].includes(existing.id))
+      || state.bills.some((bill) => bill.account_id === existing.id)
+      || state.recurringEntries.some((rule) => [rule.account_id, rule.from_account_id, rule.to_account_id].includes(existing.id))
+      || state.creditCardStatements.some((statement) => statement.account_id === existing.id)
+      || state.reconciliations.some((reconciliation) => reconciliation.account_id === existing.id);
+    if (used) return showFormError(el.accountFormError, "The currency cannot be changed after the account has transactions, bills, schedules, statements, or reconciliations. Create a new account instead.");
+  }
+  const accountRate = row.currency_code === BASE_CURRENCY ? 1 : number(el.accountExchangeRate.value);
+  if (row.currency_code !== BASE_CURRENCY && !(accountRate > 0) && !exchangeRateFor(row.currency_code, todayISO())) return showFormError(el.accountFormError, `Enter the current rate for ${row.currency_code}.`);
   if (isCreditCard && lastFour && !/^\d{4}$/.test(lastFour)) return showFormError(el.accountFormError, "Last 4 digits must contain exactly four numbers.");
   if (isCreditCard && creditLimitRaw && !(creditLimit > 0)) return showFormError(el.accountFormError, "Credit limit must be greater than zero.");
   if (closingDay !== null && (closingDay < 1 || closingDay > 31)) return showFormError(el.accountFormError, "Statement closing day must be between 1 and 31.");
@@ -3619,6 +4164,7 @@ async function handleAccountSubmit(event) {
       newlyInsertedId = "";
       showToast(selectedCardArtworkFile ? "Account and card artwork added." : "Account added.");
     }
+    if (row.currency_code !== BASE_CURRENCY && accountRate > 0) await upsertExchangeRate(row.currency_code, todayISO(), accountRate, "Updated from account settings");
     persistLocal(); closeModal(el.accountModal); resetCardArtworkFormState(); render();
   } catch (error) {
     if (newlyUploadedPath) await removeCardArtworkFile(newlyUploadedPath, false);
@@ -3652,6 +4198,7 @@ function openCreditCardStatementModal(id = null, presetAccountId = "") {
     el.creditCardStatementModalTitle.textContent = "Add statement";
     updateCreditCardStatementDueDate();
   }
+  updateAuxiliaryCurrencyFields();
   openModal(el.creditCardStatementModal);
   el.creditCardStatementBalance.focus();
 }
@@ -3719,11 +4266,25 @@ function openCreditCardPayment(accountId) {
   el.transferToAccount.value = accountId;
   el.entryDescription.value = `${card.name} payment`;
   const latest = latestCreditCardStatement(accountId);
+  let preserveDestination = false;
   if (latest) {
     const status = creditCardStatementStatus(latest);
-    el.entryAmount.value = status.outstanding > 0 ? status.outstanding.toFixed(2) : "";
+    const sourceCurrency = accountCurrency(source);
+    const cardCurrency = accountCurrency(card);
+    const rate = crossCurrencyRate(sourceCurrency, cardCurrency, todayISO());
+    if (status.outstanding > 0) {
+      if (sourceCurrency === cardCurrency) {
+        el.entryAmount.value = status.outstanding.toFixed(2);
+      } else if (rate) {
+        el.entryAmount.value = roundMoney(status.outstanding / rate).toFixed(2);
+        el.transferDestinationAmount.value = status.outstanding.toFixed(2);
+        el.transferExchangeRate.value = trimDecimal(rate, 8);
+        preserveDestination = true;
+      }
+    }
     el.entryRemarks.value = `Payment for statement dated ${formatDate(latest.statement_date)}`;
   }
+  updateTransactionCurrencyFields(preserveDestination ? "destination" : "account");
   el.entryAmount.focus();
 }
 
@@ -3883,17 +4444,20 @@ function calculateAccountBalance(accountId, throughDate = null) {
     if (transaction.type === "income" && transaction.account_id === accountId) return balance + amount;
     if (transaction.type === "expense" && transaction.account_id === accountId) return balance - amount;
     if (transaction.type === "transfer" && transaction.from_account_id === accountId) balance -= amount;
-    if (transaction.type === "transfer" && transaction.to_account_id === accountId) balance += amount;
+    if (transaction.type === "transfer" && transaction.to_account_id === accountId) balance += transferDestinationAmount(transaction);
     return balance;
   }, number(account.opening_balance));
 }
 
 function calculateNetWorth(throughDate = null) {
-  return state.accounts.filter((account) => account.include_in_net_worth !== false).reduce((sum, account) => sum + calculateAccountBalance(account.id, throughDate), 0);
+  return state.accounts.filter((account) => account.include_in_net_worth !== false).reduce((sum, account) => {
+    const converted = accountBalanceInBase(account, throughDate);
+    return sum + (converted == null ? 0 : converted);
+  }, 0);
 }
 
 function sumTransactions(transactions, type) {
-  return transactions.filter((item) => item.type === type).reduce((sum, item) => sum + number(item.amount), 0);
+  return transactions.filter((item) => item.type === type).reduce((sum, item) => sum + transactionBaseAmount(item), 0);
 }
 
 function categoryTotals(transactions) {
@@ -3902,7 +4466,7 @@ function categoryTotals(transactions) {
     transactionAllocations(transaction).forEach((allocation) => {
       const category = categoryById(allocation.category_id) || { id: "uncategorized", name: "Uncategorized", color: "#94a3b8" };
       const current = map.get(category.id) || { id: category.id, name: category.name, color: category.color, amount: 0 };
-      current.amount += number(allocation.amount);
+      current.amount += allocationBaseAmount(transaction, allocation);
       map.set(category.id, current);
     });
   });
@@ -3923,7 +4487,7 @@ function spendingForBudget(budget, anchorMonth) {
   const prefix = budget.period === "yearly" ? anchorMonth.slice(0, 4) : anchorMonth;
   return state.transactions
     .filter((transaction) => transaction.type === "expense" && transaction.entry_date?.startsWith(prefix))
-    .reduce((sum, transaction) => sum + transactionAllocations(transaction).filter((allocation) => allocation.category_id === budget.category_id).reduce((allocationSum, allocation) => allocationSum + number(allocation.amount), 0), 0);
+    .reduce((sum, transaction) => sum + transactionAllocations(transaction).filter((allocation) => allocation.category_id === budget.category_id).reduce((allocationSum, allocation) => allocationSum + allocationBaseAmount(transaction, allocation), 0), 0);
 }
 
 function budgetMetrics(period, anchorMonth) {
@@ -4000,24 +4564,9 @@ function summaryCard(label, value, detail, className = "", money = true, suffix 
   return `<article class="summary-card"><p class="card-label">${escapeHTML(label)}</p><p class="card-value ${className}">${display}</p><p class="card-detail">${escapeHTML(detail)}</p></article>`;
 }
 
-function formatMoneyText(value) {
-  const amount = number(value);
-  const sign = amount < 0 ? "−" : "";
-  return `${sign}${CURRENCY} ${amountFormatter.format(Math.abs(amount))}`;
-}
-
-function formatCompactMoneyText(value) {
-  const amount = number(value);
-  const sign = amount < 0 ? "−" : "";
-  return `${sign}${CURRENCY} ${compactAmountFormatter.format(Math.abs(amount))}`;
-}
-
-function formatMoneyHTML(value) {
-  const amount = number(value);
-  const sign = amount < 0 ? '<span class="money-sign" aria-hidden="true">−</span>' : "";
-  const accessible = escapeHTML(formatMoneyText(amount));
-  return `<span class="money" role="text" aria-label="${accessible}">${sign}<span class="aed-symbol" aria-hidden="true"></span><span class="money-number">${amountFormatter.format(Math.abs(amount))}</span></span>`;
-}
+function formatMoneyText(value) { return formatCurrencyText(value, BASE_CURRENCY); }
+function formatCompactMoneyText(value) { return formatCurrencyCompactText(value, BASE_CURRENCY); }
+function formatMoneyHTML(value) { return formatCurrencyHTML(value, BASE_CURRENCY); }
 
 function sortedTransactions() {
   return [...state.transactions].sort((a, b) => String(b.entry_date).localeCompare(String(a.entry_date)) || String(b.created_at).localeCompare(String(a.created_at)));
@@ -4358,7 +4907,9 @@ async function readTransactionImportFile(file) {
     fromAccount: row[indexByKey.fromAccount] ?? "",
     toAccount: row[indexByKey.toAccount] ?? "",
     currency: row[indexByKey.currency] ?? "",
-  })).filter((row) => [row.date, row.type, row.amount, row.description, row.remarks, row.category, row.splitDetails, row.account, row.fromAccount, row.toAccount, row.currency].some((value) => String(value ?? "").trim()));
+    destinationAmount: row[indexByKey.destinationAmount] ?? "",
+    exchangeRate: row[indexByKey.exchangeRate] ?? "",
+  })).filter((row) => [row.date, row.type, row.amount, row.description, row.remarks, row.category, row.splitDetails, row.account, row.fromAccount, row.toAccount, row.currency, row.destinationAmount, row.exchangeRate].some((value) => String(value ?? "").trim()));
 }
 
 function normalizeImportHeader(value) {
@@ -4375,6 +4926,8 @@ function normalizeImportHeader(value) {
     fromaccount: "fromAccount", sourceaccount: "fromAccount", from: "fromAccount",
     toaccount: "toAccount", destinationaccount: "toAccount", to: "toAccount",
     currency: "currency", currencycode: "currency",
+    destinationamount: "destinationAmount", receivedamount: "destinationAmount", toamount: "destinationAmount",
+    exchangerate: "exchangeRate", conversionrate: "exchangeRate",
   };
   return aliases[key] || "";
 }
@@ -4414,6 +4967,9 @@ function validateTransactionImport() {
       accountName: String(source.account ?? "").trim(),
       fromAccountName: String(source.fromAccount ?? "").trim(),
       toAccountName: String(source.toAccount ?? "").trim(),
+      currency: currency || "",
+      destinationAmount: parseImportAmount(source.destinationAmount),
+      exchangeRate: number(source.exchangeRate),
       createCategory: false,
       matchedRuleId: null,
       matchedRuleName: "",
@@ -4439,17 +4995,23 @@ function validateTransactionImport() {
     if (!(amount > 0)) errors.push("Amount must be greater than zero.");
     if (description.length > 120) errors.push("Description is longer than 120 characters.");
     if (remarks.length > 2000) errors.push("Remarks are longer than 2,000 characters.");
-    if (currency && currency !== CURRENCY) errors.push(`Currency must be ${CURRENCY} or blank.`);
+    if (currency && !/^[A-Z]{3}$/.test(currency)) errors.push("Currency must be a three-letter code such as AED or PHP.");
 
     if (normalized.type === "expense" || normalized.type === "income") {
       normalized.accountName = normalized.accountName || fallbackAccount?.name || "";
       const account = accountMap.get(normalizeLookup(normalized.accountName));
       if (!normalized.accountName) errors.push("Account is required.");
       else if (!account) errors.push(`Account “${normalized.accountName}” does not exist.`);
+      else {
+        normalized.currency = normalized.currency || accountCurrency(account);
+        if (normalized.currency !== accountCurrency(account)) errors.push(`Currency ${normalized.currency} does not match ${account.name} (${accountCurrency(account)}).`);
+        normalized.exchangeRateToBase = normalized.currency === BASE_CURRENCY ? 1 : exchangeRateFor(normalized.currency, entryDate);
+        if (!normalized.exchangeRateToBase) errors.push(`No ${normalized.currency} exchange rate is available for ${entryDate}.`);
+      }
       if (normalized.splitItems.length) {
         if (normalized.splitItems.length < 2) errors.push("Split Details must contain at least two category amounts.");
         const splitTotal = roundMoney(normalized.splitItems.reduce((sum, split) => sum + split.amount, 0));
-        if (Math.abs(splitTotal - amount) >= 0.005) errors.push(`Split Details total ${formatMoneyText(splitTotal)} does not equal transaction amount ${formatMoneyText(amount)}.`);
+        if (Math.abs(splitTotal - amount) >= 0.005) errors.push(`Split Details total ${formatCurrencyText(splitTotal, normalized.currency || BASE_CURRENCY)} does not equal transaction amount ${formatCurrencyText(amount, normalized.currency || BASE_CURRENCY)}.`);
         const names = normalized.splitItems.map((split) => normalizeLookup(split.categoryName));
         if (new Set(names).size !== names.length) errors.push("Split Details cannot repeat the same category.");
         normalized.splitItems.forEach((split) => {
@@ -4475,6 +5037,24 @@ function validateTransactionImport() {
       if (!normalized.toAccountName) errors.push("To Account is required.");
       else if (!toAccount) errors.push(`To Account “${normalized.toAccountName}” does not exist.`);
       if (fromAccount && toAccount && fromAccount.id === toAccount.id) errors.push("Transfer accounts must be different.");
+      if (fromAccount && toAccount) {
+        const fromCurrency = accountCurrency(fromAccount);
+        const toCurrency = accountCurrency(toAccount);
+        normalized.destinationCurrency = toCurrency;
+        normalized.currency = normalized.currency || fromCurrency;
+        if (normalized.currency !== fromCurrency) errors.push(`Currency ${normalized.currency} does not match source account ${fromAccount.name} (${fromCurrency}).`);
+        normalized.exchangeRateToBase = fromCurrency === BASE_CURRENCY ? 1 : exchangeRateFor(fromCurrency, entryDate);
+        if (!normalized.exchangeRateToBase) errors.push(`No ${fromCurrency} exchange rate is available for ${entryDate}.`);
+        if (fromCurrency === toCurrency) {
+          normalized.destinationAmount = amount;
+          normalized.exchangeRate = 1;
+        } else {
+          if (!(normalized.destinationAmount > 0) && normalized.exchangeRate > 0) normalized.destinationAmount = roundMoney(amount * normalized.exchangeRate);
+          if (!(normalized.exchangeRate > 0) && normalized.destinationAmount > 0) normalized.exchangeRate = normalized.destinationAmount / amount;
+          if (!(normalized.destinationAmount > 0)) errors.push(`Destination Amount is required for ${fromCurrency} to ${toCurrency} transfers.`);
+          if (!(normalized.exchangeRate > 0)) errors.push("Exchange Rate is required for cross-currency transfers.");
+        }
+      }
     }
 
     const fingerprint = errors.length ? "" : transactionFingerprintFromImport(normalized);
@@ -4508,13 +5088,13 @@ function renderTransactionImportPreview() {
           const route = row.normalized.type === "transfer"
             ? `${row.normalized.fromAccountName || "—"} → ${row.normalized.toAccountName || "—"}`
             : row.normalized.splitItems.length
-              ? `Split: ${row.normalized.splitItems.map((split) => `${split.categoryName} ${formatMoneyText(split.amount)}`).join(" + ")} · ${row.normalized.accountName || "—"}`
+              ? `Split: ${row.normalized.splitItems.map((split) => `${split.categoryName} ${formatCurrencyText(split.amount, row.normalized.currency || BASE_CURRENCY)}`).join(" + ")} · ${row.normalized.accountName || "—"}`
               : `${row.normalized.categoryName || "—"} · ${row.normalized.accountName || "—"}`;
           const createsCategory = row.normalized.createCategory || row.normalized.splitCreateCategories.length;
           const detail = row.errors.length ? row.errors.join(" ") : row.status === "duplicate" ? "Already in Ledgerly or repeated in this file." : createsCategory ? "Ready · new category will be created." : "Ready to import.";
           const canCreateRule = !row.normalized.splitItems.length && Boolean(row.normalized.description && row.normalized.type && row.normalized.type !== "transfer" ? row.normalized.categoryName && row.normalized.accountName : row.normalized.type === "transfer" && row.normalized.fromAccountName && row.normalized.toAccountName);
           const ruleCell = row.normalized.matchedRuleName ? `<span class="matched-rule-chip">⚡ ${escapeHTML(row.normalized.matchedRuleName)}</span>` : canCreateRule ? `<button class="text-button compact-rule-button" data-action="create-rule-from-import" data-index="${index}" type="button">+ Save rule</button>` : "—";
-          return `<tr class="import-row-${row.status}"><td>${row.sourceRow}</td><td><span class="import-row-status ${row.status}">${capitalize(row.status)}</span><small>${escapeHTML(detail)}</small></td><td>${escapeHTML(row.normalized.entry_date || String(row.source.date ?? ""))}</td><td>${escapeHTML(capitalize(row.normalized.type || String(row.source.type ?? "")))}</td><td>${escapeHTML(row.normalized.description || "—")}</td><td>${escapeHTML(route)}</td><td>${row.normalized.amount > 0 ? formatMoneyHTML(row.normalized.amount) : escapeHTML(String(row.source.amount ?? ""))}</td><td>${ruleCell}</td></tr>`;
+          return `<tr class="import-row-${row.status}"><td>${row.sourceRow}</td><td><span class="import-row-status ${row.status}">${capitalize(row.status)}</span><small>${escapeHTML(detail)}</small></td><td>${escapeHTML(row.normalized.entry_date || String(row.source.date ?? ""))}</td><td>${escapeHTML(capitalize(row.normalized.type || String(row.source.type ?? "")))}</td><td>${escapeHTML(row.normalized.description || "—")}</td><td>${escapeHTML(route)}</td><td>${row.normalized.amount > 0 ? formatCurrencyHTML(row.normalized.amount, row.normalized.currency || BASE_CURRENCY) : escapeHTML(String(row.source.amount ?? ""))}</td><td>${ruleCell}</td></tr>`;
         }).join("")}</tbody>
       </table>
     </div>
@@ -4565,12 +5145,26 @@ async function importValidatedTransactions() {
         account_id: null,
         from_account_id: null,
         to_account_id: null,
+        destination_amount: null,
+        exchange_rate: null,
+        base_currency_code: BASE_CURRENCY,
+        base_amount: null,
+        exchange_rate_to_base: null,
       };
       if (normalized.type === "transfer") {
-        base.from_account_id = accountMap.get(normalizeLookup(normalized.fromAccountName)).id;
-        base.to_account_id = accountMap.get(normalizeLookup(normalized.toAccountName)).id;
+        const fromAccount = accountMap.get(normalizeLookup(normalized.fromAccountName));
+        const toAccount = accountMap.get(normalizeLookup(normalized.toAccountName));
+        base.from_account_id = fromAccount.id;
+        base.to_account_id = toAccount.id;
+        base.destination_amount = normalized.destinationAmount || normalized.amount;
+        base.exchange_rate = normalized.exchangeRate || 1;
+        base.exchange_rate_to_base = accountCurrency(fromAccount) === BASE_CURRENCY ? 1 : exchangeRateFor(accountCurrency(fromAccount), normalized.entry_date);
+        base.base_amount = base.exchange_rate_to_base ? amountToBase(base.amount, accountCurrency(fromAccount), normalized.entry_date, base.exchange_rate_to_base) : null;
       } else {
-        base.account_id = accountMap.get(normalizeLookup(normalized.accountName)).id;
+        const account = accountMap.get(normalizeLookup(normalized.accountName));
+        base.account_id = account.id;
+        base.exchange_rate_to_base = normalized.exchangeRateToBase || (accountCurrency(account) === BASE_CURRENCY ? 1 : exchangeRateFor(accountCurrency(account), normalized.entry_date));
+        base.base_amount = amountToBase(base.amount, accountCurrency(account), normalized.entry_date, base.exchange_rate_to_base);
         if (normalized.splitItems.length) {
           normalized.splitItems.forEach((split) => importedSplits.push({
             transaction_id: id,
@@ -4723,6 +5317,9 @@ function transactionFingerprintFromState(transaction) {
     accountName: accountById(transaction.account_id)?.name || "",
     fromAccountName: accountById(transaction.from_account_id)?.name || "",
     toAccountName: accountById(transaction.to_account_id)?.name || "",
+    currency: transactionCurrency(transaction),
+    destinationAmount: transaction.type === "transfer" ? transferDestinationAmount(transaction) : 0,
+    destinationCurrency: transaction.type === "transfer" ? accountCurrency(transaction.to_account_id) : "",
   });
 }
 
@@ -4738,6 +5335,9 @@ function transactionFingerprintFromImport(transaction) {
     normalizeLookup(transaction.accountName),
     normalizeLookup(transaction.fromAccountName),
     normalizeLookup(transaction.toAccountName),
+    normalizeCurrencyCode(transaction.currency || BASE_CURRENCY),
+    number(transaction.destinationAmount).toFixed(2),
+    normalizeCurrencyCode(transaction.destinationCurrency || transaction.currency || BASE_CURRENCY),
   ].join("|");
 }
 
@@ -4760,7 +5360,7 @@ function exportJSON() {
 }
 
 function exportCSV() {
-  const header = ["Date", "Type", "Description", "Remarks", "Category", "Split Details", "Account", "From account", "To account", "Amount", "Currency", "Cleared accounts", "Reconciled accounts", "Recurring schedule ID", "Scheduled date", "Receipt filename"];
+  const header = ["Date", "Type", "Description", "Remarks", "Category", "Split Details", "Account", "From account", "To account", "Amount", "Currency", "Destination amount", "Destination currency", "Exchange rate", "AED equivalent", "Cleared accounts", "Reconciled accounts", "Recurring schedule ID", "Scheduled date", "Receipt filename"];
   const rows = sortedTransactions().map((transaction) => [
     transaction.entry_date,
     transaction.type,
@@ -4772,7 +5372,13 @@ function exportCSV() {
     accountById(transaction.from_account_id)?.name || "",
     accountById(transaction.to_account_id)?.name || "",
     number(transaction.amount).toFixed(2),
-    CURRENCY,
+    transactionCurrency(transaction),
+    transaction.type === "transfer" ? transferDestinationAmount(transaction).toFixed(2) : "",
+    transaction.type === "transfer" ? accountCurrency(transaction.to_account_id) : "",
+    transaction.type === "transfer" ? number(transaction.exchange_rate || (transferDestinationAmount(transaction) / number(transaction.amount))).toFixed(8) : number(transaction.exchange_rate_to_base || 1).toFixed(8),
+    (transaction.type === "transfer"
+      ? (number(transaction.base_amount) > 0 ? number(transaction.base_amount) : amountToBase(transaction.amount, transactionCurrency(transaction), transaction.entry_date, transaction.exchange_rate_to_base) || 0)
+      : transactionBaseAmount(transaction)).toFixed(2),
     affectedAccountIds(transaction).filter((accountId) => clearingFor(transaction.id, accountId)?.is_cleared).map((accountId) => accountById(accountId)?.name || "").filter(Boolean).join(" | "),
     affectedAccountIds(transaction).filter((accountId) => clearingFor(transaction.id, accountId)?.reconciliation_id).map((accountId) => accountById(accountId)?.name || "").filter(Boolean).join(" | "),
     transaction.recurring_entry_id || "",
@@ -4805,13 +5411,13 @@ async function importJSON(event) {
 
 async function replaceCloudState(imported) {
   setSyncStatus("syncing", "Restoring backup");
-  for (const table of ["transaction_clearings", "reconciliations", "credit_card_statements", "transaction_splits", "transactions", "bills", "budgets", "recurring_entries", "import_rules", "accounts", "categories", "user_preferences"]) {
+  for (const table of ["transaction_clearings", "reconciliations", "credit_card_statements", "transaction_splits", "transactions", "bills", "budgets", "recurring_entries", "import_rules", "exchange_rates", "accounts", "categories", "user_preferences"]) {
     const { error } = await supabase.from(table).delete().eq("user_id", user.id);
     if (error) throw error;
   }
   const clean = sanitizeImportedState(imported);
   const withUser = (rows) => rows.map((row) => ({ ...row, user_id: user.id }));
-  for (const [table, rows] of [["categories", clean.categories], ["accounts", clean.accounts], ["import_rules", clean.importRules], ["recurring_entries", clean.recurringEntries], ["budgets", clean.budgets], ["transactions", clean.transactions], ["bills", clean.bills], ["transaction_splits", clean.transactionSplits], ["credit_card_statements", clean.creditCardStatements], ["reconciliations", clean.reconciliations], ["transaction_clearings", clean.transactionClearings]]) {
+  for (const [table, rows] of [["categories", clean.categories], ["accounts", clean.accounts], ["exchange_rates", clean.exchangeRates], ["import_rules", clean.importRules], ["recurring_entries", clean.recurringEntries], ["budgets", clean.budgets], ["transactions", clean.transactions], ["bills", clean.bills], ["transaction_splits", clean.transactionSplits], ["credit_card_statements", clean.creditCardStatements], ["reconciliations", clean.reconciliations], ["transaction_clearings", clean.transactionClearings]]) {
     if (!rows.length) continue;
     const { error } = await supabase.from(table).insert(withUser(rows));
     if (error) throw error;
@@ -4830,7 +5436,7 @@ function sanitizeImportedState(imported) {
   };
   const clean = normalizeState(imported);
   return {
-    version: 9,
+    version: 10,
     accounts: clean.accounts.map(strip),
     categories: clean.categories.map(strip),
     transactions: clean.transactions.map(strip),
@@ -4842,6 +5448,7 @@ function sanitizeImportedState(imported) {
     transactionClearings: clean.transactionClearings.map(strip),
     creditCardStatements: clean.creditCardStatements.map(strip),
     importRules: clean.importRules.map(strip),
+    exchangeRates: clean.exchangeRates.map(strip),
     preferences: normalizePreferences(clean.preferences),
   };
 }
@@ -4851,7 +5458,7 @@ async function resetApplication() {
   try {
     if (mode === "cloud") {
       setSyncStatus("syncing", "Resetting data");
-      for (const table of ["transaction_clearings", "reconciliations", "credit_card_statements", "transaction_splits", "transactions", "bills", "budgets", "recurring_entries", "import_rules", "accounts", "categories", "user_preferences"]) {
+      for (const table of ["transaction_clearings", "reconciliations", "credit_card_statements", "transaction_splits", "transactions", "bills", "budgets", "recurring_entries", "import_rules", "exchange_rates", "accounts", "categories", "user_preferences"]) {
         const { error } = await supabase.from(table).delete().eq("user_id", user.id);
         if (error) throw error;
       }
@@ -4891,6 +5498,7 @@ function showToast(message, isError = false) {
 function friendlyError(error) {
   const message = String(error?.message || error || "Something went wrong.");
   if (message.includes("Failed to fetch")) return "Could not reach Supabase. Check your connection and project configuration.";
+  if ((message.includes("exchange_rates") || message.includes("currency_code") || message.includes("destination_amount") || message.includes("base_amount")) && (message.includes("does not exist") || message.includes("schema cache") || message.includes("column"))) return "Multi-currency support is not ready. Run supabase/add-financial-health-multicurrency.sql in the Supabase SQL Editor.";
   if (message.includes("user_preferences") && (message.includes("does not exist") || message.includes("schema cache"))) return "Dashboard customization is not ready. Run supabase/add-receipt-ocr-dashboard-customization.sql in the Supabase SQL Editor.";
   if ((message.includes("reconciliations") || message.includes("transaction_clearings")) && (message.includes("does not exist") || message.includes("schema cache"))) return "Account reconciliation is not ready. Run supabase/add-account-reconciliation.sql in the Supabase SQL Editor.";
   if (message.includes("reconciliations_user_id_account_id_statement_date_key") || (message.includes("duplicate key") && message.includes("reconciliations"))) return "This account already has a completed reconciliation for that statement date. Undo it before creating another.";

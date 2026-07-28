@@ -8,7 +8,7 @@
   <title>Ledgerly — Personal Finance</title>
   <link rel="manifest" href="manifest.webmanifest" />
   <link rel="icon" type="image/png" href="assets/dirham-symbol.png" />
-  <link rel="stylesheet" href="styles.css?v=12" />
+  <link rel="stylesheet" href="styles.css?v=13" />
 </head>
 <body>
   <section class="auth-screen" id="authScreen">
@@ -77,6 +77,7 @@
         <button class="nav-item" data-view="bills"><span>◷</span> Bills</button>
         <button class="nav-item" data-view="budgets"><span>◎</span> Budgets</button>
         <button class="nav-item" data-view="reports"><span>⌁</span> Reports</button>
+        <button class="nav-item" data-view="health"><span>♡</span> Financial health</button>
         <button class="nav-item" data-view="categories"><span>◇</span> Categories</button>
         <button class="nav-item" data-view="settings"><span>⚙</span> Data & settings</button>
       </nav>
@@ -123,6 +124,14 @@
           <div class="dashboard-widget dashboard-stat-widget" id="dashboardWidgetIncome" data-dashboard-widget="income"><div id="summaryIncome"></div></div>
           <div class="dashboard-widget dashboard-stat-widget" id="dashboardWidgetExpenses" data-dashboard-widget="expenses"><div id="summaryExpenses"></div></div>
           <div class="dashboard-widget dashboard-stat-widget" id="dashboardWidgetCashFlow" data-dashboard-widget="cash-flow"><div id="summaryCashFlow"></div></div>
+
+          <section class="panel dashboard-widget dashboard-span-12 health-dashboard-widget" id="dashboardHealthPanel" data-dashboard-widget="financial-health">
+            <div class="panel-heading">
+              <div><p class="eyebrow">Financial health</p><h2>Your monthly snapshot</h2></div>
+              <button class="text-button" data-go-to="health">View details</button>
+            </div>
+            <div id="dashboardHealthSummary"></div>
+          </section>
 
           <section class="panel dashboard-widget dashboard-span-6" id="dashboardAccountsPanel" data-dashboard-widget="accounts">
             <div class="panel-heading">
@@ -347,7 +356,7 @@
           <div class="reconciliation-form-grid">
             <label class="field"><span>Account</span><select id="reconcileAccount"></select></label>
             <label class="field"><span>Statement ending date</span><input id="reconcileStatementDate" type="date" required /></label>
-            <label class="field"><span>Statement ending balance</span><div class="money-input"><span class="aed-symbol" aria-hidden="true"></span><input id="reconcileStatementBalance" type="number" step="0.01" inputmode="decimal" placeholder="0.00" /></div></label>
+            <label class="field"><span>Statement ending balance</span><div class="money-input"><span class="currency-input-prefix" id="reconcileCurrency" aria-hidden="true">AED</span><input id="reconcileStatementBalance" type="number" step="0.01" inputmode="decimal" placeholder="0.00" /></div></label>
             <label class="field reconciliation-notes-field"><span>Statement note <span class="optional-label">Optional</span></span><input id="reconcileNotes" type="text" maxlength="300" placeholder="e.g. Visa statement ending August 2026" /></label>
           </div>
           <p class="form-error" id="reconcileFormError" role="alert"></p>
@@ -388,6 +397,20 @@
           <div class="panel-heading"><div><p class="eyebrow">Limits</p><h2>Category budgets</h2></div></div>
           <div id="budgetsList"></div>
         </section>
+      </section>
+
+      <section class="view" id="healthView">
+        <div class="section-toolbar">
+          <p class="section-copy">A practical overview based on your recent cash flow, liquid reserves, budgets, and credit-card usage. This is informational and not financial advice.</p>
+          <button class="secondary-button" data-go-to="settings" type="button">Manage exchange rates</button>
+        </div>
+        <div class="health-hero" id="healthHero"></div>
+        <div class="health-metric-grid" id="healthMetrics"></div>
+        <div class="content-grid two-columns equal-columns">
+          <section class="panel"><div class="panel-heading"><div><p class="eyebrow">Next actions</p><h2>Recommendations</h2></div></div><div id="healthRecommendations"></div></section>
+          <section class="panel"><div class="panel-heading"><div><p class="eyebrow">How it is calculated</p><h2>Score breakdown</h2></div></div><div id="healthScoreBreakdown"></div></section>
+        </div>
+        <section class="panel health-currency-panel"><div class="panel-heading"><div><p class="eyebrow">Currency coverage</p><h2>Balances converted to AED</h2></div></div><div id="healthCurrencyCoverage"></div></section>
       </section>
 
       <section class="view" id="reportsView">
@@ -432,6 +455,13 @@
           </section>
         </div>
 
+        <section class="panel currency-settings-panel">
+          <div class="panel-heading"><div><p class="eyebrow">Multi-currency</p><h2>Exchange rates</h2></div><button class="secondary-button" id="openExchangeRateButton" type="button">+ Add rate</button></div>
+          <p class="muted">AED is the base currency. Enter how many units of another currency equal 1 AED, for example <strong>1 AED = 15.50 PHP</strong>. Rates are dated so reports can use the closest historical rate.</p>
+          <div class="currency-rate-summary" id="currencyRateSummary"></div>
+          <div id="exchangeRatesList"></div>
+        </section>
+
         <div class="content-grid two-columns equal-columns">
           <section class="panel">
             <div class="panel-heading"><div><p class="eyebrow">Restore</p><h2>Import a JSON backup</h2></div></div>
@@ -447,7 +477,7 @@
 
         <section class="panel info-panel">
           <h2>How balances work</h2>
-          <p>Opening balance plus income minus expenses determines each account balance. Transfers reduce the source and increase the destination without changing total net worth. Credit-card purchases push the card balance further below zero; card payments move it toward zero. Reconciliation compares cleared activity with an external statement and does not change balances.</p>
+          <p>Each account keeps its own currency. Expenses and income are stored in the account currency and converted to AED for budgets, reports, net worth, and financial-health calculations. Cross-currency transfers store both the amount sent and the amount received, so the effective rate is preserved without changing total net worth.</p>
         </section>
       </section>
     </main>
@@ -460,11 +490,22 @@
       <form id="transactionForm">
         <input type="hidden" id="transactionId" /><input type="hidden" id="entryType" value="expense" />
         <div class="form-grid">
-          <label class="field full-width"><span>Amount</span><div class="money-input"><span class="aed-symbol" aria-hidden="true"></span><input id="entryAmount" type="number" min="0.01" step="0.01" inputmode="decimal" placeholder="0.00" required /></div></label>
+          <label class="field full-width"><span id="entryAmountLabel">Amount</span><div class="money-input"><span class="currency-input-prefix" id="entryAmountCurrency" aria-hidden="true">AED</span><input id="entryAmount" type="number" min="0.01" step="0.01" inputmode="decimal" placeholder="0.00" required /></div></label>
           <label class="field"><span>Date</span><input id="entryDate" type="date" required /></label>
           <label class="field expense-income-field"><span id="accountLabel">Pay from account</span><select id="entryAccount"></select></label>
           <label class="field transfer-field" hidden><span>From account</span><select id="transferFromAccount"></select></label>
           <label class="field transfer-field" hidden><span>To account</span><select id="transferToAccount"></select></label>
+          <div class="fx-box full-width expense-income-field" id="entryFxPanel" hidden>
+            <div><strong>AED reporting value</strong><span id="entryFxHelp">Set the exchange rate used for reports and budgets.</span></div>
+            <label class="field"><span>1 AED equals</span><div class="rate-input"><input id="entryUnitsPerBase" type="number" min="0.00000001" step="0.00000001" inputmode="decimal" /><strong id="entryRateCurrency">PHP</strong></div></label>
+            <div class="fx-preview" id="entryBaseAmountPreview"></div>
+          </div>
+          <div class="fx-box full-width transfer-field" id="transferFxPanel" hidden>
+            <div><strong>Cross-currency transfer</strong><span>Enter the actual amount received. Ledgerly calculates and stores the effective rate.</span></div>
+            <label class="field"><span>Destination amount</span><div class="money-input"><span class="currency-input-prefix" id="transferDestinationCurrency" aria-hidden="true">PHP</span><input id="transferDestinationAmount" type="number" min="0.01" step="0.01" inputmode="decimal" /></div></label>
+            <label class="field"><span id="transferRateLabel">1 AED equals</span><div class="rate-input"><input id="transferExchangeRate" type="number" min="0.00000001" step="0.00000001" inputmode="decimal" /><strong id="transferRateCurrency">PHP</strong></div></label>
+            <div class="fx-preview full-width" id="transferFxPreview"></div>
+          </div>
           <label class="field expense-income-field" id="entryCategoryField"><span id="categoryLabel">Expense category</span><select id="entryCategory"></select></label>
           <label class="check-field full-width expense-income-field split-toggle"><input id="entrySplitEnabled" type="checkbox" /><span><strong>Split this transaction across categories</strong><small>Keep one account transaction while dividing the amount between two or more categories.</small></span></label>
           <div class="split-editor full-width expense-income-field" id="entrySplitEditor" hidden>
@@ -493,7 +534,7 @@
                 <button class="text-button danger-text" id="removeReceiptButton" type="button">Remove</button>
               </div>
             </div>
-            <div class="receipt-ocr-actions">
+            <div class="receipt-ocr-actions" hidden>
               <button class="secondary-button" id="scanReceiptButton" type="button" disabled>⌕ Scan receipt</button>
               <span class="receipt-ocr-status" id="receiptOcrStatus">Choose a receipt image to scan.</span>
             </div>
@@ -539,7 +580,7 @@
       <form id="recurringForm">
         <input type="hidden" id="recurringId" /><input type="hidden" id="recurringType" value="expense" />
         <div class="form-grid">
-          <label class="field full-width"><span>Amount</span><div class="money-input"><span class="aed-symbol" aria-hidden="true"></span><input id="recurringAmount" type="number" min="0.01" step="0.01" inputmode="decimal" placeholder="0.00" required /></div></label>
+          <label class="field full-width"><span>Amount</span><div class="money-input"><span class="currency-input-prefix" id="recurringAmountCurrency" aria-hidden="true">AED</span><input id="recurringAmount" type="number" min="0.01" step="0.01" inputmode="decimal" placeholder="0.00" required /></div></label>
           <label class="field recurring-expense-income-field"><span id="recurringAccountLabel">Pay from account</span><select id="recurringAccount"></select></label>
           <label class="field recurring-transfer-field" hidden><span>From account</span><select id="recurringFromAccount"></select></label>
           <label class="field recurring-transfer-field" hidden><span>To account</span><select id="recurringToAccount"></select></label>
@@ -576,7 +617,7 @@
         <input type="hidden" id="billId" />
         <div class="form-grid">
           <label class="field full-width"><span>Bill name</span><input id="billName" type="text" maxlength="100" placeholder="e.g. Car insurance renewal" required /></label>
-          <label class="field"><span>Amount</span><div class="money-input"><span class="aed-symbol" aria-hidden="true"></span><input id="billAmount" type="number" min="0.01" step="0.01" inputmode="decimal" placeholder="0.00" required /></div></label>
+          <label class="field"><span>Amount</span><div class="money-input"><span class="currency-input-prefix" id="billAmountCurrency" aria-hidden="true">AED</span><input id="billAmount" type="number" min="0.01" step="0.01" inputmode="decimal" placeholder="0.00" required /></div></label>
           <label class="field"><span>Due date</span><input id="billDueDate" type="date" required /></label>
           <label class="field"><span>Pay from account</span><select id="billAccount"></select></label>
           <label class="field"><span>Expense category</span><select id="billCategory"></select></label>
@@ -597,7 +638,9 @@
         <div class="form-grid">
           <label class="field full-width"><span>Account name</span><input id="accountName" type="text" maxlength="60" placeholder="e.g. Everyday Current" required /></label>
           <label class="field"><span>Account type</span><select id="accountType"><option value="current">Current</option><option value="savings">Savings</option><option value="credit">Credit card</option><option value="cash">Cash</option><option value="investment">Investment</option><option value="other">Other</option></select></label>
-          <label class="field"><span>Starting balance</span><div class="money-input"><span class="aed-symbol" aria-hidden="true"></span><input id="accountOpeningBalance" type="number" step="0.01" inputmode="decimal" value="0" required /></div></label>
+          <label class="field"><span>Currency</span><select id="accountCurrency"></select></label>
+          <label class="field"><span>Starting balance</span><div class="money-input"><span class="currency-input-prefix" id="accountOpeningCurrency" aria-hidden="true">AED</span><input id="accountOpeningBalance" type="number" step="0.01" inputmode="decimal" value="0" required /></div></label>
+          <label class="field full-width" id="accountExchangeRateField" hidden><span id="accountExchangeRateLabel">Current exchange rate</span><div class="rate-input"><span>1 AED =</span><input id="accountExchangeRate" type="number" min="0.00000001" step="0.00000001" inputmode="decimal" placeholder="e.g. 15.50" /><strong id="accountExchangeRateCurrency">PHP</strong></div><small>Used to value this account in AED. You can add dated rates later in Data &amp; settings.</small></label>
           <label class="field"><span>Account / card color</span><input id="accountColor" type="color" value="#2563eb" /></label>
           <label class="check-field"><input id="accountIncludeNetWorth" type="checkbox" checked /><span>Include in net worth</span></label>
           <div class="credit-card-account-fields full-width" id="creditCardAccountFields" hidden>
@@ -605,7 +648,7 @@
             <div class="form-grid">
               <label class="field"><span>Card network</span><select id="accountCardNetwork"><option value="visa">Visa</option><option value="mastercard">Mastercard</option><option value="amex">American Express</option><option value="discover">Discover</option><option value="unionpay">UnionPay</option><option value="jcb">JCB</option><option value="diners">Diners Club</option><option value="rupay">RuPay</option><option value="other">Other</option></select></label>
               <label class="field"><span>Last 4 digits <small>(optional)</small></span><input id="accountCardLastFour" type="text" maxlength="4" inputmode="numeric" autocomplete="off" placeholder="e.g. 1234" /></label>
-              <label class="field"><span>Credit limit</span><div class="money-input"><span class="aed-symbol" aria-hidden="true"></span><input id="accountCreditLimit" type="number" min="0.01" step="0.01" inputmode="decimal" placeholder="e.g. 25000" /></div></label>
+              <label class="field"><span>Credit limit</span><div class="money-input"><span class="currency-input-prefix" id="accountCreditLimitCurrency" aria-hidden="true">AED</span><input id="accountCreditLimit" type="number" min="0.01" step="0.01" inputmode="decimal" placeholder="e.g. 25000" /></div></label>
               <label class="field"><span>Statement closes on day</span><input id="accountStatementClosingDay" type="number" min="1" max="31" inputmode="numeric" placeholder="e.g. 18" /></label>
               <label class="field"><span>Payment is due on day</span><input id="accountPaymentDueDay" type="number" min="1" max="31" inputmode="numeric" placeholder="e.g. 8" /></label>
               <label class="field"><span>Accent color</span><input id="accountCardAccentColor" type="color" value="#0f172a" /></label>
@@ -621,7 +664,7 @@
             </div>
           </div>
         </div>
-        <p class="field-help">For money owed on a credit card, use a negative starting balance, such as -500. Never upload an uncensored card photo: hide the full number, name, expiry date, signature, and security code.</p>
+        <p class="field-help">Starting balances and credit limits use the selected account currency. For money owed on a credit card, use a negative starting balance, such as -500. Never upload an uncensored card photo.</p>
         <p class="form-error" id="accountFormError" role="alert"></p>
         <div class="modal-actions"><button class="secondary-button" type="button" data-close-modal="accountModal">Cancel</button><button class="primary-button" type="submit">Save account</button></div>
       </form>
@@ -637,13 +680,30 @@
           <label class="field full-width"><span>Credit-card account</span><select id="creditCardStatementAccount" required></select></label>
           <label class="field"><span>Statement closing date</span><input id="creditCardStatementDate" type="date" required /></label>
           <label class="field"><span>Payment due date</span><input id="creditCardDueDate" type="date" required /></label>
-          <label class="field"><span>Statement amount due</span><div class="money-input"><span class="aed-symbol" aria-hidden="true"></span><input id="creditCardStatementBalance" type="number" min="0" step="0.01" inputmode="decimal" required /></div></label>
-          <label class="field"><span>Minimum payment</span><div class="money-input"><span class="aed-symbol" aria-hidden="true"></span><input id="creditCardMinimumPayment" type="number" min="0" step="0.01" inputmode="decimal" value="0" required /></div></label>
+          <label class="field"><span>Statement amount due</span><div class="money-input"><span class="currency-input-prefix" id="creditCardStatementCurrency" aria-hidden="true">AED</span><input id="creditCardStatementBalance" type="number" min="0" step="0.01" inputmode="decimal" required /></div></label>
+          <label class="field"><span>Minimum payment</span><div class="money-input"><span class="currency-input-prefix" id="creditCardMinimumCurrency" aria-hidden="true">AED</span><input id="creditCardMinimumPayment" type="number" min="0" step="0.01" inputmode="decimal" value="0" required /></div></label>
           <label class="field full-width"><span>Notes</span><textarea id="creditCardStatementNotes" maxlength="500" rows="3" placeholder="Optional statement reference, bank note, or reminder"></textarea></label>
         </div>
         <p class="field-help">Enter the statement amount as a positive amount due. Payments are detected from transfers into this card after the statement date.</p>
         <p class="form-error" id="creditCardStatementFormError" role="alert"></p>
         <div class="modal-actions"><button class="secondary-button" type="button" data-close-modal="creditCardStatementModal">Cancel</button><button class="primary-button" type="submit">Save statement</button></div>
+      </form>
+    </section>
+  </div>
+
+  <div class="modal-backdrop" id="exchangeRateModal" hidden>
+    <section class="modal small-modal" role="dialog" aria-modal="true" aria-labelledby="exchangeRateModalTitle">
+      <div class="modal-header"><div><p class="eyebrow">Currency conversion</p><h2 id="exchangeRateModalTitle">Add exchange rate</h2></div><button class="icon-button" data-close-modal="exchangeRateModal" aria-label="Close">×</button></div>
+      <form id="exchangeRateForm">
+        <input type="hidden" id="exchangeRateId" />
+        <div class="form-grid">
+          <label class="field"><span>Currency</span><select id="exchangeRateCurrency"></select></label>
+          <label class="field"><span>Effective date</span><input id="exchangeRateDate" type="date" required /></label>
+          <label class="field full-width"><span id="exchangeRateValueLabel">1 AED equals</span><div class="rate-input"><span>1 AED =</span><input id="exchangeRateValue" type="number" min="0.00000001" step="0.00000001" inputmode="decimal" required /><strong id="exchangeRateValueCurrency">PHP</strong></div></label>
+          <label class="field full-width"><span>Notes <small>(optional)</small></span><input id="exchangeRateNotes" type="text" maxlength="200" placeholder="e.g. Bank transfer rate" /></label>
+        </div>
+        <p class="form-error" id="exchangeRateFormError" role="alert"></p>
+        <div class="modal-actions"><button class="secondary-button" type="button" data-close-modal="exchangeRateModal">Cancel</button><button class="primary-button" type="submit">Save rate</button></div>
       </form>
     </section>
   </div>
@@ -729,7 +789,7 @@
       <div class="import-guide">
         <div>
           <strong>Use the Ledgerly column format</strong>
-          <p>Import the first worksheet from an Excel or CSV file. Dates should preferably use <code>YYYY-MM-DD</code>. Type, category, and account may be left blank when a matching import rule or fallback option can supply them. Split transactions can use the optional <code>Split Details</code> column.</p>
+          <p>Import the first worksheet from an Excel or CSV file. Dates should preferably use <code>YYYY-MM-DD</code>. Type, category, and account may be left blank when a matching import rule or fallback option can supply them. Split transactions can use <code>Split Details</code>. Cross-currency transfers can use the optional <code>Destination Amount</code> and <code>Exchange Rate</code> columns.</p>
         </div>
         <div class="button-row import-template-buttons">
           <a class="secondary-button" href="templates/ledgerly-transaction-import-template.csv" download>Download CSV template</a>
@@ -781,6 +841,6 @@
   </div>
 
   <div class="toast" id="toast" role="status" aria-live="polite"></div>
-  <script type="module" src="app.js?v=12"></script>
+  <script type="module" src="app.js?v=13"></script>
 </body>
 </html>
