@@ -158,6 +158,7 @@ function bindEvents() {
   el.calendarGrid.addEventListener("click", handleCalendarClick);
   el.calendarGrid.addEventListener("keydown", handleCalendarKeydown);
   el.openAccountButton.addEventListener("click", () => openAccountModal());
+  el.openCreditCardStatementButton.addEventListener("click", () => openCreditCardStatementModal());
   el.openBudgetButton.addEventListener("click", () => openBudgetModal());
   el.openCategoryButton.addEventListener("click", () => openCategoryModal());
 
@@ -172,7 +173,10 @@ function bindEvents() {
   el.recurringEndMode.addEventListener("change", updateRecurringEndDateVisibility);
   el.accountType.addEventListener("change", () => {
     if (!el.accountId.value) el.accountColor.value = ACCOUNT_COLORS[el.accountType.value] || ACCOUNT_COLORS.other;
+    updateCreditCardAccountFields();
   });
+  el.creditCardStatementAccount.addEventListener("change", updateCreditCardStatementDueDate);
+  el.creditCardStatementDate.addEventListener("change", updateCreditCardStatementDueDate);
 
   el.authForm.addEventListener("input", () => showAuthError(""));
   el.transactionForm.addEventListener("submit", handleTransactionSubmit);
@@ -180,6 +184,7 @@ function bindEvents() {
   el.viewReceiptButton.addEventListener("click", viewReceiptFromForm);
   el.removeReceiptButton.addEventListener("click", removeReceiptFromForm);
   el.accountForm.addEventListener("submit", handleAccountSubmit);
+  el.creditCardStatementForm.addEventListener("submit", handleCreditCardStatementSubmit);
   el.budgetForm.addEventListener("submit", handleBudgetSubmit);
   el.categoryForm.addEventListener("submit", handleCategorySubmit);
   el.recurringForm.addEventListener("submit", handleRecurringSubmit);
@@ -206,6 +211,11 @@ function bindEvents() {
     const actions = {
       "edit-account": () => openAccountModal(id),
       "delete-account": () => deleteAccount(id),
+      "edit-credit-card-settings": () => openAccountModal(id),
+      "add-credit-card-statement": () => openCreditCardStatementModal(null, id),
+      "edit-credit-card-statement": () => openCreditCardStatementModal(id),
+      "delete-credit-card-statement": () => deleteCreditCardStatement(id),
+      "record-credit-card-payment": () => openCreditCardPayment(id),
       "edit-transaction": () => openTransactionModal(id),
       "open-receipt": () => openTransactionReceipt(id),
       "delete-transaction": () => deleteTransaction(id),
@@ -320,7 +330,7 @@ function setAuthBusy(busy) {
 function showAuthError(message) { el.authError.textContent = message; }
 
 async function loadCloudState() {
-  const [accountsResult, categoriesResult, transactionsResult, budgetsResult, recurringResult, reconciliationsResult, clearingsResult] = await Promise.all([
+  const [accountsResult, categoriesResult, transactionsResult, budgetsResult, recurringResult, reconciliationsResult, clearingsResult, cardStatementsResult] = await Promise.all([
     supabase.from("accounts").select("*").order("created_at", { ascending: true }),
     supabase.from("categories").select("*").order("kind").order("name"),
     supabase.from("transactions").select("*").order("entry_date", { ascending: false }).order("created_at", { ascending: false }),
@@ -328,12 +338,13 @@ async function loadCloudState() {
     supabase.from("recurring_entries").select("*").order("created_at", { ascending: true }),
     supabase.from("reconciliations").select("*").order("statement_date", { ascending: false }).order("completed_at", { ascending: false }),
     supabase.from("transaction_clearings").select("*").order("created_at", { ascending: true }),
+    supabase.from("credit_card_statements").select("*").order("statement_date", { ascending: false }),
   ]);
-  [accountsResult, categoriesResult, transactionsResult, budgetsResult, recurringResult, reconciliationsResult, clearingsResult].forEach((result) => {
+  [accountsResult, categoriesResult, transactionsResult, budgetsResult, recurringResult, reconciliationsResult, clearingsResult, cardStatementsResult].forEach((result) => {
     if (result.error) throw result.error;
   });
   state = {
-    version: 4,
+    version: 5,
     accounts: accountsResult.data || [],
     categories: categoriesResult.data || [],
     transactions: transactionsResult.data || [],
@@ -341,6 +352,7 @@ async function loadCloudState() {
     recurringEntries: recurringResult.data || [],
     reconciliations: reconciliationsResult.data || [],
     transactionClearings: clearingsResult.data || [],
+    creditCardStatements: cardStatementsResult.data || [],
   };
 }
 
@@ -352,12 +364,12 @@ async function seedDefaultCategories() {
 }
 
 function emptyState() {
-  return { version: 4, accounts: [], categories: [], transactions: [], budgets: [], recurringEntries: [], reconciliations: [], transactionClearings: [] };
+  return { version: 5, accounts: [], categories: [], transactions: [], budgets: [], recurringEntries: [], reconciliations: [], transactionClearings: [], creditCardStatements: [] };
 }
 
 function normalizeState(value) {
   return {
-    version: 4,
+    version: 5,
     accounts: Array.isArray(value?.accounts) ? value.accounts : [],
     categories: Array.isArray(value?.categories) ? value.categories : [],
     transactions: Array.isArray(value?.transactions) ? value.transactions : [],
@@ -365,12 +377,13 @@ function normalizeState(value) {
     recurringEntries: Array.isArray(value?.recurringEntries) ? value.recurringEntries : Array.isArray(value?.recurring_entries) ? value.recurring_entries : [],
     reconciliations: Array.isArray(value?.reconciliations) ? value.reconciliations : [],
     transactionClearings: Array.isArray(value?.transactionClearings) ? value.transactionClearings : Array.isArray(value?.transaction_clearings) ? value.transaction_clearings : [],
+    creditCardStatements: Array.isArray(value?.creditCardStatements) ? value.creditCardStatements : Array.isArray(value?.credit_card_statements) ? value.credit_card_statements : [],
   };
 }
 
 function defaultLocalState() {
   return {
-    version: 4,
+    version: 5,
     accounts: [
       localRow({ name: "Current Account", type: "current", opening_balance: 0, color: ACCOUNT_COLORS.current, include_in_net_worth: true }),
       localRow({ name: "Savings", type: "savings", opening_balance: 0, color: ACCOUNT_COLORS.savings, include_in_net_worth: true }),
@@ -382,6 +395,7 @@ function defaultLocalState() {
     recurringEntries: [],
     reconciliations: [],
     transactionClearings: [],
+    creditCardStatements: [],
   };
 }
 
@@ -452,7 +466,7 @@ function migrateLegacyState(legacy) {
       to_account_id: transaction.toAccountId || transaction.to_account_id || null,
     });
   });
-  return { version: 4, accounts, categories, transactions, budgets: [], recurringEntries: [], reconciliations: [], transactionClearings: [] };
+  return { version: 5, accounts, categories, transactions, budgets: [], recurringEntries: [], reconciliations: [], transactionClearings: [], creditCardStatements: [] };
 }
 
 function persistLocal() {
@@ -501,10 +515,11 @@ function switchView(view) {
   activeView = view;
   document.querySelectorAll(".view").forEach((section) => section.classList.toggle("active", section.id === `${view}View`));
   document.querySelectorAll(".nav-item").forEach((button) => button.classList.toggle("active", button.dataset.view === view));
-  const titles = { dashboard: "Dashboard", accounts: "Accounts", transactions: "Transactions", reconcile: "Reconcile", calendar: "Calendar", recurring: "Recurring", budgets: "Budgets", reports: "Reports", categories: "Categories", settings: "Data & settings" };
+  const titles = { dashboard: "Dashboard", accounts: "Accounts", creditcards: "Credit cards", transactions: "Transactions", reconcile: "Reconcile", calendar: "Calendar", recurring: "Recurring", budgets: "Budgets", reports: "Reports", categories: "Categories", settings: "Data & settings" };
   el.pageTitle.textContent = titles[view] || "Ledgerly";
   el.sidebar.classList.remove("open");
   if (view === "reports") renderReports();
+  if (view === "creditcards") renderCreditCards();
   if (view === "reconcile") renderReconciliation();
   if (view === "calendar") renderCalendar();
   if (view === "recurring") renderRecurringEntries();
@@ -514,6 +529,7 @@ function render() {
   renderSelectors();
   renderSummary();
   renderAccounts();
+  renderCreditCards();
   renderTransactions();
   renderReconciliation();
   renderCalendar();
@@ -565,7 +581,8 @@ function renderAccounts() {
         <h3>${escapeHTML(account.name)}</h3>
         <p class="large-balance">${formatMoneyHTML(balance)}</p>
         <p class="opening-balance">Starting balance: ${formatMoneyHTML(number(account.opening_balance))}${account.include_in_net_worth === false ? " · excluded from net worth" : ""}</p>
-        <button class="account-reconcile-button" data-action="open-reconcile-account" data-id="${account.id}" type="button">✓ Reconcile account</button>
+        ${account.type === "credit" ? `<p class="account-credit-meta">${number(account.credit_limit) > 0 ? `${creditCardUtilization(account).toFixed(1)}% of ${formatMoneyHTML(account.credit_limit)} limit` : "Credit limit not configured"}</p>` : ""}
+        <div class="account-card-footer-actions"><button class="account-reconcile-button" data-action="open-reconcile-account" data-id="${account.id}" type="button">✓ Reconcile</button>${account.type === "credit" ? `<button class="account-reconcile-button" data-action="add-credit-card-statement" data-id="${account.id}" type="button">▤ Statement</button>` : ""}</div>
       </article>`;
   }).join("");
 }
@@ -577,6 +594,226 @@ function accountRowHTML(account) {
     <div class="account-details"><strong>${escapeHTML(account.name)}</strong><span>${escapeHTML(account.type)}</span></div>
     <span class="account-balance ${tone(balance)}">${formatMoneyHTML(balance)}</span>
   </div>`;
+}
+
+
+function creditCardAccounts() {
+  return state.accounts.filter((account) => account.type === "credit");
+}
+
+function creditCardDebt(account) {
+  return Math.max(0, -calculateAccountBalance(account.id));
+}
+
+function creditCardAvailableCredit(account) {
+  const limit = Math.max(0, number(account.credit_limit));
+  return limit ? Math.max(0, limit - creditCardDebt(account)) : 0;
+}
+
+function creditCardUtilization(account) {
+  const limit = Math.max(0, number(account.credit_limit));
+  return limit ? (creditCardDebt(account) / limit) * 100 : 0;
+}
+
+function renderCreditCards() {
+  if (!el.creditCardsGrid) return;
+  const cards = creditCardAccounts();
+  const totalDebt = cards.reduce((sum, account) => sum + creditCardDebt(account), 0);
+  const totalLimit = cards.reduce((sum, account) => sum + Math.max(0, number(account.credit_limit)), 0);
+  const available = cards.reduce((sum, account) => sum + creditCardAvailableCredit(account), 0);
+  const utilization = totalLimit ? (totalDebt / totalLimit) * 100 : 0;
+  const openStatements = state.creditCardStatements.map((statement) => creditCardStatementStatus(statement));
+  const attentionCount = openStatements.filter((item) => ["overdue", "due-soon"].includes(item.key)).length;
+
+  el.openCreditCardStatementButton.disabled = cards.length === 0;
+  el.creditCardSummary.innerHTML = [
+    summaryCard("Total card debt", totalDebt, `${cards.length} credit-card account${cards.length === 1 ? "" : "s"}`, totalDebt ? "negative" : ""),
+    summaryCard("Available credit", available, totalLimit ? `${formatMoneyText(totalLimit)} combined limit` : "Add card limits to calculate this", "positive"),
+    summaryCard("Utilization", utilization, totalLimit ? "Current debt divided by total limit" : "No credit limits configured", utilization >= 70 ? "negative" : utilization >= 30 ? "warning" : "positive", false, "%"),
+    summaryCard("Needs attention", attentionCount, attentionCount ? "Overdue or due within 7 days" : "No urgent card statements", attentionCount ? "negative" : "positive", false),
+  ].join("");
+
+  if (!cards.length) {
+    el.creditCardsGrid.innerHTML = emptyHTML("No credit cards configured", "Add an account with the Credit card type, then enter its limit and cycle dates.");
+    el.creditCardStatementsList.innerHTML = emptyHTML("No card statements", "Statements will appear here after a credit-card account is added.");
+    el.dashboardCreditCardsPanel.hidden = true;
+    el.dashboardCreditCards.innerHTML = "";
+    return;
+  }
+
+  el.creditCardsGrid.innerHTML = cards.map(creditCardAccountCardHTML).join("");
+  const statements = [...state.creditCardStatements].sort((a, b) => String(b.statement_date).localeCompare(String(a.statement_date)));
+  el.creditCardStatementsList.innerHTML = statements.length
+    ? `<div class="credit-card-statement-list">${statements.map(creditCardStatementRowHTML).join("")}</div>`
+    : emptyHTML("No statements saved", "Add the latest statement for each card to track its amount due and payment status.");
+
+  el.dashboardCreditCardsPanel.hidden = false;
+  el.dashboardCreditCards.innerHTML = `<div class="credit-card-dashboard-list">${cards.slice(0, 4).map(creditCardDashboardRowHTML).join("")}</div>`;
+}
+
+function creditCardDashboardRowHTML(account) {
+  const debt = creditCardDebt(account);
+  const utilization = creditCardUtilization(account);
+  const latest = latestCreditCardStatement(account.id);
+  const status = latest ? creditCardStatementStatus(latest) : null;
+  return `<div class="credit-card-dashboard-row">
+    <span class="account-icon" style="--account-color:${safeColor(account.color)}">${escapeHTML(account.name.slice(0, 1).toUpperCase())}</span>
+    <div class="credit-card-dashboard-copy"><strong>${escapeHTML(account.name)}</strong><span>${number(account.credit_limit) > 0 ? `${utilization.toFixed(1)}% utilized` : "Credit limit not set"}${status ? ` · ${escapeHTML(status.label)}` : ""}</span></div>
+    <div class="credit-card-dashboard-amount"><strong>${formatMoneyHTML(debt)}</strong><span>owed</span></div>
+  </div>`;
+}
+
+function creditCardAccountCardHTML(account) {
+  const debt = creditCardDebt(account);
+  const limit = Math.max(0, number(account.credit_limit));
+  const available = creditCardAvailableCredit(account);
+  const utilization = creditCardUtilization(account);
+  const latest = latestCreditCardStatement(account.id);
+  const status = latest ? creditCardStatementStatus(latest) : null;
+  const nextClose = account.statement_closing_day ? nextDayOfMonth(number(account.statement_closing_day)) : "";
+  const nextDue = latest && status?.outstanding > 0
+    ? latest.due_date
+    : account.payment_due_day ? nextDayOfMonth(number(account.payment_due_day)) : "";
+  const progress = latest && number(latest.statement_balance) > 0 ? Math.min(100, (status.paid / number(latest.statement_balance)) * 100) : 0;
+  return `<article class="credit-card-management-card" style="--account-color:${safeColor(account.color)}">
+    <div class="credit-card-management-head">
+      <div><span class="credit-card-chip"></span><p>${escapeHTML(account.name)}</p></div>
+      <span class="credit-card-balance-label">Current debt</span>
+      <strong class="credit-card-current-debt">${formatMoneyHTML(debt)}</strong>
+    </div>
+    <div class="credit-card-limit-section">
+      <div class="credit-card-metric"><span>Credit limit</span><strong>${limit ? formatMoneyHTML(limit) : "Not set"}</strong></div>
+      <div class="credit-card-metric"><span>Available</span><strong class="positive">${limit ? formatMoneyHTML(available) : "—"}</strong></div>
+      <div class="credit-card-metric"><span>Utilization</span><strong class="${utilization >= 70 ? "negative" : utilization >= 30 ? "warning" : "positive"}">${limit ? `${utilization.toFixed(1)}%` : "—"}</strong></div>
+      <div class="credit-utilization-track"><span class="${utilization >= 70 ? "high" : utilization >= 30 ? "medium" : ""}" style="width:${Math.min(100, utilization)}%"></span></div>
+    </div>
+    <div class="credit-card-cycle-grid">
+      <div><span>Next statement close</span><strong>${nextClose ? formatDate(nextClose) : "Not configured"}</strong></div>
+      <div><span>Next payment date</span><strong>${nextDue ? formatDate(nextDue) : "Not configured"}</strong></div>
+    </div>
+    ${latest ? `<div class="credit-card-latest-statement">
+      <div class="credit-card-statement-title"><div><span>Latest statement</span><strong>${formatDate(latest.statement_date)}</strong></div><span class="credit-card-status ${status.key}">${escapeHTML(status.label)}</span></div>
+      <div class="credit-card-statement-figures"><span>Due ${formatMoneyHTML(latest.statement_balance)}</span><span>Paid ${formatMoneyHTML(status.paid)}</span><span>Remaining ${formatMoneyHTML(status.outstanding)}</span></div>
+      <div class="credit-payment-track"><span style="width:${progress}%"></span></div>
+      <p>${escapeHTML(status.detail)}</p>
+    </div>` : `<div class="credit-card-latest-statement empty"><strong>No statement saved</strong><p>Add a statement to track its due date, minimum payment, and payment progress.</p></div>`}
+    <div class="credit-card-actions">
+      <button class="secondary-button" data-action="record-credit-card-payment" data-id="${account.id}" type="button">Record payment</button>
+      <button class="secondary-button" data-action="add-credit-card-statement" data-id="${account.id}" type="button">Add statement</button>
+      <button class="text-button" data-action="edit-credit-card-settings" data-id="${account.id}" type="button">Edit settings</button>
+    </div>
+  </article>`;
+}
+
+function creditCardStatementRowHTML(statement) {
+  const account = accountById(statement.account_id);
+  if (!account) return "";
+  const status = creditCardStatementStatus(statement);
+  return `<div class="credit-card-statement-row">
+    <div class="credit-card-statement-account"><span class="account-icon" style="--account-color:${safeColor(account.color)}">${escapeHTML(account.name.slice(0, 1).toUpperCase())}</span><div><strong>${escapeHTML(account.name)}</strong><span>Statement ${formatDate(statement.statement_date)}</span></div></div>
+    <div><span class="history-label">Amount due</span><strong>${formatMoneyHTML(statement.statement_balance)}</strong></div>
+    <div><span class="history-label">Minimum</span><strong>${formatMoneyHTML(statement.minimum_payment)}</strong></div>
+    <div><span class="history-label">Due date</span><strong>${formatDate(statement.due_date)}</strong></div>
+    <div><span class="history-label">Paid</span><strong>${formatMoneyHTML(status.paid)}</strong></div>
+    <div class="credit-card-statement-status-cell"><span class="credit-card-status ${status.key}">${escapeHTML(status.label)}</span><small>${escapeHTML(status.detail)}</small></div>
+    <div class="row-actions"><button class="row-action" data-action="edit-credit-card-statement" data-id="${statement.id}" aria-label="Edit card statement">✎</button><button class="row-action danger" data-action="delete-credit-card-statement" data-id="${statement.id}" aria-label="Delete card statement">×</button></div>
+  </div>`;
+}
+
+function latestCreditCardStatement(accountId) {
+  return state.creditCardStatements
+    .filter((statement) => statement.account_id === accountId)
+    .sort((a, b) => String(b.statement_date).localeCompare(String(a.statement_date)))[0] || null;
+}
+
+function nextCreditCardStatement(statement) {
+  return state.creditCardStatements
+    .filter((item) => item.account_id === statement.account_id && item.statement_date > statement.statement_date)
+    .sort((a, b) => String(a.statement_date).localeCompare(String(b.statement_date)))[0] || null;
+}
+
+function creditCardPaymentTransactions(statement) {
+  const next = nextCreditCardStatement(statement);
+  return state.transactions
+    .filter((transaction) => transaction.type === "transfer"
+      && transaction.to_account_id === statement.account_id
+      && transaction.entry_date >= statement.statement_date
+      && transaction.entry_date <= todayISO()
+      && (!next || transaction.entry_date < next.statement_date))
+    .sort((a, b) => String(a.entry_date).localeCompare(String(b.entry_date)) || String(a.created_at || "").localeCompare(String(b.created_at || "")));
+}
+
+function creditCardStatementStatus(statement) {
+  const amountDue = Math.max(0, number(statement.statement_balance));
+  const minimum = Math.max(0, number(statement.minimum_payment));
+  const payments = creditCardPaymentTransactions(statement);
+  let paid = 0;
+  let paidInFullDate = "";
+  let minimumPaidDate = minimum === 0 ? statement.statement_date : "";
+  for (const transaction of payments) {
+    paid += number(transaction.amount);
+    if (!minimumPaidDate && paid + 0.005 >= minimum) minimumPaidDate = transaction.entry_date;
+    if (!paidInFullDate && paid + 0.005 >= amountDue) paidInFullDate = transaction.entry_date;
+  }
+  const outstanding = Math.max(0, amountDue - paid);
+  const dueIn = daysBetweenISO(todayISO(), statement.due_date);
+  let key = "open";
+  let label = "Open";
+  let detail = `${formatMoneyText(outstanding)} remains due by ${formatDate(statement.due_date)}.`;
+  if (amountDue <= 0.005 || paid + 0.005 >= amountDue) {
+    key = paidInFullDate && paidInFullDate > statement.due_date ? "paid-late" : "paid";
+    label = key === "paid-late" ? "Paid late" : "Paid";
+    detail = paidInFullDate ? `Paid in full on ${formatDate(paidInFullDate)}.` : "No payment is due for this statement.";
+  } else if (statement.due_date < todayISO() && (minimum === 0 || paid + 0.005 < minimum)) {
+    key = "overdue";
+    label = "Overdue";
+    detail = minimum > 0
+      ? `${formatMoneyText(Math.max(0, minimum - paid))} is still needed to meet the minimum payment.`
+      : `${formatMoneyText(outstanding)} remains unpaid after the due date.`;
+  } else if (minimum > 0 && paid + 0.005 >= minimum) {
+    key = "minimum-paid";
+    label = "Minimum paid";
+    detail = `${formatMoneyText(outstanding)} remains on the statement after the minimum payment.`;
+  } else if (dueIn >= 0 && dueIn <= 7) {
+    key = "due-soon";
+    label = dueIn === 0 ? "Due today" : "Due soon";
+    detail = `${formatMoneyText(Math.max(0, minimum - paid))} is needed for the minimum payment${dueIn === 0 ? " today" : ` in ${dueIn} day${dueIn === 1 ? "" : "s"}`}.`;
+  }
+  return { key, label, detail, paid, outstanding, paidInFullDate, minimumPaidDate, payments };
+}
+
+function nextDayOfMonth(day, fromISO = todayISO()) {
+  const rawDay = Math.round(number(day));
+  if (!rawDay) return "";
+  const safeDay = Math.max(1, Math.min(31, rawDay));
+  const from = new Date(`${fromISO}T12:00:00`);
+  for (let offset = 0; offset < 24; offset += 1) {
+    const candidate = dateForMonthDay(from.getFullYear(), from.getMonth() + offset, safeDay);
+    if (candidate >= fromISO) return candidate;
+  }
+  return "";
+}
+
+function dateForMonthDay(year, zeroBasedMonth, day) {
+  const date = new Date(year, zeroBasedMonth, 1);
+  const last = new Date(date.getFullYear(), date.getMonth() + 1, 0).getDate();
+  return localISODate(new Date(date.getFullYear(), date.getMonth(), Math.min(day, last)));
+}
+
+function configuredDueDateForStatement(account, statementDate) {
+  const rawDueDay = Math.round(number(account?.payment_due_day));
+  if (!rawDueDay || !statementDate) return "";
+  const dueDay = Math.max(1, Math.min(31, rawDueDay));
+  const date = new Date(`${statementDate}T12:00:00`);
+  const sameMonth = dateForMonthDay(date.getFullYear(), date.getMonth(), dueDay);
+  return sameMonth > statementDate ? sameMonth : dateForMonthDay(date.getFullYear(), date.getMonth() + 1, dueDay);
+}
+
+function daysBetweenISO(fromISO, toISO) {
+  if (!fromISO || !toISO) return 0;
+  const from = new Date(`${fromISO}T12:00:00`);
+  const to = new Date(`${toISO}T12:00:00`);
+  return Math.round((to - from) / 86400000);
 }
 
 function renderTransactions() {
@@ -1516,9 +1753,10 @@ function renderCalendar() {
   const accountId = el.calendarAccountFilter.value || "all";
   const monthEntries = state.transactions.filter((transaction) => transaction.entry_date?.startsWith(monthKey) && transactionMatchesAccount(transaction, accountId));
   const monthPlanned = plannedOccurrencesBetween(monthStart, monthEnd, accountId);
+  const monthCardEvents = creditCardCalendarEventsBetween(monthStart, monthEnd, accountId);
   const monthIncome = sumTransactions(monthEntries, "income");
   const monthExpenses = sumTransactions(monthEntries, "expense");
-  const activeDays = new Set([...monthEntries.map((transaction) => transaction.entry_date), ...monthPlanned.map((item) => item.date)]).size;
+  const activeDays = new Set([...monthEntries.map((transaction) => transaction.entry_date), ...monthPlanned.map((item) => item.date), ...monthCardEvents.map((item) => item.date)]).size;
   const transferCount = monthEntries.filter((transaction) => transaction.type === "transfer").length;
 
   el.calendarMonthLabel.textContent = new Intl.DateTimeFormat("en-US", { month: "long", year: "numeric" }).format(calendarCursor);
@@ -1526,7 +1764,7 @@ function renderCalendar() {
     summaryCard("Income", monthIncome, `${monthEntries.filter((item) => item.type === "income").length} posted entries`, "positive"),
     summaryCard("Expenses", monthExpenses, `${monthEntries.filter((item) => item.type === "expense").length} posted entries`, monthExpenses ? "negative" : ""),
     summaryCard("Net cash flow", monthIncome - monthExpenses, "Posted income minus expenses", tone(monthIncome - monthExpenses)),
-    summaryCard("Planned", monthPlanned.length, `${transferCount} posted transfer${transferCount === 1 ? "" : "s"} · ${activeDays} active day${activeDays === 1 ? "" : "s"}`, "warning", false),
+    summaryCard("Upcoming", monthPlanned.length + monthCardEvents.length, `${monthPlanned.length} recurring · ${monthCardEvents.length} card reminder${monthCardEvents.length === 1 ? "" : "s"} · ${activeDays} active day${activeDays === 1 ? "" : "s"}`, "warning", false),
   ].join("");
 
   const first = new Date(year, month, 1);
@@ -1537,6 +1775,7 @@ function renderCalendar() {
     const iso = localISODate(date);
     const dayEntries = state.transactions.filter((transaction) => transaction.entry_date === iso && transactionMatchesAccount(transaction, accountId));
     const planned = plannedOccurrencesForDate(iso, accountId);
+    const cardEvents = creditCardCalendarEventsForDate(iso, accountId);
     const income = sumTransactions(dayEntries, "income");
     const expenses = sumTransactions(dayEntries, "expense");
     const transfers = dayEntries.filter((transaction) => transaction.type === "transfer").length;
@@ -1544,7 +1783,7 @@ function renderCalendar() {
     const plannedExpenses = planned.filter((item) => item.rule.type === "expense").reduce((sum, item) => sum + number(item.rule.amount), 0);
     const plannedTransfers = planned.filter((item) => item.rule.type === "transfer").length;
     const isCurrentMonth = date.getMonth() === month;
-    const hasActivity = dayEntries.length || planned.length;
+    const hasActivity = dayEntries.length || planned.length || cardEvents.length;
     const classes = [
       "calendar-day",
       isCurrentMonth ? "" : "outside-month",
@@ -1552,7 +1791,7 @@ function renderCalendar() {
       iso === selectedCalendarDate ? "selected" : "",
       hasActivity ? "has-activity" : "",
     ].filter(Boolean).join(" ");
-    const aria = `${formatDate(iso)}. ${income ? `${formatMoneyText(income)} posted income. ` : ""}${expenses ? `${formatMoneyText(expenses)} posted expenses. ` : ""}${transfers ? `${transfers} posted transfers. ` : ""}${planned.length ? `${planned.length} planned recurring entries.` : ""}`;
+    const aria = `${formatDate(iso)}. ${income ? `${formatMoneyText(income)} posted income. ` : ""}${expenses ? `${formatMoneyText(expenses)} posted expenses. ` : ""}${transfers ? `${transfers} posted transfers. ` : ""}${planned.length ? `${planned.length} planned recurring entries. ` : ""}${cardEvents.length ? `${cardEvents.length} credit-card reminder${cardEvents.length === 1 ? "" : "s"}.` : ""}`;
     cells.push(`<div class="${classes}">
       <button class="calendar-day-body" type="button" data-calendar-date="${iso}" aria-label="${escapeHTML(aria)}">
         <span class="calendar-day-number">${date.getDate()}</span>
@@ -1563,6 +1802,7 @@ function renderCalendar() {
           ${plannedIncome ? `<span class="calendar-planned-total income">Planned +${formatMoneyCompactHTML(plannedIncome)}</span>` : ""}
           ${plannedExpenses ? `<span class="calendar-planned-total expense">Planned −${formatMoneyCompactHTML(plannedExpenses)}</span>` : ""}
           ${plannedTransfers ? `<span class="calendar-planned-count">Planned ⇄ ${plannedTransfers}</span>` : ""}
+          ${cardEvents.slice(0, 2).map((item) => `<span class="calendar-card-reminder ${item.type === "payment-due" ? "due" : "close"}">${item.type === "payment-due" ? "Card due" : "Card closes"}</span>`).join("")}
           ${!hasActivity ? `<span class="calendar-no-activity">No entries</span>` : ""}
         </span>
       </button>
@@ -1576,6 +1816,7 @@ function renderCalendar() {
 function renderSelectedCalendarDay(accountId = "all") {
   const entries = sortedTransactions().filter((transaction) => transaction.entry_date === selectedCalendarDate && transactionMatchesAccount(transaction, accountId));
   const planned = plannedOccurrencesForDate(selectedCalendarDate, accountId);
+  const cardEvents = creditCardCalendarEventsForDate(selectedCalendarDate, accountId);
   const income = sumTransactions(entries, "income");
   const expenses = sumTransactions(entries, "expense");
   const transfers = entries.filter((transaction) => transaction.type === "transfer").length;
@@ -1584,13 +1825,62 @@ function renderSelectedCalendarDay(accountId = "all") {
     dayMetricHTML("Income", income, "positive"),
     dayMetricHTML("Expenses", expenses, expenses ? "negative" : ""),
     dayMetricHTML("Net cash flow", income - expenses, tone(income - expenses)),
-    dayMetricHTML("Planned", planned.length, planned.length ? "warning" : "", false),
+    dayMetricHTML("Reminders", planned.length + cardEvents.length, planned.length || cardEvents.length ? "warning" : "", false),
   ].join("");
+  const cardHTML = cardEvents.length ? creditCardCalendarAgendaHTML(cardEvents) : "";
   const plannedHTML = planned.length ? plannedAgendaHTML(planned) : "";
   const postedHTML = entries.length
     ? transactionListHTML(entries, true)
     : emptyHTML("No posted entries on this day", planned.length ? "The recurring items above are planned and do not affect balances until posted." : "Use Add entry for this day to record an expense, income, or transfer.");
-  el.calendarDayTransactions.innerHTML = `${plannedHTML}${postedHTML}`;
+  el.calendarDayTransactions.innerHTML = `${cardHTML}${plannedHTML}${postedHTML}`;
+}
+
+
+function creditCardCalendarEventsBetween(startDate, endDate, accountId = "all") {
+  const cards = creditCardAccounts().filter((account) => accountId === "all" || account.id === accountId);
+  const events = [];
+  const start = new Date(`${startDate}T12:00:00`);
+  const end = new Date(`${endDate}T12:00:00`);
+  for (const account of cards) {
+    if (account.statement_closing_day) {
+      for (let cursor = new Date(start.getFullYear(), start.getMonth(), 1); cursor <= end; cursor = new Date(cursor.getFullYear(), cursor.getMonth() + 1, 1)) {
+        const date = dateForMonthDay(cursor.getFullYear(), cursor.getMonth(), number(account.statement_closing_day));
+        if (date >= startDate && date <= endDate) events.push({ type: "statement-close", date, account, statement: null });
+      }
+    }
+    const statements = state.creditCardStatements.filter((statement) => statement.account_id === account.id && statement.due_date >= startDate && statement.due_date <= endDate);
+    for (const statement of statements) events.push({ type: "payment-due", date: statement.due_date, account, statement, status: creditCardStatementStatus(statement) });
+    if (account.payment_due_day) {
+      for (let cursor = new Date(start.getFullYear(), start.getMonth(), 1); cursor <= end; cursor = new Date(cursor.getFullYear(), cursor.getMonth() + 1, 1)) {
+        const date = dateForMonthDay(cursor.getFullYear(), cursor.getMonth(), number(account.payment_due_day));
+        const hasStatement = statements.some((statement) => statement.due_date === date);
+        if (!hasStatement && date >= startDate && date <= endDate) events.push({ type: "payment-due", date, account, statement: null, status: null });
+      }
+    }
+  }
+  return events.sort((a, b) => a.date.localeCompare(b.date) || a.type.localeCompare(b.type) || a.account.name.localeCompare(b.account.name));
+}
+
+function creditCardCalendarEventsForDate(date, accountId = "all") {
+  return creditCardCalendarEventsBetween(date, date, accountId);
+}
+
+function creditCardCalendarAgendaHTML(events) {
+  return `<div class="card-reminder-agenda">
+    <div class="planned-agenda-heading"><strong>Credit-card reminders</strong><span>Cycle dates and saved statement deadlines</span></div>
+    ${events.map((event) => {
+      const isDue = event.type === "payment-due";
+      const status = event.status;
+      const title = isDue ? `${event.account.name} payment due` : `${event.account.name} statement closes`;
+      const detail = event.statement
+        ? `${formatMoneyText(event.statement.statement_balance)} statement · minimum ${formatMoneyText(event.statement.minimum_payment)}`
+        : isDue ? "Configured monthly payment reminder" : "Configured monthly statement closing date";
+      return `<div class="card-reminder-row">
+        <div class="planned-row-main"><span class="card-reminder-icon ${isDue ? "due" : "close"}">${isDue ? "!" : "▤"}</span><div class="planned-row-copy"><strong>${escapeHTML(title)}</strong><span>${escapeHTML(detail)}</span></div></div>
+        <div class="planned-row-side">${status ? `<span class="credit-card-status ${status.key}">${escapeHTML(status.label)}</span>` : `<span class="planned-label">Reminder</span>`}${event.statement && status?.outstanding > 0 ? `<button class="secondary-button" data-action="record-credit-card-payment" data-id="${event.account.id}" type="button">Record payment</button>` : ""}</div>
+      </div>`;
+    }).join("")}
+  </div>`;
 }
 
 function plannedAgendaHTML(planned) {
@@ -2088,6 +2378,9 @@ function openAccountModal(id = null) {
   el.accountIncludeNetWorth.checked = true;
   el.accountType.value = "current";
   el.accountColor.value = ACCOUNT_COLORS.current;
+  el.accountCreditLimit.value = "";
+  el.accountStatementClosingDay.value = "";
+  el.accountPaymentDueDay.value = "";
   el.accountFormError.textContent = "";
   if (id) {
     const account = state.accounts.find((item) => item.id === id);
@@ -2098,26 +2391,57 @@ function openAccountModal(id = null) {
     el.accountOpeningBalance.value = number(account.opening_balance);
     el.accountColor.value = safeColor(account.color);
     el.accountIncludeNetWorth.checked = account.include_in_net_worth !== false;
+    el.accountCreditLimit.value = account.credit_limit == null ? "" : number(account.credit_limit);
+    el.accountStatementClosingDay.value = account.statement_closing_day || "";
+    el.accountPaymentDueDay.value = account.payment_due_day || "";
     el.accountModalTitle.textContent = "Edit account";
   } else {
     el.accountModalTitle.textContent = "Add account";
   }
+  updateCreditCardAccountFields();
   openModal(el.accountModal);
   el.accountName.focus();
+}
+
+function updateCreditCardAccountFields() {
+  const isCreditCard = el.accountType.value === "credit";
+  el.creditCardAccountFields.hidden = !isCreditCard;
+  [el.accountCreditLimit, el.accountStatementClosingDay, el.accountPaymentDueDay].forEach((input) => {
+    input.disabled = !isCreditCard;
+  });
+}
+
+function optionalAccountDay(input) {
+  const raw = String(input.value || "").trim();
+  return raw ? Math.round(number(raw)) : null;
 }
 
 async function handleAccountSubmit(event) {
   event.preventDefault();
   el.accountFormError.textContent = "";
   const id = el.accountId.value;
+  const isCreditCard = el.accountType.value === "credit";
+  const creditLimitRaw = String(el.accountCreditLimit.value || "").trim();
+  const creditLimit = creditLimitRaw ? number(creditLimitRaw) : null;
+  const closingDay = optionalAccountDay(el.accountStatementClosingDay);
+  const dueDay = optionalAccountDay(el.accountPaymentDueDay);
   const row = {
     name: el.accountName.value.trim(),
     type: el.accountType.value,
     opening_balance: number(el.accountOpeningBalance.value),
     color: safeColor(el.accountColor.value),
     include_in_net_worth: el.accountIncludeNetWorth.checked,
+    credit_limit: isCreditCard ? creditLimit : null,
+    statement_closing_day: isCreditCard ? closingDay : null,
+    payment_due_day: isCreditCard ? dueDay : null,
   };
   if (!row.name) return showFormError(el.accountFormError, "Enter an account name.");
+  if (isCreditCard && creditLimitRaw && !(creditLimit > 0)) return showFormError(el.accountFormError, "Credit limit must be greater than zero.");
+  if (closingDay !== null && (closingDay < 1 || closingDay > 31)) return showFormError(el.accountFormError, "Statement closing day must be between 1 and 31.");
+  if (dueDay !== null && (dueDay < 1 || dueDay > 31)) return showFormError(el.accountFormError, "Payment due day must be between 1 and 31.");
+  if (id && !isCreditCard && state.creditCardStatements.some((statement) => statement.account_id === id)) {
+    return showFormError(el.accountFormError, "Delete this account's credit-card statements before changing it to another account type.");
+  }
   const duplicate = state.accounts.some((account) => account.id !== id && account.name.toLowerCase() === row.name.toLowerCase());
   if (duplicate) return showFormError(el.accountFormError, "An account with that name already exists.");
   try {
@@ -2131,6 +2455,106 @@ async function handleAccountSubmit(event) {
     }
     persistLocal(); closeModal(el.accountModal); render();
   } catch (error) { showFormError(el.accountFormError, friendlyError(error)); }
+}
+
+function openCreditCardStatementModal(id = null, presetAccountId = "") {
+  const cards = creditCardAccounts();
+  if (!cards.length) return showToast("Add a credit-card account first.", true);
+  el.creditCardStatementForm.reset();
+  el.creditCardStatementId.value = "";
+  el.creditCardStatementFormError.textContent = "";
+  el.creditCardStatementAccount.innerHTML = cards.map((account) => `<option value="${account.id}">${escapeHTML(account.name)}</option>`).join("");
+  el.creditCardStatementDate.value = todayISO();
+  el.creditCardMinimumPayment.value = "0";
+  if (id) {
+    const statement = state.creditCardStatements.find((item) => item.id === id);
+    if (!statement) return;
+    el.creditCardStatementId.value = statement.id;
+    el.creditCardStatementAccount.value = statement.account_id;
+    el.creditCardStatementDate.value = statement.statement_date;
+    el.creditCardDueDate.value = statement.due_date;
+    el.creditCardStatementBalance.value = number(statement.statement_balance);
+    el.creditCardMinimumPayment.value = number(statement.minimum_payment);
+    el.creditCardStatementNotes.value = statement.notes || "";
+    el.creditCardStatementModalTitle.textContent = "Edit statement";
+  } else {
+    if (presetAccountId && cards.some((account) => account.id === presetAccountId)) el.creditCardStatementAccount.value = presetAccountId;
+    el.creditCardStatementModalTitle.textContent = "Add statement";
+    updateCreditCardStatementDueDate();
+  }
+  openModal(el.creditCardStatementModal);
+  el.creditCardStatementBalance.focus();
+}
+
+function updateCreditCardStatementDueDate() {
+  if (el.creditCardStatementId.value) return;
+  const account = accountById(el.creditCardStatementAccount.value);
+  const dueDate = configuredDueDateForStatement(account, el.creditCardStatementDate.value);
+  if (dueDate) el.creditCardDueDate.value = dueDate;
+}
+
+async function handleCreditCardStatementSubmit(event) {
+  event.preventDefault();
+  el.creditCardStatementFormError.textContent = "";
+  const id = el.creditCardStatementId.value;
+  const row = {
+    account_id: el.creditCardStatementAccount.value,
+    statement_date: el.creditCardStatementDate.value,
+    due_date: el.creditCardDueDate.value,
+    statement_balance: number(el.creditCardStatementBalance.value),
+    minimum_payment: number(el.creditCardMinimumPayment.value),
+    notes: el.creditCardStatementNotes.value.trim(),
+  };
+  const account = accountById(row.account_id);
+  if (!account || account.type !== "credit") return showFormError(el.creditCardStatementFormError, "Choose a credit-card account.");
+  if (!row.statement_date || !row.due_date) return showFormError(el.creditCardStatementFormError, "Choose both the statement and payment due dates.");
+  if (row.due_date < row.statement_date) return showFormError(el.creditCardStatementFormError, "Payment due date cannot be before the statement date.");
+  if (row.statement_balance < 0) return showFormError(el.creditCardStatementFormError, "Statement amount due cannot be negative.");
+  if (row.minimum_payment < 0) return showFormError(el.creditCardStatementFormError, "Minimum payment cannot be negative.");
+  if (row.minimum_payment > row.statement_balance) return showFormError(el.creditCardStatementFormError, "Minimum payment cannot exceed the statement amount due.");
+  if (row.notes.length > 500) return showFormError(el.creditCardStatementFormError, "Notes must be 500 characters or fewer.");
+  const duplicate = state.creditCardStatements.some((statement) => statement.id !== id && statement.account_id === row.account_id && statement.statement_date === row.statement_date);
+  if (duplicate) return showFormError(el.creditCardStatementFormError, "A statement already exists for this card and closing date.");
+  try {
+    if (id) {
+      const updated = await updateRow("credit_card_statements", id, row);
+      state.creditCardStatements = state.creditCardStatements.map((item) => item.id === id ? { ...item, ...updated } : item);
+      showToast("Card statement updated.");
+    } else {
+      state.creditCardStatements.push(await insertRow("credit_card_statements", row));
+      showToast("Card statement added.");
+    }
+    persistLocal(); closeModal(el.creditCardStatementModal); render();
+  } catch (error) { showFormError(el.creditCardStatementFormError, friendlyError(error)); }
+}
+
+async function deleteCreditCardStatement(id) {
+  const statement = state.creditCardStatements.find((item) => item.id === id);
+  if (!statement || !confirm(`Delete the ${formatDate(statement.statement_date)} card statement?`)) return;
+  try {
+    await deleteRow("credit_card_statements", id);
+    state.creditCardStatements = state.creditCardStatements.filter((item) => item.id !== id);
+    persistLocal(); render(); showToast("Card statement deleted.");
+  } catch (error) { showToast(friendlyError(error), true); }
+}
+
+function openCreditCardPayment(accountId) {
+  const card = accountById(accountId);
+  if (!card || card.type !== "credit") return;
+  const source = state.accounts.find((account) => account.id !== accountId && account.type !== "credit") || state.accounts.find((account) => account.id !== accountId);
+  if (!source) return showToast("Add another account to pay this credit card from.", true);
+  openTransactionModal();
+  setEntryType("transfer");
+  el.transferFromAccount.value = source.id;
+  el.transferToAccount.value = accountId;
+  el.entryDescription.value = `${card.name} payment`;
+  const latest = latestCreditCardStatement(accountId);
+  if (latest) {
+    const status = creditCardStatementStatus(latest);
+    el.entryAmount.value = status.outstanding > 0 ? status.outstanding.toFixed(2) : "";
+    el.entryRemarks.value = `Payment for statement dated ${formatDate(latest.statement_date)}`;
+  }
+  el.entryAmount.focus();
 }
 
 function openBudgetModal(id = null) {
@@ -2224,8 +2648,8 @@ async function handleCategorySubmit(event) {
 async function deleteAccount(id) {
   const account = state.accounts.find((item) => item.id === id);
   if (!account) return;
-  const inUse = state.transactions.some((transaction) => [transaction.account_id, transaction.from_account_id, transaction.to_account_id].includes(id)) || state.recurringEntries.some((rule) => [rule.account_id, rule.from_account_id, rule.to_account_id].includes(id)) || state.reconciliations.some((item) => item.account_id === id);
-  if (inUse) return showToast("Delete or move this account's transactions, recurring schedules, and reconciliation history first.", true);
+  const inUse = state.transactions.some((transaction) => [transaction.account_id, transaction.from_account_id, transaction.to_account_id].includes(id)) || state.recurringEntries.some((rule) => [rule.account_id, rule.from_account_id, rule.to_account_id].includes(id)) || state.reconciliations.some((item) => item.account_id === id) || state.creditCardStatements.some((item) => item.account_id === id);
+  if (inUse) return showToast("Delete or move this account's transactions, recurring schedules, statements, and reconciliation history first.", true);
   if (!confirm(`Delete ${account.name}?`)) return;
   try {
     await deleteRow("accounts", id);
@@ -2844,13 +3268,13 @@ async function importJSON(event) {
 
 async function replaceCloudState(imported) {
   setSyncStatus("syncing", "Restoring backup");
-  for (const table of ["transaction_clearings", "reconciliations", "transactions", "budgets", "recurring_entries", "accounts", "categories"]) {
+  for (const table of ["transaction_clearings", "reconciliations", "credit_card_statements", "transactions", "budgets", "recurring_entries", "accounts", "categories"]) {
     const { error } = await supabase.from(table).delete().eq("user_id", user.id);
     if (error) throw error;
   }
   const clean = sanitizeImportedState(imported);
   const withUser = (rows) => rows.map((row) => ({ ...row, user_id: user.id }));
-  for (const [table, rows] of [["categories", clean.categories], ["accounts", clean.accounts], ["recurring_entries", clean.recurringEntries], ["budgets", clean.budgets], ["transactions", clean.transactions], ["reconciliations", clean.reconciliations], ["transaction_clearings", clean.transactionClearings]]) {
+  for (const [table, rows] of [["categories", clean.categories], ["accounts", clean.accounts], ["recurring_entries", clean.recurringEntries], ["budgets", clean.budgets], ["transactions", clean.transactions], ["credit_card_statements", clean.creditCardStatements], ["reconciliations", clean.reconciliations], ["transaction_clearings", clean.transactionClearings]]) {
     if (!rows.length) continue;
     const { error } = await supabase.from(table).insert(withUser(rows));
     if (error) throw error;
@@ -2867,7 +3291,7 @@ function sanitizeImportedState(imported) {
   };
   const clean = normalizeState(imported);
   return {
-    version: 4,
+    version: 5,
     accounts: clean.accounts.map(strip),
     categories: clean.categories.map(strip),
     transactions: clean.transactions.map(strip),
@@ -2875,6 +3299,7 @@ function sanitizeImportedState(imported) {
     recurringEntries: clean.recurringEntries.map(strip),
     reconciliations: clean.reconciliations.map(strip),
     transactionClearings: clean.transactionClearings.map(strip),
+    creditCardStatements: clean.creditCardStatements.map(strip),
   };
 }
 
@@ -2883,7 +3308,7 @@ async function resetApplication() {
   try {
     if (mode === "cloud") {
       setSyncStatus("syncing", "Resetting data");
-      for (const table of ["transaction_clearings", "reconciliations", "transactions", "budgets", "recurring_entries", "accounts", "categories"]) {
+      for (const table of ["transaction_clearings", "reconciliations", "credit_card_statements", "transactions", "budgets", "recurring_entries", "accounts", "categories"]) {
         const { error } = await supabase.from(table).delete().eq("user_id", user.id);
         if (error) throw error;
       }
@@ -2925,6 +3350,8 @@ function friendlyError(error) {
   if (message.includes("Failed to fetch")) return "Could not reach Supabase. Check your connection and project configuration.";
   if ((message.includes("reconciliations") || message.includes("transaction_clearings")) && (message.includes("does not exist") || message.includes("schema cache"))) return "Account reconciliation is not ready. Run supabase/add-account-reconciliation.sql in the Supabase SQL Editor.";
   if (message.includes("reconciliations_user_id_account_id_statement_date_key") || (message.includes("duplicate key") && message.includes("reconciliations"))) return "This account already has a completed reconciliation for that statement date. Undo it before creating another.";
+  if ((message.includes("credit_card_statements") || message.includes("credit_limit") || message.includes("statement_closing_day") || message.includes("payment_due_day")) && (message.includes("does not exist") || message.includes("schema cache") || message.includes("column"))) return "Credit-card management is not ready. Run supabase/add-credit-card-management.sql in the Supabase SQL Editor.";
+  if (message.includes("credit_card_statements_user_id_account_id_statement_date_key") || (message.includes("duplicate key") && message.includes("credit_card_statements"))) return "A statement already exists for this card and closing date.";
   if (message.includes("duplicate key")) return "A record with the same name or category already exists.";
   if (message.includes("recurring_entries") && (message.includes("does not exist") || message.includes("schema cache"))) return "Recurring schedules are not ready. Run supabase/add-recurring-entries.sql in the Supabase SQL Editor.";
   if ((message.includes("recurring_entry_id") || message.includes("scheduled_date")) && message.includes("column")) return "Recurring transaction columns are not ready. Run supabase/add-recurring-entries.sql in the Supabase SQL Editor.";

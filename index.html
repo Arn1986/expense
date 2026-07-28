@@ -68,6 +68,7 @@
       <nav class="nav" aria-label="Primary navigation">
         <button class="nav-item active" data-view="dashboard"><span>⌂</span> Dashboard</button>
         <button class="nav-item" data-view="accounts"><span>▣</span> Accounts</button>
+        <button class="nav-item" data-view="creditcards"><span>▤</span> Credit cards</button>
         <button class="nav-item" data-view="transactions"><span>↕</span> Transactions</button>
         <button class="nav-item" data-view="reconcile"><span>✓</span> Reconcile</button>
         <button class="nav-item" data-view="calendar"><span>▦</span> Calendar</button>
@@ -120,6 +121,14 @@
           </section>
         </div>
 
+        <section class="panel dashboard-credit-cards-panel" id="dashboardCreditCardsPanel" hidden>
+          <div class="panel-heading">
+            <div><p class="eyebrow">Cards</p><h2>Credit-card overview</h2></div>
+            <button class="text-button" data-go-to="creditcards">Manage cards</button>
+          </div>
+          <div id="dashboardCreditCards"></div>
+        </section>
+
         <div class="content-grid two-columns">
           <section class="panel">
             <div class="panel-heading">
@@ -152,6 +161,24 @@
           <button class="secondary-button" id="openAccountButton" type="button">+ Add account</button>
         </div>
         <div class="account-grid" id="accountsGrid"></div>
+      </section>
+
+      <section class="view" id="creditcardsView">
+        <div class="section-toolbar">
+          <div>
+            <p class="section-copy">Track card limits, utilization, statement balances, minimum payments, due dates, and payment status. Card payments are recorded as transfers into the credit-card account.</p>
+            <p class="section-note">Ledgerly keeps account debt negative, while statement amounts are entered as positive amounts due.</p>
+          </div>
+          <button class="secondary-button" id="openCreditCardStatementButton" type="button">+ Add statement</button>
+        </div>
+        <div class="summary-grid" id="creditCardSummary"></div>
+        <div class="credit-card-grid" id="creditCardsGrid"></div>
+        <section class="panel credit-card-statements-panel">
+          <div class="panel-heading">
+            <div><p class="eyebrow">History</p><h2>Card statements</h2></div>
+          </div>
+          <div id="creditCardStatementsList"></div>
+        </section>
       </section>
 
       <section class="view" id="transactionsView">
@@ -431,10 +458,38 @@
           <label class="field"><span>Starting balance</span><div class="money-input"><span class="aed-symbol" aria-hidden="true"></span><input id="accountOpeningBalance" type="number" step="0.01" inputmode="decimal" value="0" required /></div></label>
           <label class="field"><span>Card color</span><input id="accountColor" type="color" value="#2563eb" /></label>
           <label class="check-field"><input id="accountIncludeNetWorth" type="checkbox" checked /><span>Include in net worth</span></label>
+          <div class="credit-card-account-fields full-width" id="creditCardAccountFields" hidden>
+            <div class="credit-card-account-heading"><strong>Credit-card settings</strong><span>Used for utilization, statement reminders, and due-date planning.</span></div>
+            <div class="form-grid">
+              <label class="field"><span>Credit limit</span><div class="money-input"><span class="aed-symbol" aria-hidden="true"></span><input id="accountCreditLimit" type="number" min="0.01" step="0.01" inputmode="decimal" placeholder="e.g. 25000" /></div></label>
+              <label class="field"><span>Statement closes on day</span><input id="accountStatementClosingDay" type="number" min="1" max="31" inputmode="numeric" placeholder="e.g. 18" /></label>
+              <label class="field"><span>Payment is due on day</span><input id="accountPaymentDueDay" type="number" min="1" max="31" inputmode="numeric" placeholder="e.g. 8" /></label>
+            </div>
+          </div>
         </div>
-        <p class="field-help">For money owed on a credit card, use a negative starting balance, such as -500.</p>
+        <p class="field-help">For money owed on a credit card, use a negative starting balance, such as -500. Credit limit and cycle dates are optional.</p>
         <p class="form-error" id="accountFormError" role="alert"></p>
         <div class="modal-actions"><button class="secondary-button" type="button" data-close-modal="accountModal">Cancel</button><button class="primary-button" type="submit">Save account</button></div>
+      </form>
+    </section>
+  </div>
+
+  <div class="modal-backdrop" id="creditCardStatementModal" hidden>
+    <section class="modal small-modal" role="dialog" aria-modal="true" aria-labelledby="creditCardStatementModalTitle">
+      <div class="modal-header"><div><p class="eyebrow">Credit card</p><h2 id="creditCardStatementModalTitle">Add statement</h2></div><button class="icon-button" data-close-modal="creditCardStatementModal" aria-label="Close">×</button></div>
+      <form id="creditCardStatementForm">
+        <input type="hidden" id="creditCardStatementId" />
+        <div class="form-grid">
+          <label class="field full-width"><span>Credit-card account</span><select id="creditCardStatementAccount" required></select></label>
+          <label class="field"><span>Statement closing date</span><input id="creditCardStatementDate" type="date" required /></label>
+          <label class="field"><span>Payment due date</span><input id="creditCardDueDate" type="date" required /></label>
+          <label class="field"><span>Statement amount due</span><div class="money-input"><span class="aed-symbol" aria-hidden="true"></span><input id="creditCardStatementBalance" type="number" min="0" step="0.01" inputmode="decimal" required /></div></label>
+          <label class="field"><span>Minimum payment</span><div class="money-input"><span class="aed-symbol" aria-hidden="true"></span><input id="creditCardMinimumPayment" type="number" min="0" step="0.01" inputmode="decimal" value="0" required /></div></label>
+          <label class="field full-width"><span>Notes</span><textarea id="creditCardStatementNotes" maxlength="500" rows="3" placeholder="Optional statement reference, bank note, or reminder"></textarea></label>
+        </div>
+        <p class="field-help">Enter the statement amount as a positive amount due. Payments are detected from transfers into this card after the statement date.</p>
+        <p class="form-error" id="creditCardStatementFormError" role="alert"></p>
+        <div class="modal-actions"><button class="secondary-button" type="button" data-close-modal="creditCardStatementModal">Cancel</button><button class="primary-button" type="submit">Save statement</button></div>
       </form>
     </section>
   </div>
@@ -523,6 +578,6 @@
   </div>
 
   <div class="toast" id="toast" role="status" aria-live="polite"></div>
-  <script type="module" src="app.js?v=7"></script>
+  <script type="module" src="app.js?v=8"></script>
 </body>
 </html>
