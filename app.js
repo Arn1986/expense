@@ -3,9 +3,6 @@ import { SUPABASE_URL, SUPABASE_PUBLISHABLE_KEY } from "./config.js";
 const STORAGE_KEY = "ledgerly-data-v2-local";
 const LEGACY_STORAGE_KEY = "ledgerly-data-v1";
 const CURRENCY = "AED";
-const RECEIPT_BUCKET = "receipts";
-const MAX_RECEIPT_BYTES = 8 * 1024 * 1024;
-const ALLOWED_RECEIPT_TYPES = new Set(["image/jpeg", "image/png", "image/webp", "image/heic", "image/heif"]);
 const amountFormatter = new Intl.NumberFormat("en-AE", {
   minimumFractionDigits: 2,
   maximumFractionDigits: 2,
@@ -45,17 +42,6 @@ let authMode = "signin";
 let activeView = "dashboard";
 let toastTimer = null;
 let state = emptyState();
-let transactionImportSourceRows = [];
-let transactionImportValidation = [];
-let transactionImportFileName = "";
-let spreadsheetModulePromise = null;
-let selectedReceiptFile = null;
-let removeExistingReceipt = false;
-let receiptPreviewObjectUrl = "";
-let calendarCursor = new Date(new Date().getFullYear(), new Date().getMonth(), 1);
-let selectedCalendarDate = todayISO();
-let postingRecurringEntries = false;
-let reconciliationBusy = false;
 
 const el = Object.fromEntries([...document.querySelectorAll("[id]")].map((node) => [node.id, node]));
 
@@ -66,9 +52,7 @@ async function initialize() {
     weekday: "long", month: "long", day: "numeric",
   }).format(new Date());
   el.entryDate.value = todayISO();
-  el.recurringStartDate.value = todayISO();
   el.reportMonth.value = todayISO().slice(0, 7);
-  el.reconcileStatementDate.value = todayISO();
   bindEvents();
 
   if (!configuredForCloud) {
@@ -143,65 +127,30 @@ function bindEvents() {
   });
 
   el.openTransactionButton.addEventListener("click", () => openTransactionModal());
-  el.openTransactionImportButton.addEventListener("click", openTransactionImportModal);
-  el.openRecurringButton.addEventListener("click", () => openRecurringModal());
-  [el.reconcileAccount, el.reconcileStatementDate, el.reconcileStatementBalance].forEach((input) => input.addEventListener("input", renderReconciliation));
-  el.reconcileShowReconciled.addEventListener("change", renderReconciliation);
-  el.reconcileMarkAllButton.addEventListener("click", () => bulkSetReconciliationCleared(true));
-  el.reconcileUnclearAllButton.addEventListener("click", () => bulkSetReconciliationCleared(false));
-  el.completeReconciliationButton.addEventListener("click", completeReconciliation);
-  el.calendarPreviousMonth.addEventListener("click", () => moveCalendarMonth(-1));
-  el.calendarNextMonth.addEventListener("click", () => moveCalendarMonth(1));
-  el.calendarTodayButton.addEventListener("click", showCalendarToday);
-  el.calendarAccountFilter.addEventListener("input", renderCalendar);
-  el.calendarAddEntryButton.addEventListener("click", () => openTransactionModal(null, selectedCalendarDate));
-  el.calendarGrid.addEventListener("click", handleCalendarClick);
-  el.calendarGrid.addEventListener("keydown", handleCalendarKeydown);
   el.openAccountButton.addEventListener("click", () => openAccountModal());
-  el.openCreditCardStatementButton.addEventListener("click", () => openCreditCardStatementModal());
   el.openBudgetButton.addEventListener("click", () => openBudgetModal());
   el.openCategoryButton.addEventListener("click", () => openCategoryModal());
 
   document.querySelectorAll("[data-entry-type]").forEach((button) => {
     button.addEventListener("click", () => setEntryType(button.dataset.entryType));
   });
-  document.querySelectorAll("[data-recurring-type]").forEach((button) => {
-    button.addEventListener("click", () => setRecurringType(button.dataset.recurringType));
-  });
-  el.recurringFrequency.addEventListener("change", updateRecurringIntervalUnit);
-  el.recurringInterval.addEventListener("input", updateRecurringIntervalUnit);
-  el.recurringEndMode.addEventListener("change", updateRecurringEndDateVisibility);
   el.accountType.addEventListener("change", () => {
     if (!el.accountId.value) el.accountColor.value = ACCOUNT_COLORS[el.accountType.value] || ACCOUNT_COLORS.other;
-    updateCreditCardAccountFields();
   });
-  el.creditCardStatementAccount.addEventListener("change", updateCreditCardStatementDueDate);
-  el.creditCardStatementDate.addEventListener("change", updateCreditCardStatementDueDate);
 
   el.authForm.addEventListener("input", () => showAuthError(""));
   el.transactionForm.addEventListener("submit", handleTransactionSubmit);
-  el.entryReceipt.addEventListener("change", handleReceiptSelection);
-  el.viewReceiptButton.addEventListener("click", viewReceiptFromForm);
-  el.removeReceiptButton.addEventListener("click", removeReceiptFromForm);
   el.accountForm.addEventListener("submit", handleAccountSubmit);
-  el.creditCardStatementForm.addEventListener("submit", handleCreditCardStatementSubmit);
   el.budgetForm.addEventListener("submit", handleBudgetSubmit);
   el.categoryForm.addEventListener("submit", handleCategorySubmit);
-  el.recurringForm.addEventListener("submit", handleRecurringSubmit);
 
   [el.transactionSearch, el.transactionTypeFilter, el.transactionAccountFilter, el.transactionMonthFilter]
     .forEach((input) => input.addEventListener("input", renderAllTransactions));
   [el.reportPeriod, el.reportMonth].forEach((input) => input.addEventListener("input", renderReports));
-  [el.recurringStatusFilter, el.recurringTypeFilter].forEach((input) => input.addEventListener("input", renderRecurringEntries));
 
   el.exportButton.addEventListener("click", exportJSON);
   el.exportCsvButton.addEventListener("click", exportCSV);
   el.importInput.addEventListener("change", importJSON);
-  el.transactionImportInput.addEventListener("change", handleTransactionImportFile);
-  el.importDefaultAccount.addEventListener("change", validateTransactionImport);
-  el.importCreateCategories.addEventListener("change", validateTransactionImport);
-  el.importSkipDuplicates.addEventListener("change", validateTransactionImport);
-  el.importTransactionsButton.addEventListener("click", importValidatedTransactions);
   el.resetButton.addEventListener("click", resetApplication);
 
   document.body.addEventListener("click", async (event) => {
@@ -211,25 +160,12 @@ function bindEvents() {
     const actions = {
       "edit-account": () => openAccountModal(id),
       "delete-account": () => deleteAccount(id),
-      "edit-credit-card-settings": () => openAccountModal(id),
-      "add-credit-card-statement": () => openCreditCardStatementModal(null, id),
-      "edit-credit-card-statement": () => openCreditCardStatementModal(id),
-      "delete-credit-card-statement": () => deleteCreditCardStatement(id),
-      "record-credit-card-payment": () => openCreditCardPayment(id),
       "edit-transaction": () => openTransactionModal(id),
-      "open-receipt": () => openTransactionReceipt(id),
       "delete-transaction": () => deleteTransaction(id),
       "edit-budget": () => openBudgetModal(id),
       "delete-budget": () => deleteBudget(id),
       "edit-category": () => openCategoryModal(id),
       "delete-category": () => deleteCategory(id),
-      "edit-recurring": () => openRecurringModal(id),
-      "toggle-recurring": () => toggleRecurringEntry(id),
-      "post-recurring": () => postRecurringOccurrenceById(id, actionTarget.dataset.date),
-      "delete-recurring": () => deleteRecurringEntry(id),
-      "open-reconcile-account": () => openReconciliationForAccount(id),
-      "toggle-reconciliation-cleared": () => toggleTransactionCleared(id, actionTarget.dataset.accountId),
-      "undo-reconciliation": () => undoReconciliation(id),
     };
     if (actions[action]) await actions[action]();
   });
@@ -270,7 +206,6 @@ async function enterCloudApp(authUser) {
   try {
     await loadCloudState();
     if (!state.categories.length) await seedDefaultCategories();
-    await postDueRecurringEntries();
     setSyncStatus("cloud", "Cloud synchronized");
     render();
   } catch (error) {
@@ -285,7 +220,7 @@ function enterLocalApp() {
   state = loadLocalState();
   showAppScreen();
   setSyncStatus("local", "Local browser only");
-  postDueRecurringEntries().finally(render);
+  render();
 }
 
 async function handleSignOut() {
@@ -330,29 +265,21 @@ function setAuthBusy(busy) {
 function showAuthError(message) { el.authError.textContent = message; }
 
 async function loadCloudState() {
-  const [accountsResult, categoriesResult, transactionsResult, budgetsResult, recurringResult, reconciliationsResult, clearingsResult, cardStatementsResult] = await Promise.all([
+  const [accountsResult, categoriesResult, transactionsResult, budgetsResult] = await Promise.all([
     supabase.from("accounts").select("*").order("created_at", { ascending: true }),
     supabase.from("categories").select("*").order("kind").order("name"),
     supabase.from("transactions").select("*").order("entry_date", { ascending: false }).order("created_at", { ascending: false }),
     supabase.from("budgets").select("*").order("created_at", { ascending: true }),
-    supabase.from("recurring_entries").select("*").order("created_at", { ascending: true }),
-    supabase.from("reconciliations").select("*").order("statement_date", { ascending: false }).order("completed_at", { ascending: false }),
-    supabase.from("transaction_clearings").select("*").order("created_at", { ascending: true }),
-    supabase.from("credit_card_statements").select("*").order("statement_date", { ascending: false }),
   ]);
-  [accountsResult, categoriesResult, transactionsResult, budgetsResult, recurringResult, reconciliationsResult, clearingsResult, cardStatementsResult].forEach((result) => {
+  [accountsResult, categoriesResult, transactionsResult, budgetsResult].forEach((result) => {
     if (result.error) throw result.error;
   });
   state = {
-    version: 5,
+    version: 2,
     accounts: accountsResult.data || [],
     categories: categoriesResult.data || [],
     transactions: transactionsResult.data || [],
     budgets: budgetsResult.data || [],
-    recurringEntries: recurringResult.data || [],
-    reconciliations: reconciliationsResult.data || [],
-    transactionClearings: clearingsResult.data || [],
-    creditCardStatements: cardStatementsResult.data || [],
   };
 }
 
@@ -364,26 +291,12 @@ async function seedDefaultCategories() {
 }
 
 function emptyState() {
-  return { version: 5, accounts: [], categories: [], transactions: [], budgets: [], recurringEntries: [], reconciliations: [], transactionClearings: [], creditCardStatements: [] };
-}
-
-function normalizeState(value) {
-  return {
-    version: 5,
-    accounts: Array.isArray(value?.accounts) ? value.accounts : [],
-    categories: Array.isArray(value?.categories) ? value.categories : [],
-    transactions: Array.isArray(value?.transactions) ? value.transactions : [],
-    budgets: Array.isArray(value?.budgets) ? value.budgets : [],
-    recurringEntries: Array.isArray(value?.recurringEntries) ? value.recurringEntries : Array.isArray(value?.recurring_entries) ? value.recurring_entries : [],
-    reconciliations: Array.isArray(value?.reconciliations) ? value.reconciliations : [],
-    transactionClearings: Array.isArray(value?.transactionClearings) ? value.transactionClearings : Array.isArray(value?.transaction_clearings) ? value.transaction_clearings : [],
-    creditCardStatements: Array.isArray(value?.creditCardStatements) ? value.creditCardStatements : Array.isArray(value?.credit_card_statements) ? value.credit_card_statements : [],
-  };
+  return { version: 2, accounts: [], categories: [], transactions: [], budgets: [] };
 }
 
 function defaultLocalState() {
   return {
-    version: 5,
+    version: 2,
     accounts: [
       localRow({ name: "Current Account", type: "current", opening_balance: 0, color: ACCOUNT_COLORS.current, include_in_net_worth: true }),
       localRow({ name: "Savings", type: "savings", opening_balance: 0, color: ACCOUNT_COLORS.savings, include_in_net_worth: true }),
@@ -392,10 +305,6 @@ function defaultLocalState() {
     categories: defaultCategoryRows().map(localRow),
     transactions: [],
     budgets: [],
-    recurringEntries: [],
-    reconciliations: [],
-    transactionClearings: [],
-    creditCardStatements: [],
   };
 }
 
@@ -414,7 +323,7 @@ function localRow(row) {
 function loadLocalState() {
   try {
     const current = JSON.parse(localStorage.getItem(STORAGE_KEY));
-    if (isValidState(current)) return normalizeState(current);
+    if (isValidState(current)) return current;
     const legacy = JSON.parse(localStorage.getItem(LEGACY_STORAGE_KEY));
     if (legacy?.accounts && legacy?.transactions) {
       const migrated = migrateLegacyState(legacy);
@@ -466,7 +375,7 @@ function migrateLegacyState(legacy) {
       to_account_id: transaction.toAccountId || transaction.to_account_id || null,
     });
   });
-  return { version: 5, accounts, categories, transactions, budgets: [], recurringEntries: [], reconciliations: [], transactionClearings: [], creditCardStatements: [] };
+  return { version: 2, accounts, categories, transactions, budgets: [] };
 }
 
 function persistLocal() {
@@ -515,25 +424,17 @@ function switchView(view) {
   activeView = view;
   document.querySelectorAll(".view").forEach((section) => section.classList.toggle("active", section.id === `${view}View`));
   document.querySelectorAll(".nav-item").forEach((button) => button.classList.toggle("active", button.dataset.view === view));
-  const titles = { dashboard: "Dashboard", accounts: "Accounts", creditcards: "Credit cards", transactions: "Transactions", reconcile: "Reconcile", calendar: "Calendar", recurring: "Recurring", budgets: "Budgets", reports: "Reports", categories: "Categories", settings: "Data & settings" };
+  const titles = { dashboard: "Dashboard", accounts: "Accounts", transactions: "Transactions", budgets: "Budgets", reports: "Reports", categories: "Categories", settings: "Data & settings" };
   el.pageTitle.textContent = titles[view] || "Ledgerly";
   el.sidebar.classList.remove("open");
   if (view === "reports") renderReports();
-  if (view === "creditcards") renderCreditCards();
-  if (view === "reconcile") renderReconciliation();
-  if (view === "calendar") renderCalendar();
-  if (view === "recurring") renderRecurringEntries();
 }
 
 function render() {
   renderSelectors();
   renderSummary();
   renderAccounts();
-  renderCreditCards();
   renderTransactions();
-  renderReconciliation();
-  renderCalendar();
-  renderRecurringEntries();
   renderCategoryChart();
   renderCashFlowChart();
   renderBudgets();
@@ -581,8 +482,6 @@ function renderAccounts() {
         <h3>${escapeHTML(account.name)}</h3>
         <p class="large-balance">${formatMoneyHTML(balance)}</p>
         <p class="opening-balance">Starting balance: ${formatMoneyHTML(number(account.opening_balance))}${account.include_in_net_worth === false ? " · excluded from net worth" : ""}</p>
-        ${account.type === "credit" ? `<p class="account-credit-meta">${number(account.credit_limit) > 0 ? `${creditCardUtilization(account).toFixed(1)}% of ${formatMoneyHTML(account.credit_limit)} limit` : "Credit limit not configured"}</p>` : ""}
-        <div class="account-card-footer-actions"><button class="account-reconcile-button" data-action="open-reconcile-account" data-id="${account.id}" type="button">✓ Reconcile</button>${account.type === "credit" ? `<button class="account-reconcile-button" data-action="add-credit-card-statement" data-id="${account.id}" type="button">▤ Statement</button>` : ""}</div>
       </article>`;
   }).join("");
 }
@@ -594,226 +493,6 @@ function accountRowHTML(account) {
     <div class="account-details"><strong>${escapeHTML(account.name)}</strong><span>${escapeHTML(account.type)}</span></div>
     <span class="account-balance ${tone(balance)}">${formatMoneyHTML(balance)}</span>
   </div>`;
-}
-
-
-function creditCardAccounts() {
-  return state.accounts.filter((account) => account.type === "credit");
-}
-
-function creditCardDebt(account) {
-  return Math.max(0, -calculateAccountBalance(account.id));
-}
-
-function creditCardAvailableCredit(account) {
-  const limit = Math.max(0, number(account.credit_limit));
-  return limit ? Math.max(0, limit - creditCardDebt(account)) : 0;
-}
-
-function creditCardUtilization(account) {
-  const limit = Math.max(0, number(account.credit_limit));
-  return limit ? (creditCardDebt(account) / limit) * 100 : 0;
-}
-
-function renderCreditCards() {
-  if (!el.creditCardsGrid) return;
-  const cards = creditCardAccounts();
-  const totalDebt = cards.reduce((sum, account) => sum + creditCardDebt(account), 0);
-  const totalLimit = cards.reduce((sum, account) => sum + Math.max(0, number(account.credit_limit)), 0);
-  const available = cards.reduce((sum, account) => sum + creditCardAvailableCredit(account), 0);
-  const utilization = totalLimit ? (totalDebt / totalLimit) * 100 : 0;
-  const openStatements = state.creditCardStatements.map((statement) => creditCardStatementStatus(statement));
-  const attentionCount = openStatements.filter((item) => ["overdue", "due-soon"].includes(item.key)).length;
-
-  el.openCreditCardStatementButton.disabled = cards.length === 0;
-  el.creditCardSummary.innerHTML = [
-    summaryCard("Total card debt", totalDebt, `${cards.length} credit-card account${cards.length === 1 ? "" : "s"}`, totalDebt ? "negative" : ""),
-    summaryCard("Available credit", available, totalLimit ? `${formatMoneyText(totalLimit)} combined limit` : "Add card limits to calculate this", "positive"),
-    summaryCard("Utilization", utilization, totalLimit ? "Current debt divided by total limit" : "No credit limits configured", utilization >= 70 ? "negative" : utilization >= 30 ? "warning" : "positive", false, "%"),
-    summaryCard("Needs attention", attentionCount, attentionCount ? "Overdue or due within 7 days" : "No urgent card statements", attentionCount ? "negative" : "positive", false),
-  ].join("");
-
-  if (!cards.length) {
-    el.creditCardsGrid.innerHTML = emptyHTML("No credit cards configured", "Add an account with the Credit card type, then enter its limit and cycle dates.");
-    el.creditCardStatementsList.innerHTML = emptyHTML("No card statements", "Statements will appear here after a credit-card account is added.");
-    el.dashboardCreditCardsPanel.hidden = true;
-    el.dashboardCreditCards.innerHTML = "";
-    return;
-  }
-
-  el.creditCardsGrid.innerHTML = cards.map(creditCardAccountCardHTML).join("");
-  const statements = [...state.creditCardStatements].sort((a, b) => String(b.statement_date).localeCompare(String(a.statement_date)));
-  el.creditCardStatementsList.innerHTML = statements.length
-    ? `<div class="credit-card-statement-list">${statements.map(creditCardStatementRowHTML).join("")}</div>`
-    : emptyHTML("No statements saved", "Add the latest statement for each card to track its amount due and payment status.");
-
-  el.dashboardCreditCardsPanel.hidden = false;
-  el.dashboardCreditCards.innerHTML = `<div class="credit-card-dashboard-list">${cards.slice(0, 4).map(creditCardDashboardRowHTML).join("")}</div>`;
-}
-
-function creditCardDashboardRowHTML(account) {
-  const debt = creditCardDebt(account);
-  const utilization = creditCardUtilization(account);
-  const latest = latestCreditCardStatement(account.id);
-  const status = latest ? creditCardStatementStatus(latest) : null;
-  return `<div class="credit-card-dashboard-row">
-    <span class="account-icon" style="--account-color:${safeColor(account.color)}">${escapeHTML(account.name.slice(0, 1).toUpperCase())}</span>
-    <div class="credit-card-dashboard-copy"><strong>${escapeHTML(account.name)}</strong><span>${number(account.credit_limit) > 0 ? `${utilization.toFixed(1)}% utilized` : "Credit limit not set"}${status ? ` · ${escapeHTML(status.label)}` : ""}</span></div>
-    <div class="credit-card-dashboard-amount"><strong>${formatMoneyHTML(debt)}</strong><span>owed</span></div>
-  </div>`;
-}
-
-function creditCardAccountCardHTML(account) {
-  const debt = creditCardDebt(account);
-  const limit = Math.max(0, number(account.credit_limit));
-  const available = creditCardAvailableCredit(account);
-  const utilization = creditCardUtilization(account);
-  const latest = latestCreditCardStatement(account.id);
-  const status = latest ? creditCardStatementStatus(latest) : null;
-  const nextClose = account.statement_closing_day ? nextDayOfMonth(number(account.statement_closing_day)) : "";
-  const nextDue = latest && status?.outstanding > 0
-    ? latest.due_date
-    : account.payment_due_day ? nextDayOfMonth(number(account.payment_due_day)) : "";
-  const progress = latest && number(latest.statement_balance) > 0 ? Math.min(100, (status.paid / number(latest.statement_balance)) * 100) : 0;
-  return `<article class="credit-card-management-card" style="--account-color:${safeColor(account.color)}">
-    <div class="credit-card-management-head">
-      <div><span class="credit-card-chip"></span><p>${escapeHTML(account.name)}</p></div>
-      <span class="credit-card-balance-label">Current debt</span>
-      <strong class="credit-card-current-debt">${formatMoneyHTML(debt)}</strong>
-    </div>
-    <div class="credit-card-limit-section">
-      <div class="credit-card-metric"><span>Credit limit</span><strong>${limit ? formatMoneyHTML(limit) : "Not set"}</strong></div>
-      <div class="credit-card-metric"><span>Available</span><strong class="positive">${limit ? formatMoneyHTML(available) : "—"}</strong></div>
-      <div class="credit-card-metric"><span>Utilization</span><strong class="${utilization >= 70 ? "negative" : utilization >= 30 ? "warning" : "positive"}">${limit ? `${utilization.toFixed(1)}%` : "—"}</strong></div>
-      <div class="credit-utilization-track"><span class="${utilization >= 70 ? "high" : utilization >= 30 ? "medium" : ""}" style="width:${Math.min(100, utilization)}%"></span></div>
-    </div>
-    <div class="credit-card-cycle-grid">
-      <div><span>Next statement close</span><strong>${nextClose ? formatDate(nextClose) : "Not configured"}</strong></div>
-      <div><span>Next payment date</span><strong>${nextDue ? formatDate(nextDue) : "Not configured"}</strong></div>
-    </div>
-    ${latest ? `<div class="credit-card-latest-statement">
-      <div class="credit-card-statement-title"><div><span>Latest statement</span><strong>${formatDate(latest.statement_date)}</strong></div><span class="credit-card-status ${status.key}">${escapeHTML(status.label)}</span></div>
-      <div class="credit-card-statement-figures"><span>Due ${formatMoneyHTML(latest.statement_balance)}</span><span>Paid ${formatMoneyHTML(status.paid)}</span><span>Remaining ${formatMoneyHTML(status.outstanding)}</span></div>
-      <div class="credit-payment-track"><span style="width:${progress}%"></span></div>
-      <p>${escapeHTML(status.detail)}</p>
-    </div>` : `<div class="credit-card-latest-statement empty"><strong>No statement saved</strong><p>Add a statement to track its due date, minimum payment, and payment progress.</p></div>`}
-    <div class="credit-card-actions">
-      <button class="secondary-button" data-action="record-credit-card-payment" data-id="${account.id}" type="button">Record payment</button>
-      <button class="secondary-button" data-action="add-credit-card-statement" data-id="${account.id}" type="button">Add statement</button>
-      <button class="text-button" data-action="edit-credit-card-settings" data-id="${account.id}" type="button">Edit settings</button>
-    </div>
-  </article>`;
-}
-
-function creditCardStatementRowHTML(statement) {
-  const account = accountById(statement.account_id);
-  if (!account) return "";
-  const status = creditCardStatementStatus(statement);
-  return `<div class="credit-card-statement-row">
-    <div class="credit-card-statement-account"><span class="account-icon" style="--account-color:${safeColor(account.color)}">${escapeHTML(account.name.slice(0, 1).toUpperCase())}</span><div><strong>${escapeHTML(account.name)}</strong><span>Statement ${formatDate(statement.statement_date)}</span></div></div>
-    <div><span class="history-label">Amount due</span><strong>${formatMoneyHTML(statement.statement_balance)}</strong></div>
-    <div><span class="history-label">Minimum</span><strong>${formatMoneyHTML(statement.minimum_payment)}</strong></div>
-    <div><span class="history-label">Due date</span><strong>${formatDate(statement.due_date)}</strong></div>
-    <div><span class="history-label">Paid</span><strong>${formatMoneyHTML(status.paid)}</strong></div>
-    <div class="credit-card-statement-status-cell"><span class="credit-card-status ${status.key}">${escapeHTML(status.label)}</span><small>${escapeHTML(status.detail)}</small></div>
-    <div class="row-actions"><button class="row-action" data-action="edit-credit-card-statement" data-id="${statement.id}" aria-label="Edit card statement">✎</button><button class="row-action danger" data-action="delete-credit-card-statement" data-id="${statement.id}" aria-label="Delete card statement">×</button></div>
-  </div>`;
-}
-
-function latestCreditCardStatement(accountId) {
-  return state.creditCardStatements
-    .filter((statement) => statement.account_id === accountId)
-    .sort((a, b) => String(b.statement_date).localeCompare(String(a.statement_date)))[0] || null;
-}
-
-function nextCreditCardStatement(statement) {
-  return state.creditCardStatements
-    .filter((item) => item.account_id === statement.account_id && item.statement_date > statement.statement_date)
-    .sort((a, b) => String(a.statement_date).localeCompare(String(b.statement_date)))[0] || null;
-}
-
-function creditCardPaymentTransactions(statement) {
-  const next = nextCreditCardStatement(statement);
-  return state.transactions
-    .filter((transaction) => transaction.type === "transfer"
-      && transaction.to_account_id === statement.account_id
-      && transaction.entry_date >= statement.statement_date
-      && transaction.entry_date <= todayISO()
-      && (!next || transaction.entry_date < next.statement_date))
-    .sort((a, b) => String(a.entry_date).localeCompare(String(b.entry_date)) || String(a.created_at || "").localeCompare(String(b.created_at || "")));
-}
-
-function creditCardStatementStatus(statement) {
-  const amountDue = Math.max(0, number(statement.statement_balance));
-  const minimum = Math.max(0, number(statement.minimum_payment));
-  const payments = creditCardPaymentTransactions(statement);
-  let paid = 0;
-  let paidInFullDate = "";
-  let minimumPaidDate = minimum === 0 ? statement.statement_date : "";
-  for (const transaction of payments) {
-    paid += number(transaction.amount);
-    if (!minimumPaidDate && paid + 0.005 >= minimum) minimumPaidDate = transaction.entry_date;
-    if (!paidInFullDate && paid + 0.005 >= amountDue) paidInFullDate = transaction.entry_date;
-  }
-  const outstanding = Math.max(0, amountDue - paid);
-  const dueIn = daysBetweenISO(todayISO(), statement.due_date);
-  let key = "open";
-  let label = "Open";
-  let detail = `${formatMoneyText(outstanding)} remains due by ${formatDate(statement.due_date)}.`;
-  if (amountDue <= 0.005 || paid + 0.005 >= amountDue) {
-    key = paidInFullDate && paidInFullDate > statement.due_date ? "paid-late" : "paid";
-    label = key === "paid-late" ? "Paid late" : "Paid";
-    detail = paidInFullDate ? `Paid in full on ${formatDate(paidInFullDate)}.` : "No payment is due for this statement.";
-  } else if (statement.due_date < todayISO() && (minimum === 0 || paid + 0.005 < minimum)) {
-    key = "overdue";
-    label = "Overdue";
-    detail = minimum > 0
-      ? `${formatMoneyText(Math.max(0, minimum - paid))} is still needed to meet the minimum payment.`
-      : `${formatMoneyText(outstanding)} remains unpaid after the due date.`;
-  } else if (minimum > 0 && paid + 0.005 >= minimum) {
-    key = "minimum-paid";
-    label = "Minimum paid";
-    detail = `${formatMoneyText(outstanding)} remains on the statement after the minimum payment.`;
-  } else if (dueIn >= 0 && dueIn <= 7) {
-    key = "due-soon";
-    label = dueIn === 0 ? "Due today" : "Due soon";
-    detail = `${formatMoneyText(Math.max(0, minimum - paid))} is needed for the minimum payment${dueIn === 0 ? " today" : ` in ${dueIn} day${dueIn === 1 ? "" : "s"}`}.`;
-  }
-  return { key, label, detail, paid, outstanding, paidInFullDate, minimumPaidDate, payments };
-}
-
-function nextDayOfMonth(day, fromISO = todayISO()) {
-  const rawDay = Math.round(number(day));
-  if (!rawDay) return "";
-  const safeDay = Math.max(1, Math.min(31, rawDay));
-  const from = new Date(`${fromISO}T12:00:00`);
-  for (let offset = 0; offset < 24; offset += 1) {
-    const candidate = dateForMonthDay(from.getFullYear(), from.getMonth() + offset, safeDay);
-    if (candidate >= fromISO) return candidate;
-  }
-  return "";
-}
-
-function dateForMonthDay(year, zeroBasedMonth, day) {
-  const date = new Date(year, zeroBasedMonth, 1);
-  const last = new Date(date.getFullYear(), date.getMonth() + 1, 0).getDate();
-  return localISODate(new Date(date.getFullYear(), date.getMonth(), Math.min(day, last)));
-}
-
-function configuredDueDateForStatement(account, statementDate) {
-  const rawDueDay = Math.round(number(account?.payment_due_day));
-  if (!rawDueDay || !statementDate) return "";
-  const dueDay = Math.max(1, Math.min(31, rawDueDay));
-  const date = new Date(`${statementDate}T12:00:00`);
-  const sameMonth = dateForMonthDay(date.getFullYear(), date.getMonth(), dueDay);
-  return sameMonth > statementDate ? sameMonth : dateForMonthDay(date.getFullYear(), date.getMonth() + 1, dueDay);
-}
-
-function daysBetweenISO(fromISO, toISO) {
-  if (!fromISO || !toISO) return 0;
-  const from = new Date(`${fromISO}T12:00:00`);
-  const to = new Date(`${toISO}T12:00:00`);
-  return Math.round((to - from) / 86400000);
 }
 
 function renderTransactions() {
@@ -834,7 +513,7 @@ function renderAllTransactions() {
   const items = sortedTransactions().filter((transaction) => {
     const category = categoryById(transaction.category_id)?.name || "";
     const accountText = transactionAccountText(transaction);
-    const matchesSearch = !search || [transaction.description, transaction.remarks, category, accountText].some((value) => String(value || "").toLowerCase().includes(search));
+    const matchesSearch = !search || [transaction.description, category, accountText].some((value) => String(value || "").toLowerCase().includes(search));
     const matchesType = type === "all" || transaction.type === type;
     const matchesAccount = account === "all" || [transaction.account_id, transaction.from_account_id, transaction.to_account_id].includes(account);
     const matchesMonth = !month || transaction.entry_date?.startsWith(month);
@@ -849,417 +528,18 @@ function transactionListHTML(items, showActions) {
     const title = transaction.description || (transaction.type === "transfer" ? "Account transfer" : category?.name || capitalize(transaction.type));
     const subtitle = transaction.type === "transfer" ? transactionAccountText(transaction) : `${category?.name || "Uncategorized"} · ${transactionAccountText(transaction)}`;
     const sign = transaction.type === "expense" ? "−" : transaction.type === "income" ? "+" : "";
-    const remarks = String(transaction.remarks || "").trim();
-    const reconciliationBadge = transactionReconciliationBadgeHTML(transaction);
-    const receiptAction = transaction.receipt_path ? `<button class="row-action receipt-action" data-action="open-receipt" data-id="${transaction.id}" aria-label="Open receipt" title="Open receipt">▧</button>` : "";
     return `<div class="transaction-row">
       <div class="transaction-main">
         <span class="transaction-icon ${transaction.type}">${transaction.type === "expense" ? "↓" : transaction.type === "income" ? "↑" : "⇄"}</span>
-        <div style="min-width:0"><div class="transaction-title">${escapeHTML(title)}</div><div class="transaction-subtitle">${escapeHTML(subtitle)}${transaction.recurring_entry_id ? ' · <span class="recurring-indicator">Recurring</span>' : ""}${transaction.receipt_path ? ' · <span class="receipt-indicator">Receipt</span>' : ""}${reconciliationBadge}</div>${remarks ? `<div class="transaction-remarks">${escapeHTML(remarks)}</div>` : ""}</div>
+        <div style="min-width:0"><div class="transaction-title">${escapeHTML(title)}</div><div class="transaction-subtitle">${escapeHTML(subtitle)}</div></div>
       </div>
       <div class="transaction-meta account-column">${escapeHTML(transactionAccountText(transaction))}</div>
       <div class="transaction-meta">${formatDate(transaction.entry_date)}</div>
       <div class="amount ${transaction.type}">${sign}${formatMoneyHTML(number(transaction.amount))}</div>
-      <div class="row-actions">${receiptAction}${showActions ? `<button class="row-action" data-action="edit-transaction" data-id="${transaction.id}" aria-label="Edit entry">✎</button><button class="row-action danger" data-action="delete-transaction" data-id="${transaction.id}" aria-label="Delete entry">×</button>` : ""}</div>
+      <div class="row-actions">${showActions ? `<button class="row-action" data-action="edit-transaction" data-id="${transaction.id}" aria-label="Edit entry">✎</button><button class="row-action danger" data-action="delete-transaction" data-id="${transaction.id}" aria-label="Delete entry">×</button>` : ""}</div>
     </div>`;
   }).join("")}</div>`;
 }
-
-function openReconciliationForAccount(accountId) {
-  if (!state.accounts.some((account) => account.id === accountId)) return;
-  switchView("reconcile");
-  el.reconcileAccount.value = accountId;
-  el.reconcileStatementBalance.value = "";
-  el.reconcileNotes.value = "";
-  renderReconciliation();
-  window.scrollTo({ top: 0, behavior: "smooth" });
-}
-
-function renderReconciliation() {
-  if (!el.reconcileSummary) return;
-  if (!state.accounts.length) {
-    el.reconcileAccount.innerHTML = '<option value="">No accounts available</option>';
-    el.reconcileSummary.innerHTML = "";
-    el.reconcileTransactionsList.innerHTML = emptyHTML("No accounts to reconcile", "Add an account first, then return here with a statement balance.");
-    el.reconciliationHistory.innerHTML = emptyHTML("No reconciliation history", "Completed reconciliations will appear here.");
-    el.reconcileLastStatus.textContent = "";
-    el.completeReconciliationButton.disabled = true;
-    return;
-  }
-
-  if (!state.accounts.some((account) => account.id === el.reconcileAccount.value)) {
-    el.reconcileAccount.value = state.accounts[0].id;
-  }
-  const accountId = el.reconcileAccount.value;
-  const account = accountById(accountId);
-  const statementDate = el.reconcileStatementDate.value || todayISO();
-  const hasStatementBalance = String(el.reconcileStatementBalance.value || "").trim() !== "";
-  const statementBalance = number(el.reconcileStatementBalance.value);
-  const ledgerBalance = calculateAccountBalance(accountId, statementDate);
-  const clearedBalance = calculateClearedBalance(accountId, statementDate);
-  const difference = hasStatementBalance ? statementBalance - clearedBalance : null;
-  const allTransactions = reconciliationTransactions(accountId, statementDate);
-  const pendingCount = allTransactions.filter((transaction) => {
-    const clearing = clearingFor(transaction.id, accountId);
-    return !clearing?.reconciliation_id && !clearing?.is_cleared;
-  }).length;
-  const clearedPendingCount = allTransactions.filter((transaction) => {
-    const clearing = clearingFor(transaction.id, accountId);
-    return !clearing?.reconciliation_id && clearing?.is_cleared;
-  }).length;
-
-  el.reconcileSummary.innerHTML = [
-    reconciliationMoneyCard("Book balance", ledgerBalance, `All entries through ${formatDate(statementDate)}`, tone(ledgerBalance)),
-    reconciliationMoneyCard("Cleared balance", clearedBalance, `${clearedPendingCount} newly cleared transaction${clearedPendingCount === 1 ? "" : "s"}`, tone(clearedBalance)),
-    reconciliationMoneyCard("Statement balance", statementBalance, hasStatementBalance ? `Ending ${formatDate(statementDate)}` : "Enter the balance from your statement", tone(statementBalance), hasStatementBalance),
-    reconciliationMoneyCard("Difference", difference || 0, hasStatementBalance ? "Statement minus cleared balance" : "Waiting for statement balance", difference === null ? "" : Math.abs(difference) < 0.005 ? "positive" : "negative", difference !== null),
-  ].join("");
-
-  const last = latestReconciliation(accountId);
-  const statementDateIsNew = !last || statementDate > last.statement_date;
-  el.reconcileLastStatus.innerHTML = last
-    ? `<span class="reconciliation-status-badge">Last reconciled ${formatDate(last.statement_date)} · ${formatMoneyHTML(last.statement_balance)}</span>`
-    : '<span class="reconciliation-status-badge pending">Not reconciled yet</span>';
-
-  const showReconciled = el.reconcileShowReconciled.checked;
-  const visibleTransactions = allTransactions.filter((transaction) => showReconciled || !clearingFor(transaction.id, accountId)?.reconciliation_id);
-  el.reconcileTransactionsList.innerHTML = visibleTransactions.length
-    ? `<div class="reconciliation-transaction-list">${visibleTransactions.map((transaction) => reconciliationTransactionHTML(transaction, accountId)).join("")}</div>`
-    : emptyHTML(showReconciled ? "No transactions through this date" : "No pending transactions", showReconciled ? "Add entries or choose a later statement date." : "All transactions through this date have already been reconciled.");
-
-  const canFinish = hasStatementBalance && Math.abs(difference) < 0.005 && statementDateIsNew && !reconciliationBusy;
-  el.completeReconciliationButton.disabled = !canFinish;
-  el.reconcileMarkAllButton.disabled = reconciliationBusy || !visibleTransactions.some((transaction) => !clearingFor(transaction.id, accountId)?.reconciliation_id);
-  el.reconcileUnclearAllButton.disabled = reconciliationBusy || !allTransactions.some((transaction) => {
-    const clearing = clearingFor(transaction.id, accountId);
-    return clearing?.is_cleared && !clearing?.reconciliation_id;
-  });
-  if (!statementDateIsNew) {
-    el.reconcileDifferenceLabel.textContent = "Choose a date after the last reconciliation";
-    el.reconcileCompletionHint.textContent = `The latest completed statement ends ${formatDate(last.statement_date)}.`;
-  } else if (!hasStatementBalance) {
-    el.reconcileDifferenceLabel.textContent = "Enter a statement balance";
-    el.reconcileCompletionHint.textContent = `${pendingCount} transaction${pendingCount === 1 ? "" : "s"} not yet cleared.`;
-  } else if (Math.abs(difference) < 0.005) {
-    el.reconcileDifferenceLabel.textContent = "Difference is zero — ready to finish";
-    el.reconcileCompletionHint.textContent = "Finishing locks the cleared transactions into this statement history.";
-  } else {
-    el.reconcileDifferenceLabel.textContent = `${formatMoneyText(difference)} difference remaining`;
-    el.reconcileCompletionHint.textContent = difference > 0 ? "The statement is higher than the cleared balance. Look for missing income or an uncleared debit." : "The statement is lower than the cleared balance. Look for missing expenses or an incorrectly cleared entry.";
-  }
-
-  renderReconciliationHistory(accountId);
-}
-
-function reconciliationMoneyCard(label, value, detail, className = "", hasValue = true) {
-  const display = hasValue ? formatMoneyHTML(value) : '<span class="reconciliation-not-entered">—</span>';
-  return `<article class="summary-card"><p class="card-label">${escapeHTML(label)}</p><p class="card-value ${className}">${display}</p><p class="card-detail">${escapeHTML(detail)}</p></article>`;
-}
-
-function reconciliationTransactions(accountId, statementDate) {
-  return sortedTransactions().filter((transaction) => transaction.entry_date <= statementDate && transactionEffectForAccount(transaction, accountId) !== 0);
-}
-
-function reconciliationTransactionHTML(transaction, accountId) {
-  const clearing = clearingFor(transaction.id, accountId);
-  const reconciled = Boolean(clearing?.reconciliation_id);
-  const checked = Boolean(clearing?.is_cleared);
-  const effect = transactionEffectForAccount(transaction, accountId);
-  const category = categoryById(transaction.category_id);
-  const title = transaction.description || (transaction.type === "transfer" ? "Account transfer" : category?.name || capitalize(transaction.type));
-  const subtitle = transaction.type === "transfer"
-    ? reconciliationTransferText(transaction, accountId)
-    : `${category?.name || "Uncategorized"} · ${formatDate(transaction.entry_date)}`;
-  const reconciliation = reconciled ? reconciliationById(clearing.reconciliation_id) : null;
-  const status = reconciled
-    ? `<span class="reconciliation-row-status reconciled">Reconciled ${reconciliation ? formatDate(reconciliation.statement_date) : ""}</span>`
-    : checked
-      ? '<span class="reconciliation-row-status cleared">Cleared</span>'
-      : '<span class="reconciliation-row-status outstanding">Outstanding</span>';
-  return `<div class="reconciliation-transaction-row ${reconciled ? "locked" : ""}">
-    <label class="reconciliation-check" title="${reconciled ? "Undo the reconciliation to change this item" : checked ? "Mark as outstanding" : "Mark as cleared"}">
-      <input type="checkbox" ${checked ? "checked" : ""} ${reconciled || reconciliationBusy ? "disabled" : ""} data-action="toggle-reconciliation-cleared" data-id="${transaction.id}" data-account-id="${accountId}" />
-      <span aria-hidden="true"></span>
-    </label>
-    <span class="transaction-icon ${transaction.type}">${transaction.type === "expense" ? "↓" : transaction.type === "income" ? "↑" : "⇄"}</span>
-    <div class="reconciliation-transaction-copy"><strong>${escapeHTML(title)}</strong><span>${escapeHTML(subtitle)}</span>${transaction.remarks ? `<small>${escapeHTML(transaction.remarks)}</small>` : ""}</div>
-    <div class="reconciliation-row-status-wrap">${status}</div>
-    <div class="reconciliation-effect ${tone(effect)}">${effect > 0 ? "+" : effect < 0 ? "−" : ""}${formatMoneyHTML(Math.abs(effect))}</div>
-  </div>`;
-}
-
-function reconciliationTransferText(transaction, accountId) {
-  if (transaction.from_account_id === accountId) return `Transfer to ${accountById(transaction.to_account_id)?.name || "Unknown account"} · ${formatDate(transaction.entry_date)}`;
-  return `Transfer from ${accountById(transaction.from_account_id)?.name || "Unknown account"} · ${formatDate(transaction.entry_date)}`;
-}
-
-function renderReconciliationHistory(accountId) {
-  const history = [...state.reconciliations]
-    .filter((item) => item.account_id === accountId)
-    .sort((a, b) => String(b.statement_date).localeCompare(String(a.statement_date)) || String(b.completed_at).localeCompare(String(a.completed_at)));
-  if (!history.length) {
-    el.reconciliationHistory.innerHTML = emptyHTML("No completed reconciliations", "When the difference reaches zero, finish the reconciliation to create an audit record.");
-    return;
-  }
-  el.reconciliationHistory.innerHTML = `<div class="reconciliation-history-list">${history.map((item) => {
-    const transactionCount = state.transactionClearings.filter((clearing) => clearing.reconciliation_id === item.id).length;
-    return `<article class="reconciliation-history-row">
-      <div class="reconciliation-history-date"><strong>${formatDate(item.statement_date)}</strong><span>${escapeHTML(item.notes || "Statement reconciliation")}</span></div>
-      <div><span class="history-label">Statement</span><strong>${formatMoneyHTML(item.statement_balance)}</strong></div>
-      <div><span class="history-label">Book balance</span><strong>${formatMoneyHTML(item.ledger_balance)}</strong></div>
-      <div><span class="history-label">Transactions</span><strong>${transactionCount.toLocaleString("en-AE")}</strong></div>
-      <button class="row-action wide danger" data-action="undo-reconciliation" data-id="${item.id}" type="button">Undo</button>
-    </article>`;
-  }).join("")}</div>`;
-}
-
-async function toggleTransactionCleared(transactionId, accountId) {
-  if (reconciliationBusy) return;
-  const transaction = state.transactions.find((item) => item.id === transactionId);
-  if (!transaction || transactionEffectForAccount(transaction, accountId) === 0) return;
-  const existing = clearingFor(transactionId, accountId);
-  if (existing?.reconciliation_id) return showToast("This transaction is locked by a completed reconciliation.", true);
-  await saveClearingStates([{ transactionId, accountId }], !existing?.is_cleared);
-}
-
-async function bulkSetReconciliationCleared(isCleared) {
-  if (reconciliationBusy) return;
-  const accountId = el.reconcileAccount.value;
-  const statementDate = el.reconcileStatementDate.value || todayISO();
-  const pairs = reconciliationTransactions(accountId, statementDate)
-    .filter((transaction) => {
-      const clearing = clearingFor(transaction.id, accountId);
-      return !clearing?.reconciliation_id && Boolean(clearing?.is_cleared) !== isCleared;
-    })
-    .map((transaction) => ({ transactionId: transaction.id, accountId }));
-  if (!pairs.length) return;
-  await saveClearingStates(pairs, isCleared);
-}
-
-async function saveClearingStates(pairs, isCleared) {
-  reconciliationBusy = true;
-  renderReconciliation();
-  const now = new Date().toISOString();
-  try {
-    if (mode === "cloud") {
-      setSyncStatus("syncing", "Saving cleared transactions");
-      const rows = pairs.map(({ transactionId, accountId }) => ({
-        user_id: user.id,
-        transaction_id: transactionId,
-        account_id: accountId,
-        is_cleared: isCleared,
-        cleared_at: isCleared ? now : null,
-        reconciliation_id: null,
-      }));
-      const { data, error } = await supabase.from("transaction_clearings")
-        .upsert(rows, { onConflict: "user_id,transaction_id,account_id" })
-        .select();
-      if (error) throw error;
-      mergeTransactionClearings(data || []);
-      setSyncStatus("cloud", "Cloud synchronized");
-    } else {
-      pairs.forEach(({ transactionId, accountId }) => {
-        const index = state.transactionClearings.findIndex((item) => item.transaction_id === transactionId && item.account_id === accountId);
-        if (index >= 0) {
-          state.transactionClearings[index] = { ...state.transactionClearings[index], is_cleared: isCleared, cleared_at: isCleared ? now : null, reconciliation_id: null, updated_at: now };
-        } else {
-          state.transactionClearings.push(localRow({ transaction_id: transactionId, account_id: accountId, is_cleared: isCleared, cleared_at: isCleared ? now : null, reconciliation_id: null }));
-        }
-      });
-      persistLocal();
-    }
-  } catch (error) {
-    setSyncStatus(mode === "cloud" ? "local" : "local", mode === "cloud" ? "Sync error" : "Local browser only");
-    showToast(friendlyError(error), true);
-  } finally {
-    reconciliationBusy = false;
-    render();
-  }
-}
-
-function mergeTransactionClearings(rows) {
-  const incoming = new Map(rows.map((row) => [`${row.transaction_id}:${row.account_id}`, row]));
-  state.transactionClearings = state.transactionClearings.map((row) => incoming.get(`${row.transaction_id}:${row.account_id}`) || row);
-  const existingKeys = new Set(state.transactionClearings.map((row) => `${row.transaction_id}:${row.account_id}`));
-  rows.forEach((row) => {
-    const key = `${row.transaction_id}:${row.account_id}`;
-    if (!existingKeys.has(key)) state.transactionClearings.push(row);
-  });
-}
-
-async function completeReconciliation() {
-  if (reconciliationBusy) return;
-  el.reconcileFormError.textContent = "";
-  const accountId = el.reconcileAccount.value;
-  const statementDate = el.reconcileStatementDate.value;
-  const balanceText = String(el.reconcileStatementBalance.value || "").trim();
-  const notes = el.reconcileNotes.value.trim();
-  if (!accountId) return showFormError(el.reconcileFormError, "Choose an account.");
-  if (!statementDate) return showFormError(el.reconcileFormError, "Choose the statement ending date.");
-  if (!balanceText) return showFormError(el.reconcileFormError, "Enter the statement ending balance.");
-  if (notes.length > 300) return showFormError(el.reconcileFormError, "Statement note must be 300 characters or fewer.");
-  const last = latestReconciliation(accountId);
-  if (last && statementDate <= last.statement_date) return showFormError(el.reconcileFormError, `Choose a statement date after ${formatDate(last.statement_date)}, or undo that reconciliation first.`);
-  const statementBalance = number(balanceText);
-  const clearedBalance = calculateClearedBalance(accountId, statementDate);
-  const ledgerBalance = calculateAccountBalance(accountId, statementDate);
-  const difference = statementBalance - clearedBalance;
-  if (Math.abs(difference) >= 0.005) return showFormError(el.reconcileFormError, `The difference must be zero before finishing. Current difference: ${formatMoneyText(difference)}.`);
-
-  const pendingClearings = state.transactionClearings.filter((clearing) => {
-    if (clearing.account_id !== accountId || !clearing.is_cleared || clearing.reconciliation_id) return false;
-    const transaction = state.transactions.find((item) => item.id === clearing.transaction_id);
-    return transaction && transaction.entry_date <= statementDate && transactionEffectForAccount(transaction, accountId) !== 0;
-  });
-  const row = {
-    account_id: accountId,
-    statement_date: statementDate,
-    statement_balance: statementBalance,
-    cleared_balance: clearedBalance,
-    ledger_balance: ledgerBalance,
-    difference,
-    notes,
-    completed_at: new Date().toISOString(),
-  };
-
-  reconciliationBusy = true;
-  renderReconciliation();
-  let inserted = null;
-  try {
-    inserted = await insertRow("reconciliations", row);
-    const clearingIds = pendingClearings.map((item) => item.id);
-    if (mode === "cloud" && clearingIds.length) {
-      setSyncStatus("syncing", "Finishing reconciliation");
-      const { data, error } = await supabase.from("transaction_clearings")
-        .update({ reconciliation_id: inserted.id, cleared_at: new Date().toISOString() })
-        .in("id", clearingIds)
-        .select();
-      if (error) throw error;
-      mergeTransactionClearings(data || []);
-      setSyncStatus("cloud", "Cloud synchronized");
-    } else if (mode === "local") {
-      state.transactionClearings = state.transactionClearings.map((item) => clearingIds.includes(item.id) ? { ...item, reconciliation_id: inserted.id, updated_at: new Date().toISOString() } : item);
-    }
-    state.reconciliations.unshift(inserted);
-    persistLocal();
-    el.reconcileStatementBalance.value = "";
-    el.reconcileNotes.value = "";
-    showToast(`Reconciliation completed for ${accountById(accountId)?.name || "account"}.`);
-  } catch (error) {
-    if (inserted?.id) {
-      try { await deleteRow("reconciliations", inserted.id); } catch (rollbackError) { console.warn("Could not roll back reconciliation", rollbackError); }
-    }
-    showFormError(el.reconcileFormError, friendlyError(error));
-  } finally {
-    reconciliationBusy = false;
-    render();
-  }
-}
-
-async function undoReconciliation(id) {
-  if (reconciliationBusy) return;
-  const reconciliation = reconciliationById(id);
-  if (!reconciliation) return;
-  const account = accountById(reconciliation.account_id);
-  if (!confirm(`Undo the ${formatDate(reconciliation.statement_date)} reconciliation for ${account?.name || "this account"}? The linked transactions will become outstanding again.`)) return;
-  reconciliationBusy = true;
-  try {
-    if (mode === "cloud") {
-      setSyncStatus("syncing", "Undoing reconciliation");
-      const { data, error } = await supabase.from("transaction_clearings")
-        .update({ reconciliation_id: null, is_cleared: false, cleared_at: null })
-        .eq("reconciliation_id", id)
-        .select();
-      if (error) throw error;
-      mergeTransactionClearings(data || []);
-      await deleteRow("reconciliations", id);
-      setSyncStatus("cloud", "Cloud synchronized");
-    } else {
-      state.transactionClearings = state.transactionClearings.map((item) => item.reconciliation_id === id ? { ...item, reconciliation_id: null, is_cleared: false, cleared_at: null, updated_at: new Date().toISOString() } : item);
-    }
-    state.reconciliations = state.reconciliations.filter((item) => item.id !== id);
-    persistLocal();
-    el.reconcileAccount.value = reconciliation.account_id;
-    el.reconcileStatementDate.value = reconciliation.statement_date;
-    el.reconcileStatementBalance.value = number(reconciliation.statement_balance).toFixed(2);
-    el.reconcileNotes.value = reconciliation.notes || "";
-    showToast("Reconciliation undone. Review the transactions and finish again when ready.");
-  } catch (error) {
-    showToast(friendlyError(error), true);
-  } finally {
-    reconciliationBusy = false;
-    render();
-  }
-}
-
-function calculateClearedBalance(accountId, throughDate) {
-  const account = accountById(accountId);
-  if (!account) return 0;
-  return state.transactions.reduce((balance, transaction) => {
-    if (throughDate && transaction.entry_date > throughDate) return balance;
-    const effect = transactionEffectForAccount(transaction, accountId);
-    if (!effect) return balance;
-    const clearing = clearingFor(transaction.id, accountId);
-    return clearing?.is_cleared ? balance + effect : balance;
-  }, number(account.opening_balance));
-}
-
-function transactionEffectForAccount(transaction, accountId) {
-  const amount = number(transaction.amount);
-  if (transaction.type === "income" && transaction.account_id === accountId) return amount;
-  if (transaction.type === "expense" && transaction.account_id === accountId) return -amount;
-  if (transaction.type === "transfer" && transaction.from_account_id === accountId) return -amount;
-  if (transaction.type === "transfer" && transaction.to_account_id === accountId) return amount;
-  return 0;
-}
-
-function affectedAccountIds(transaction) {
-  return transaction.type === "transfer"
-    ? [transaction.from_account_id, transaction.to_account_id].filter(Boolean)
-    : [transaction.account_id].filter(Boolean);
-}
-
-function clearingFor(transactionId, accountId) {
-  return state.transactionClearings.find((item) => item.transaction_id === transactionId && item.account_id === accountId);
-}
-
-function reconciliationById(id) {
-  return state.reconciliations.find((item) => item.id === id);
-}
-
-function latestReconciliation(accountId) {
-  return [...state.reconciliations]
-    .filter((item) => item.account_id === accountId)
-    .sort((a, b) => String(b.statement_date).localeCompare(String(a.statement_date)) || String(b.completed_at).localeCompare(String(a.completed_at)))[0] || null;
-}
-
-function transactionHasReconciledSide(transaction) {
-  return affectedAccountIds(transaction).some((accountId) => Boolean(clearingFor(transaction.id, accountId)?.reconciliation_id));
-}
-
-function transactionReconciliationBadgeHTML(transaction) {
-  const statuses = affectedAccountIds(transaction).map((accountId) => clearingFor(transaction.id, accountId)).filter(Boolean);
-  if (!statuses.length) return "";
-  const reconciledCount = statuses.filter((item) => item.reconciliation_id).length;
-  const clearedCount = statuses.filter((item) => item.is_cleared).length;
-  if (reconciledCount === affectedAccountIds(transaction).length) return ' · <span class="reconciled-indicator">Reconciled</span>';
-  if (reconciledCount) return ' · <span class="reconciled-indicator partial">Partly reconciled</span>';
-  if (clearedCount) return ' · <span class="cleared-indicator">Cleared</span>';
-  return "";
-}
-
-async function cleanupTransactionClearingsForTransaction(transactionId, transaction) {
-  const validAccounts = new Set(affectedAccountIds(transaction));
-  const stale = state.transactionClearings.filter((item) => item.transaction_id === transactionId && !validAccounts.has(item.account_id) && !item.reconciliation_id);
-  if (!stale.length) return;
-  if (mode === "cloud") {
-    const { error } = await supabase.from("transaction_clearings").delete().in("id", stale.map((item) => item.id));
-    if (error) throw error;
-  }
-  const staleIds = new Set(stale.map((item) => item.id));
-  state.transactionClearings = state.transactionClearings.filter((item) => !staleIds.has(item.id));
-}
-
 
 function renderCategoryChart() {
   const month = todayISO().slice(0, 7);
@@ -1269,659 +549,6 @@ function renderCategoryChart() {
 
 function renderCashFlowChart() {
   el.cashFlowChart.innerHTML = cashFlowBarsHTML(monthSeries(6, new Date()));
-}
-
-
-
-function renderRecurringEntries() {
-  if (!el.recurringEntriesList) return;
-  const entries = state.recurringEntries || [];
-  const status = el.recurringStatusFilter.value || "all";
-  const type = el.recurringTypeFilter.value || "all";
-  const inThirtyDays = addDaysISO(todayISO(), 30);
-  const upcoming = plannedOccurrencesBetween(todayISO(), inThirtyDays);
-  const activeCount = entries.filter((item) => item.active !== false).length;
-  const autoCount = entries.filter((item) => item.active !== false && item.auto_post !== false).length;
-  const upcomingExpenses = upcoming.filter((item) => item.rule.type === "expense").reduce((sum, item) => sum + number(item.rule.amount), 0);
-  const upcomingIncome = upcoming.filter((item) => item.rule.type === "income").reduce((sum, item) => sum + number(item.rule.amount), 0);
-
-  el.recurringSummary.innerHTML = [
-    summaryCard("Active schedules", activeCount, `${autoCount} post automatically`, activeCount ? "positive" : "", false),
-    summaryCard("Next 30 days", upcoming.length, "Planned occurrences", "", false),
-    summaryCard("Planned expenses", upcomingExpenses, "Next 30 days", upcomingExpenses ? "negative" : ""),
-    summaryCard("Planned income", upcomingIncome, "Next 30 days", upcomingIncome ? "positive" : ""),
-  ].join("");
-
-  const filtered = entries
-    .filter((item) => status === "all" || (status === "active" ? item.active !== false : item.active === false))
-    .filter((item) => type === "all" || item.type === type)
-    .sort((a, b) => Number(b.active !== false) - Number(a.active !== false) || String(a.start_date).localeCompare(String(b.start_date)));
-
-  el.recurringEntriesList.innerHTML = filtered.length
-    ? `<div class="recurring-list">${filtered.map(recurringCardHTML).join("")}</div>`
-    : emptyHTML("No matching recurring entries", "Create a schedule for salary, subscriptions, bills, loan payments, or transfers.");
-}
-
-function recurringCardHTML(rule) {
-  const active = rule.active !== false;
-  const dueDate = earliestDueUnpostedOccurrence(rule);
-  const nextDate = nextUnpostedOccurrence(rule, todayISO());
-  const target = recurringTargetText(rule);
-  const icon = rule.type === "expense" ? "↓" : rule.type === "income" ? "↑" : "⇄";
-  const sign = rule.type === "expense" ? "−" : rule.type === "income" ? "+" : "";
-  const title = rule.description || (rule.type === "transfer" ? "Recurring transfer" : categoryById(rule.category_id)?.name || `Recurring ${rule.type}`);
-  const nextCopy = dueDate
-    ? `Due ${formatDate(dueDate)}`
-    : nextDate
-      ? `Next ${formatDate(nextDate)}`
-      : active ? "No future occurrence" : "Schedule paused";
-  const endCopy = rule.end_date ? `Ends ${formatDate(rule.end_date)}` : "Continues until stopped";
-  return `<article class="recurring-card ${active ? "" : "paused"}">
-    <div class="recurring-card-main">
-      <div class="recurring-card-heading">
-        <span class="recurring-type-icon ${rule.type}">${icon}</span>
-        <div class="recurring-card-title"><strong>${escapeHTML(title)}</strong><span>${escapeHTML(target)}</span></div>
-      </div>
-      <div class="recurring-card-details">
-        <span class="recurring-chip ${active ? "active" : "paused"}">${active ? "Active" : "Paused"}</span>
-        <span class="recurring-chip">${escapeHTML(recurringScheduleText(rule))}</span>
-        <span class="recurring-chip">${escapeHTML(endCopy)}</span>
-        ${rule.auto_post !== false ? '<span class="recurring-chip auto">Auto-post</span>' : '<span class="recurring-chip">Manual posting</span>'}
-        <span class="recurring-chip">${escapeHTML(nextCopy)}</span>
-      </div>
-      ${rule.remarks ? `<div class="recurring-card-remarks">${escapeHTML(rule.remarks)}</div>` : ""}
-    </div>
-    <div class="recurring-card-side">
-      <div class="recurring-card-amount amount ${rule.type}">${sign}${formatMoneyHTML(rule.amount)}</div>
-      <div class="recurring-card-actions">
-        ${dueDate ? `<button class="row-action wide" data-action="post-recurring" data-id="${rule.id}" data-date="${dueDate}" title="Post the due occurrence">Post due</button>` : ""}
-        <button class="row-action wide" data-action="toggle-recurring" data-id="${rule.id}">${active ? "Pause" : "Resume"}</button>
-        <button class="row-action" data-action="edit-recurring" data-id="${rule.id}" aria-label="Edit recurring entry">✎</button>
-        <button class="row-action danger" data-action="delete-recurring" data-id="${rule.id}" aria-label="Delete recurring entry">×</button>
-      </div>
-    </div>
-  </article>`;
-}
-
-function recurringScheduleText(rule) {
-  const interval = Math.max(1, Math.trunc(number(rule.interval_value) || 1));
-  const unit = recurrenceUnit(rule.frequency, interval);
-  return `Every ${interval === 1 ? "" : `${interval} `}${unit} · starts ${formatDate(rule.start_date)}`;
-}
-
-function recurringTargetText(rule) {
-  if (rule.type === "transfer") {
-    return `${accountById(rule.from_account_id)?.name || "Unknown"} → ${accountById(rule.to_account_id)?.name || "Unknown"}`;
-  }
-  return `${categoryById(rule.category_id)?.name || "Uncategorized"} · ${accountById(rule.account_id)?.name || "Unknown account"}`;
-}
-
-function setRecurringType(type) {
-  el.recurringType.value = type;
-  document.querySelectorAll("[data-recurring-type]").forEach((button) => button.classList.toggle("active", button.dataset.recurringType === type));
-  document.querySelectorAll(".recurring-expense-income-field").forEach((field) => field.hidden = type === "transfer");
-  document.querySelectorAll(".recurring-transfer-field").forEach((field) => field.hidden = type !== "transfer");
-  el.recurringAccountLabel.textContent = type === "income" ? "Add to account" : "Pay from account";
-  el.recurringCategoryLabel.textContent = type === "income" ? "Income category" : "Expense category";
-  renderRecurringCategories(type);
-}
-
-function updateRecurringIntervalUnit() {
-  const interval = Math.max(1, Math.trunc(number(el.recurringInterval.value) || 1));
-  el.recurringIntervalUnit.textContent = recurrenceUnit(el.recurringFrequency.value, interval);
-}
-
-function recurrenceUnit(frequency, interval = 1) {
-  const singular = { daily: "day", weekly: "week", monthly: "month", yearly: "year" }[frequency] || "month";
-  return interval === 1 ? singular : `${singular}s`;
-}
-
-function updateRecurringEndDateVisibility() {
-  const hasEnd = el.recurringEndMode.value === "date";
-  el.recurringEndDateField.hidden = !hasEnd;
-  el.recurringEndDate.required = hasEnd;
-  if (!hasEnd) el.recurringEndDate.value = "";
-}
-
-function openRecurringModal(id = null) {
-  if (!state.accounts.length) return showToast("Add an account before creating a recurring entry.", true);
-  el.recurringForm.reset();
-  el.recurringId.value = "";
-  el.recurringStartDate.value = todayISO();
-  el.recurringFrequency.value = "monthly";
-  el.recurringInterval.value = "1";
-  el.recurringEndMode.value = "never";
-  el.recurringAutoPost.checked = true;
-  el.recurringFormError.textContent = "";
-  let type = "expense";
-  if (id) {
-    const rule = state.recurringEntries.find((item) => item.id === id);
-    if (!rule) return;
-    type = rule.type;
-    el.recurringId.value = rule.id;
-    el.recurringAmount.value = number(rule.amount);
-    el.recurringDescription.value = rule.description || "";
-    el.recurringRemarks.value = rule.remarks || "";
-    el.recurringFrequency.value = rule.frequency || "monthly";
-    el.recurringInterval.value = Math.max(1, Math.trunc(number(rule.interval_value) || 1));
-    el.recurringStartDate.value = rule.start_date || todayISO();
-    el.recurringEndMode.value = rule.end_date ? "date" : "never";
-    el.recurringEndDate.value = rule.end_date || "";
-    el.recurringAutoPost.checked = rule.auto_post !== false;
-    setRecurringType(type);
-    if (type === "transfer") {
-      el.recurringFromAccount.value = rule.from_account_id || "";
-      el.recurringToAccount.value = rule.to_account_id || "";
-    } else {
-      el.recurringAccount.value = rule.account_id || "";
-      el.recurringCategory.value = rule.category_id || "";
-    }
-    el.recurringModalTitle.textContent = "Edit recurring entry";
-  } else {
-    setRecurringType(type);
-    el.recurringModalTitle.textContent = "Add recurring entry";
-  }
-  updateRecurringIntervalUnit();
-  updateRecurringEndDateVisibility();
-  openModal(el.recurringModal);
-  el.recurringAmount.focus();
-}
-
-async function handleRecurringSubmit(event) {
-  event.preventDefault();
-  el.recurringFormError.textContent = "";
-  const id = el.recurringId.value;
-  const type = el.recurringType.value;
-  const amount = number(el.recurringAmount.value);
-  const interval = Math.trunc(number(el.recurringInterval.value));
-  const row = {
-    type,
-    amount,
-    description: el.recurringDescription.value.trim(),
-    remarks: el.recurringRemarks.value.trim(),
-    frequency: el.recurringFrequency.value,
-    interval_value: interval,
-    start_date: el.recurringStartDate.value,
-    end_date: el.recurringEndMode.value === "date" ? el.recurringEndDate.value : null,
-    auto_post: el.recurringAutoPost.checked,
-    account_id: null,
-    category_id: null,
-    from_account_id: null,
-    to_account_id: null,
-  };
-  if (!(amount > 0)) return showFormError(el.recurringFormError, "Enter an amount greater than zero.");
-  if (!(interval >= 1 && interval <= 365)) return showFormError(el.recurringFormError, "Repeat every must be between 1 and 365.");
-  if (!row.start_date) return showFormError(el.recurringFormError, "Choose a start date.");
-  if (row.end_date && row.end_date < row.start_date) return showFormError(el.recurringFormError, "End date cannot be before the start date.");
-  if (row.description.length > 120) return showFormError(el.recurringFormError, "Description must be 120 characters or fewer.");
-  if (row.remarks.length > 2000) return showFormError(el.recurringFormError, "Remarks must be 2,000 characters or fewer.");
-  if (type === "transfer") {
-    row.from_account_id = el.recurringFromAccount.value;
-    row.to_account_id = el.recurringToAccount.value;
-    if (!row.from_account_id || !row.to_account_id) return showFormError(el.recurringFormError, "Choose both transfer accounts.");
-    if (row.from_account_id === row.to_account_id) return showFormError(el.recurringFormError, "Choose two different accounts.");
-  } else {
-    row.account_id = el.recurringAccount.value;
-    row.category_id = el.recurringCategory.value || null;
-    if (!row.account_id) return showFormError(el.recurringFormError, "Choose an account.");
-    if (!row.category_id) return showFormError(el.recurringFormError, `Create or select an ${type} category.`);
-  }
-
-  try {
-    if (id) {
-      const updated = await updateRow("recurring_entries", id, row);
-      state.recurringEntries = state.recurringEntries.map((item) => item.id === id ? { ...item, ...updated } : item);
-      showToast("Recurring entry updated.");
-    } else {
-      state.recurringEntries.push(await insertRow("recurring_entries", { ...row, active: true }));
-      showToast("Recurring entry created.");
-    }
-    persistLocal();
-    closeModal(el.recurringModal);
-    await postDueRecurringEntries();
-    render();
-  } catch (error) {
-    showFormError(el.recurringFormError, friendlyError(error));
-  }
-}
-
-async function toggleRecurringEntry(id) {
-  const rule = state.recurringEntries.find((item) => item.id === id);
-  if (!rule) return;
-  try {
-    const updated = await updateRow("recurring_entries", id, { active: rule.active === false });
-    state.recurringEntries = state.recurringEntries.map((item) => item.id === id ? { ...item, ...updated } : item);
-    persistLocal();
-    if (updated.active !== false) await postDueRecurringEntries();
-    render();
-    showToast(updated.active === false ? "Recurring entry paused." : "Recurring entry resumed.");
-  } catch (error) { showToast(friendlyError(error), true); }
-}
-
-async function deleteRecurringEntry(id) {
-  const rule = state.recurringEntries.find((item) => item.id === id);
-  if (!rule || !confirm("Delete this recurring schedule? Transactions already posted from it will remain.")) return;
-  try {
-    await deleteRow("recurring_entries", id);
-    state.recurringEntries = state.recurringEntries.filter((item) => item.id !== id);
-    state.transactions = state.transactions.map((transaction) => transaction.recurring_entry_id === id ? { ...transaction, recurring_entry_id: null } : transaction);
-    persistLocal();
-    render();
-    showToast("Recurring schedule deleted. Posted transactions were kept.");
-  } catch (error) { showToast(friendlyError(error), true); }
-}
-
-async function postDueRecurringEntries() {
-  if (postingRecurringEntries || !(state.recurringEntries || []).length) return 0;
-  postingRecurringEntries = true;
-  try {
-    const today = todayISO();
-    const existing = new Set(state.transactions.filter((item) => item.recurring_entry_id && item.scheduled_date).map(transactionOccurrenceKey));
-    const rows = [];
-    for (const rule of state.recurringEntries) {
-      if (rule.active === false || rule.auto_post === false) continue;
-      const occurrences = recurringOccurrencesBetween(rule, rule.start_date, today, 5000);
-      for (const date of occurrences) {
-        const key = `${rule.id}|${date}`;
-        if (!existing.has(key)) {
-          rows.push(transactionFromRecurring(rule, date));
-          existing.add(key);
-        }
-      }
-    }
-    if (!rows.length) return 0;
-    if (rows.length > 5000) throw new Error("This schedule would create more than 5,000 due entries. Shorten its date range before enabling automatic posting.");
-    if (mode === "cloud") {
-      setSyncStatus("syncing", "Posting recurring entries");
-      for (const batch of chunk(rows, 100)) {
-        const { data, error } = await supabase.from("transactions").insert(batch.map((row) => ({ ...row, user_id: user.id }))).select();
-        if (error) throw error;
-        state.transactions.push(...(data || []));
-      }
-      setSyncStatus("cloud", "Cloud synchronized");
-    } else {
-      state.transactions.push(...rows.map(localRow));
-      persistLocal();
-    }
-    showToast(`${rows.length} recurring ${rows.length === 1 ? "entry" : "entries"} posted.`);
-    return rows.length;
-  } finally {
-    postingRecurringEntries = false;
-  }
-}
-
-async function postRecurringOccurrenceById(id, date) {
-  const rule = state.recurringEntries.find((item) => item.id === id);
-  if (!rule || !date) return;
-  if (date > todayISO()) return showToast("Future recurring entries remain planned until their date arrives.", true);
-  if (hasPostedOccurrence(rule.id, date)) return showToast("This recurring occurrence is already posted.", true);
-  try {
-    const inserted = await insertRow("transactions", transactionFromRecurring(rule, date));
-    state.transactions.push(inserted);
-    persistLocal();
-    render();
-    showToast("Recurring occurrence posted.");
-  } catch (error) { showToast(friendlyError(error), true); }
-}
-
-function transactionFromRecurring(rule, date) {
-  return {
-    type: rule.type,
-    amount: number(rule.amount),
-    entry_date: date,
-    scheduled_date: date,
-    recurring_entry_id: rule.id,
-    description: rule.description || "",
-    remarks: rule.remarks || "",
-    account_id: rule.type === "transfer" ? null : rule.account_id,
-    category_id: rule.type === "transfer" ? null : rule.category_id,
-    from_account_id: rule.type === "transfer" ? rule.from_account_id : null,
-    to_account_id: rule.type === "transfer" ? rule.to_account_id : null,
-  };
-}
-
-function transactionOccurrenceKey(transaction) {
-  return `${transaction.recurring_entry_id}|${transaction.scheduled_date}`;
-}
-
-function hasPostedOccurrence(ruleId, date) {
-  return state.transactions.some((transaction) => transaction.recurring_entry_id === ruleId && transaction.scheduled_date === date);
-}
-
-function earliestDueUnpostedOccurrence(rule) {
-  if (rule.active === false) return "";
-  return recurringOccurrencesBetween(rule, rule.start_date, todayISO(), 50000).find((date) => !hasPostedOccurrence(rule.id, date)) || "";
-}
-
-function nextUnpostedOccurrence(rule, fromDate = todayISO()) {
-  if (rule.active === false) return "";
-  const horizon = rule.end_date || addYearsISO(fromDate, 5);
-  return recurringOccurrencesBetween(rule, fromDate, horizon, 2500).find((date) => !hasPostedOccurrence(rule.id, date)) || "";
-}
-
-function plannedOccurrencesBetween(startDate, endDate, accountId = "all") {
-  const occurrences = [];
-  for (const rule of state.recurringEntries || []) {
-    if (rule.active === false || !recurringMatchesAccount(rule, accountId)) continue;
-    for (const date of recurringOccurrencesBetween(rule, startDate, endDate, 5000)) {
-      if (!hasPostedOccurrence(rule.id, date)) occurrences.push({ rule, date });
-    }
-  }
-  return occurrences.sort((a, b) => a.date.localeCompare(b.date) || String(a.rule.created_at).localeCompare(String(b.rule.created_at)));
-}
-
-function plannedOccurrencesForDate(date, accountId = "all") {
-  return plannedOccurrencesBetween(date, date, accountId);
-}
-
-function recurringMatchesAccount(rule, accountId) {
-  return accountId === "all" || [rule.account_id, rule.from_account_id, rule.to_account_id].includes(accountId);
-}
-
-function recurringOccurrencesBetween(rule, rangeStart, rangeEnd, maxOccurrences = 5000) {
-  if (!rule?.start_date || !rangeStart || !rangeEnd || rangeEnd < rangeStart) return [];
-  const effectiveEnd = rule.end_date && rule.end_date < rangeEnd ? rule.end_date : rangeEnd;
-  if (effectiveEnd < rule.start_date || effectiveEnd < rangeStart) return [];
-  const interval = Math.max(1, Math.trunc(number(rule.interval_value) || 1));
-  let index = approximateOccurrenceIndex(rule, rangeStart, interval);
-  const results = [];
-  for (let guard = 0; guard < maxOccurrences + 2; guard += 1, index += 1) {
-    const date = recurringOccurrenceDate(rule, index, interval);
-    if (!date || date > effectiveEnd) break;
-    if (date >= rangeStart && date >= rule.start_date) results.push(date);
-    if (results.length > maxOccurrences) throw new Error("Recurring date range is too large. Shorten the schedule or increase its repeat interval.");
-  }
-  return results;
-}
-
-function approximateOccurrenceIndex(rule, rangeStart, interval) {
-  const start = parseISODate(rule.start_date);
-  const range = parseISODate(rangeStart);
-  if (!start || !range || range <= start) return 0;
-  if (rule.frequency === "daily") return Math.max(0, Math.floor(daysBetween(start, range) / interval) - 1);
-  if (rule.frequency === "weekly") return Math.max(0, Math.floor(daysBetween(start, range) / (interval * 7)) - 1);
-  if (rule.frequency === "yearly") return Math.max(0, Math.floor((range.getFullYear() - start.getFullYear()) / interval) - 1);
-  const months = (range.getFullYear() - start.getFullYear()) * 12 + range.getMonth() - start.getMonth();
-  return Math.max(0, Math.floor(months / interval) - 1);
-}
-
-function recurringOccurrenceDate(rule, index, interval) {
-  const start = parseISODate(rule.start_date);
-  if (!start) return "";
-  const year = start.getFullYear();
-  const month = start.getMonth();
-  const day = start.getDate();
-  let date;
-  if (rule.frequency === "daily") {
-    date = new Date(year, month, day + index * interval);
-  } else if (rule.frequency === "weekly") {
-    date = new Date(year, month, day + index * interval * 7);
-  } else if (rule.frequency === "yearly") {
-    const targetYear = year + index * interval;
-    date = new Date(targetYear, month, Math.min(day, daysInMonth(targetYear, month)));
-  } else {
-    const targetMonthIndex = month + index * interval;
-    const targetYear = year + Math.floor(targetMonthIndex / 12);
-    const targetMonth = ((targetMonthIndex % 12) + 12) % 12;
-    date = new Date(targetYear, targetMonth, Math.min(day, daysInMonth(targetYear, targetMonth)));
-  }
-  return localISODate(date);
-}
-
-function parseISODate(value) {
-  const match = String(value || "").match(/^(\d{4})-(\d{2})-(\d{2})$/);
-  if (!match) return null;
-  return new Date(Number(match[1]), Number(match[2]) - 1, Number(match[3]));
-}
-
-function daysInMonth(year, monthIndex) {
-  return new Date(year, monthIndex + 1, 0).getDate();
-}
-
-function daysBetween(start, end) {
-  const dayMs = 86400000;
-  return Math.floor((Date.UTC(end.getFullYear(), end.getMonth(), end.getDate()) - Date.UTC(start.getFullYear(), start.getMonth(), start.getDate())) / dayMs);
-}
-
-function addDaysISO(value, days) {
-  const date = parseISODate(value);
-  if (!date) return value;
-  date.setDate(date.getDate() + days);
-  return localISODate(date);
-}
-
-function addYearsISO(value, years) {
-  const date = parseISODate(value);
-  if (!date) return value;
-  const targetYear = date.getFullYear() + years;
-  return validISODate(targetYear, date.getMonth() + 1, Math.min(date.getDate(), daysInMonth(targetYear, date.getMonth())));
-}
-
-
-function moveCalendarMonth(offset) {
-  calendarCursor = new Date(calendarCursor.getFullYear(), calendarCursor.getMonth() + offset, 1);
-  const selected = new Date(`${selectedCalendarDate}T12:00:00`);
-  if (selected.getFullYear() !== calendarCursor.getFullYear() || selected.getMonth() !== calendarCursor.getMonth()) {
-    selectedCalendarDate = validISODate(calendarCursor.getFullYear(), calendarCursor.getMonth() + 1, 1);
-  }
-  renderCalendar();
-}
-
-function showCalendarToday() {
-  const today = new Date();
-  calendarCursor = new Date(today.getFullYear(), today.getMonth(), 1);
-  selectedCalendarDate = todayISO();
-  renderCalendar();
-}
-
-function handleCalendarClick(event) {
-  const addButton = event.target.closest("[data-calendar-add]");
-  if (addButton) {
-    selectCalendarDate(addButton.dataset.calendarAdd);
-    openTransactionModal(null, selectedCalendarDate);
-    return;
-  }
-  const dayButton = event.target.closest("[data-calendar-date]");
-  if (dayButton) selectCalendarDate(dayButton.dataset.calendarDate);
-}
-
-function handleCalendarKeydown(event) {
-  if (!['Enter', ' '].includes(event.key)) return;
-  const dayButton = event.target.closest("[data-calendar-date]");
-  if (!dayButton) return;
-  event.preventDefault();
-  selectCalendarDate(dayButton.dataset.calendarDate);
-}
-
-function selectCalendarDate(date) {
-  if (!date) return;
-  selectedCalendarDate = date;
-  const selected = new Date(`${date}T12:00:00`);
-  if (selected.getFullYear() !== calendarCursor.getFullYear() || selected.getMonth() !== calendarCursor.getMonth()) {
-    calendarCursor = new Date(selected.getFullYear(), selected.getMonth(), 1);
-  }
-  renderCalendar();
-}
-
-function renderCalendar() {
-  if (!el.calendarGrid) return;
-  const year = calendarCursor.getFullYear();
-  const month = calendarCursor.getMonth();
-  const monthKey = `${year}-${String(month + 1).padStart(2, "0")}`;
-  const monthStart = `${monthKey}-01`;
-  const monthEnd = endOfMonthISO(calendarCursor);
-  const accountId = el.calendarAccountFilter.value || "all";
-  const monthEntries = state.transactions.filter((transaction) => transaction.entry_date?.startsWith(monthKey) && transactionMatchesAccount(transaction, accountId));
-  const monthPlanned = plannedOccurrencesBetween(monthStart, monthEnd, accountId);
-  const monthCardEvents = creditCardCalendarEventsBetween(monthStart, monthEnd, accountId);
-  const monthIncome = sumTransactions(monthEntries, "income");
-  const monthExpenses = sumTransactions(monthEntries, "expense");
-  const activeDays = new Set([...monthEntries.map((transaction) => transaction.entry_date), ...monthPlanned.map((item) => item.date), ...monthCardEvents.map((item) => item.date)]).size;
-  const transferCount = monthEntries.filter((transaction) => transaction.type === "transfer").length;
-
-  el.calendarMonthLabel.textContent = new Intl.DateTimeFormat("en-US", { month: "long", year: "numeric" }).format(calendarCursor);
-  el.calendarSummary.innerHTML = [
-    summaryCard("Income", monthIncome, `${monthEntries.filter((item) => item.type === "income").length} posted entries`, "positive"),
-    summaryCard("Expenses", monthExpenses, `${monthEntries.filter((item) => item.type === "expense").length} posted entries`, monthExpenses ? "negative" : ""),
-    summaryCard("Net cash flow", monthIncome - monthExpenses, "Posted income minus expenses", tone(monthIncome - monthExpenses)),
-    summaryCard("Upcoming", monthPlanned.length + monthCardEvents.length, `${monthPlanned.length} recurring · ${monthCardEvents.length} card reminder${monthCardEvents.length === 1 ? "" : "s"} · ${activeDays} active day${activeDays === 1 ? "" : "s"}`, "warning", false),
-  ].join("");
-
-  const first = new Date(year, month, 1);
-  const gridStart = new Date(year, month, 1 - first.getDay());
-  const cells = [];
-  for (let index = 0; index < 42; index += 1) {
-    const date = new Date(gridStart.getFullYear(), gridStart.getMonth(), gridStart.getDate() + index);
-    const iso = localISODate(date);
-    const dayEntries = state.transactions.filter((transaction) => transaction.entry_date === iso && transactionMatchesAccount(transaction, accountId));
-    const planned = plannedOccurrencesForDate(iso, accountId);
-    const cardEvents = creditCardCalendarEventsForDate(iso, accountId);
-    const income = sumTransactions(dayEntries, "income");
-    const expenses = sumTransactions(dayEntries, "expense");
-    const transfers = dayEntries.filter((transaction) => transaction.type === "transfer").length;
-    const plannedIncome = planned.filter((item) => item.rule.type === "income").reduce((sum, item) => sum + number(item.rule.amount), 0);
-    const plannedExpenses = planned.filter((item) => item.rule.type === "expense").reduce((sum, item) => sum + number(item.rule.amount), 0);
-    const plannedTransfers = planned.filter((item) => item.rule.type === "transfer").length;
-    const isCurrentMonth = date.getMonth() === month;
-    const hasActivity = dayEntries.length || planned.length || cardEvents.length;
-    const classes = [
-      "calendar-day",
-      isCurrentMonth ? "" : "outside-month",
-      iso === todayISO() ? "today" : "",
-      iso === selectedCalendarDate ? "selected" : "",
-      hasActivity ? "has-activity" : "",
-    ].filter(Boolean).join(" ");
-    const aria = `${formatDate(iso)}. ${income ? `${formatMoneyText(income)} posted income. ` : ""}${expenses ? `${formatMoneyText(expenses)} posted expenses. ` : ""}${transfers ? `${transfers} posted transfers. ` : ""}${planned.length ? `${planned.length} planned recurring entries. ` : ""}${cardEvents.length ? `${cardEvents.length} credit-card reminder${cardEvents.length === 1 ? "" : "s"}.` : ""}`;
-    cells.push(`<div class="${classes}">
-      <button class="calendar-day-body" type="button" data-calendar-date="${iso}" aria-label="${escapeHTML(aria)}">
-        <span class="calendar-day-number">${date.getDate()}</span>
-        <span class="calendar-day-totals">
-          ${income ? `<span class="calendar-day-total income"><span>+</span>${formatMoneyCompactHTML(income)}</span>` : ""}
-          ${expenses ? `<span class="calendar-day-total expense"><span>−</span>${formatMoneyCompactHTML(expenses)}</span>` : ""}
-          ${transfers ? `<span class="calendar-transfer-count">⇄ ${transfers}</span>` : ""}
-          ${plannedIncome ? `<span class="calendar-planned-total income">Planned +${formatMoneyCompactHTML(plannedIncome)}</span>` : ""}
-          ${plannedExpenses ? `<span class="calendar-planned-total expense">Planned −${formatMoneyCompactHTML(plannedExpenses)}</span>` : ""}
-          ${plannedTransfers ? `<span class="calendar-planned-count">Planned ⇄ ${plannedTransfers}</span>` : ""}
-          ${cardEvents.slice(0, 2).map((item) => `<span class="calendar-card-reminder ${item.type === "payment-due" ? "due" : "close"}">${item.type === "payment-due" ? "Card due" : "Card closes"}</span>`).join("")}
-          ${!hasActivity ? `<span class="calendar-no-activity">No entries</span>` : ""}
-        </span>
-      </button>
-      <button class="calendar-day-add" type="button" data-calendar-add="${iso}" aria-label="Add entry on ${escapeHTML(formatDate(iso))}" title="Add entry">+</button>
-    </div>`);
-  }
-  el.calendarGrid.innerHTML = cells.join("");
-  renderSelectedCalendarDay(accountId);
-}
-
-function renderSelectedCalendarDay(accountId = "all") {
-  const entries = sortedTransactions().filter((transaction) => transaction.entry_date === selectedCalendarDate && transactionMatchesAccount(transaction, accountId));
-  const planned = plannedOccurrencesForDate(selectedCalendarDate, accountId);
-  const cardEvents = creditCardCalendarEventsForDate(selectedCalendarDate, accountId);
-  const income = sumTransactions(entries, "income");
-  const expenses = sumTransactions(entries, "expense");
-  const transfers = entries.filter((transaction) => transaction.type === "transfer").length;
-  el.calendarDayHeading.textContent = formatDate(selectedCalendarDate);
-  el.calendarDaySummary.innerHTML = [
-    dayMetricHTML("Income", income, "positive"),
-    dayMetricHTML("Expenses", expenses, expenses ? "negative" : ""),
-    dayMetricHTML("Net cash flow", income - expenses, tone(income - expenses)),
-    dayMetricHTML("Reminders", planned.length + cardEvents.length, planned.length || cardEvents.length ? "warning" : "", false),
-  ].join("");
-  const cardHTML = cardEvents.length ? creditCardCalendarAgendaHTML(cardEvents) : "";
-  const plannedHTML = planned.length ? plannedAgendaHTML(planned) : "";
-  const postedHTML = entries.length
-    ? transactionListHTML(entries, true)
-    : emptyHTML("No posted entries on this day", planned.length ? "The recurring items above are planned and do not affect balances until posted." : "Use Add entry for this day to record an expense, income, or transfer.");
-  el.calendarDayTransactions.innerHTML = `${cardHTML}${plannedHTML}${postedHTML}`;
-}
-
-
-function creditCardCalendarEventsBetween(startDate, endDate, accountId = "all") {
-  const cards = creditCardAccounts().filter((account) => accountId === "all" || account.id === accountId);
-  const events = [];
-  const start = new Date(`${startDate}T12:00:00`);
-  const end = new Date(`${endDate}T12:00:00`);
-  for (const account of cards) {
-    if (account.statement_closing_day) {
-      for (let cursor = new Date(start.getFullYear(), start.getMonth(), 1); cursor <= end; cursor = new Date(cursor.getFullYear(), cursor.getMonth() + 1, 1)) {
-        const date = dateForMonthDay(cursor.getFullYear(), cursor.getMonth(), number(account.statement_closing_day));
-        if (date >= startDate && date <= endDate) events.push({ type: "statement-close", date, account, statement: null });
-      }
-    }
-    const statements = state.creditCardStatements.filter((statement) => statement.account_id === account.id && statement.due_date >= startDate && statement.due_date <= endDate);
-    for (const statement of statements) events.push({ type: "payment-due", date: statement.due_date, account, statement, status: creditCardStatementStatus(statement) });
-    if (account.payment_due_day) {
-      for (let cursor = new Date(start.getFullYear(), start.getMonth(), 1); cursor <= end; cursor = new Date(cursor.getFullYear(), cursor.getMonth() + 1, 1)) {
-        const date = dateForMonthDay(cursor.getFullYear(), cursor.getMonth(), number(account.payment_due_day));
-        const hasStatement = statements.some((statement) => statement.due_date === date);
-        if (!hasStatement && date >= startDate && date <= endDate) events.push({ type: "payment-due", date, account, statement: null, status: null });
-      }
-    }
-  }
-  return events.sort((a, b) => a.date.localeCompare(b.date) || a.type.localeCompare(b.type) || a.account.name.localeCompare(b.account.name));
-}
-
-function creditCardCalendarEventsForDate(date, accountId = "all") {
-  return creditCardCalendarEventsBetween(date, date, accountId);
-}
-
-function creditCardCalendarAgendaHTML(events) {
-  return `<div class="card-reminder-agenda">
-    <div class="planned-agenda-heading"><strong>Credit-card reminders</strong><span>Cycle dates and saved statement deadlines</span></div>
-    ${events.map((event) => {
-      const isDue = event.type === "payment-due";
-      const status = event.status;
-      const title = isDue ? `${event.account.name} payment due` : `${event.account.name} statement closes`;
-      const detail = event.statement
-        ? `${formatMoneyText(event.statement.statement_balance)} statement · minimum ${formatMoneyText(event.statement.minimum_payment)}`
-        : isDue ? "Configured monthly payment reminder" : "Configured monthly statement closing date";
-      return `<div class="card-reminder-row">
-        <div class="planned-row-main"><span class="card-reminder-icon ${isDue ? "due" : "close"}">${isDue ? "!" : "▤"}</span><div class="planned-row-copy"><strong>${escapeHTML(title)}</strong><span>${escapeHTML(detail)}</span></div></div>
-        <div class="planned-row-side">${status ? `<span class="credit-card-status ${status.key}">${escapeHTML(status.label)}</span>` : `<span class="planned-label">Reminder</span>`}${event.statement && status?.outstanding > 0 ? `<button class="secondary-button" data-action="record-credit-card-payment" data-id="${event.account.id}" type="button">Record payment</button>` : ""}</div>
-      </div>`;
-    }).join("")}
-  </div>`;
-}
-
-function plannedAgendaHTML(planned) {
-  return `<div class="planned-agenda">
-    <div class="planned-agenda-heading"><strong>Planned recurring entries</strong><span>Not included in balances or reports until posted</span></div>
-    ${planned.map(({ rule, date }) => {
-      const title = rule.description || (rule.type === "transfer" ? "Recurring transfer" : categoryById(rule.category_id)?.name || `Recurring ${rule.type}`);
-      const icon = rule.type === "expense" ? "↓" : rule.type === "income" ? "↑" : "⇄";
-      const sign = rule.type === "expense" ? "−" : rule.type === "income" ? "+" : "";
-      const canPost = date <= todayISO();
-      return `<div class="planned-row">
-        <div class="planned-row-main">
-          <span class="recurring-type-icon ${rule.type}">${icon}</span>
-          <div class="planned-row-copy"><strong>${escapeHTML(title)}</strong><span>${escapeHTML(recurringTargetText(rule))} · ${escapeHTML(recurringScheduleText(rule))}</span></div>
-        </div>
-        <div class="planned-row-side">
-          <span class="planned-label">Planned</span>
-          <span class="amount ${rule.type}">${sign}${formatMoneyHTML(rule.amount)}</span>
-          ${canPost ? `<button class="secondary-button" data-action="post-recurring" data-id="${rule.id}" data-date="${date}" type="button">Post now</button>` : ""}
-        </div>
-      </div>`;
-    }).join("")}
-  </div>`;
-}
-
-
-function transactionMatchesAccount(transaction, accountId) {
-  return accountId === "all" || [transaction.account_id, transaction.from_account_id, transaction.to_account_id].includes(accountId);
-}
-
-function dayMetricHTML(label, value, className = "", money = true) {
-  return `<div class="calendar-day-metric"><span>${escapeHTML(label)}</span><strong class="${className}">${money ? formatMoneyHTML(value) : escapeHTML(value)}</strong></div>`;
-}
-
-function localISODate(date) {
-  return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`;
-}
-
-function formatMoneyCompactHTML(value) {
-  const absolute = Math.abs(number(value));
-  return `<span class="money compact-money"><span class="aed-symbol" aria-hidden="true"></span><span class="money-number">${escapeHTML(compactAmountFormatter.format(absolute))}</span></span>`;
 }
 
 function renderBudgets() {
@@ -2018,7 +645,7 @@ function renderSettings() {
 
 function renderSelectors() {
   const accountOptions = state.accounts.map((account) => `<option value="${account.id}">${escapeHTML(account.name)} (${formatMoneyText(calculateAccountBalance(account.id))})</option>`).join("");
-  [el.entryAccount, el.transferFromAccount, el.transferToAccount, el.recurringAccount, el.recurringFromAccount, el.recurringToAccount].forEach((select) => {
+  [el.entryAccount, el.transferFromAccount, el.transferToAccount].forEach((select) => {
     const previous = select.value;
     select.innerHTML = accountOptions || `<option value="">No accounts available</option>`;
     if ([...select.options].some((option) => option.value === previous)) select.value = previous;
@@ -2026,17 +653,7 @@ function renderSelectors() {
   const filterPrevious = el.transactionAccountFilter.value;
   el.transactionAccountFilter.innerHTML = `<option value="all">All accounts</option>${state.accounts.map((account) => `<option value="${account.id}">${escapeHTML(account.name)}</option>`).join("")}`;
   if ([...el.transactionAccountFilter.options].some((option) => option.value === filterPrevious)) el.transactionAccountFilter.value = filterPrevious;
-  const calendarAccountPrevious = el.calendarAccountFilter.value;
-  el.calendarAccountFilter.innerHTML = `<option value="all">All accounts</option>${state.accounts.map((account) => `<option value="${account.id}">${escapeHTML(account.name)}</option>`).join("")}`;
-  if ([...el.calendarAccountFilter.options].some((option) => option.value === calendarAccountPrevious)) el.calendarAccountFilter.value = calendarAccountPrevious;
-  const reconcileAccountPrevious = el.reconcileAccount.value;
-  el.reconcileAccount.innerHTML = state.accounts.map((account) => `<option value="${account.id}">${escapeHTML(account.name)} (${formatMoneyText(calculateAccountBalance(account.id))})</option>`).join("") || `<option value="">No accounts available</option>`;
-  if ([...el.reconcileAccount.options].some((option) => option.value === reconcileAccountPrevious)) el.reconcileAccount.value = reconcileAccountPrevious;
-  const importAccountPrevious = el.importDefaultAccount.value;
-  el.importDefaultAccount.innerHTML = `<option value="">Use account names from file</option>${state.accounts.map((account) => `<option value="${account.id}">${escapeHTML(account.name)}</option>`).join("")}`;
-  if ([...el.importDefaultAccount.options].some((option) => option.value === importAccountPrevious)) el.importDefaultAccount.value = importAccountPrevious;
   renderEntryCategories(el.entryType.value);
-  renderRecurringCategories(el.recurringType.value);
   const budgetPrevious = el.budgetCategory.value;
   el.budgetCategory.innerHTML = state.categories.filter((category) => category.kind === "expense").sort((a, b) => a.name.localeCompare(b.name)).map((category) => `<option value="${category.id}">${escapeHTML(category.name)}</option>`).join("") || `<option value="">No expense categories</option>`;
   if ([...el.budgetCategory.options].some((option) => option.value === budgetPrevious)) el.budgetCategory.value = budgetPrevious;
@@ -2049,13 +666,6 @@ function renderEntryCategories(type) {
   if ([...el.entryCategory.options].some((option) => option.value === previous)) el.entryCategory.value = previous;
 }
 
-function renderRecurringCategories(type) {
-  if (type === "transfer") return;
-  const previous = el.recurringCategory.value;
-  el.recurringCategory.innerHTML = state.categories.filter((category) => category.kind === type).sort((a, b) => a.name.localeCompare(b.name)).map((category) => `<option value="${category.id}">${escapeHTML(category.name)}</option>`).join("") || `<option value="">No ${type} categories</option>`;
-  if ([...el.recurringCategory.options].some((option) => option.value === previous)) el.recurringCategory.value = previous;
-}
-
 function setEntryType(type) {
   el.entryType.value = type;
   document.querySelectorAll("[data-entry-type]").forEach((button) => button.classList.toggle("active", button.dataset.entryType === type));
@@ -2066,27 +676,21 @@ function setEntryType(type) {
   renderEntryCategories(type);
 }
 
-function openTransactionModal(id = null, presetDate = "") {
+function openTransactionModal(id = null) {
   if (!state.accounts.length) return showToast("Add an account before recording an entry.", true);
-  clearReceiptFormState();
   el.transactionForm.reset();
   el.transactionId.value = "";
-  el.entryDate.value = presetDate || todayISO();
+  el.entryDate.value = todayISO();
   el.transactionFormError.textContent = "";
-  el.receiptFileHelp.textContent = mode === "cloud"
-    ? "Receipts are stored privately in your Supabase project and are available on your signed-in devices."
-    : "Receipt uploads require Supabase cloud sync. Remarks are still saved in local preview.";
   let type = "expense";
   if (id) {
     const transaction = state.transactions.find((item) => item.id === id);
     if (!transaction) return;
-    if (transactionHasReconciledSide(transaction)) return showToast("Undo the related reconciliation before editing this entry.", true);
     type = transaction.type;
     el.transactionId.value = id;
     el.entryAmount.value = number(transaction.amount);
     el.entryDate.value = transaction.entry_date;
     el.entryDescription.value = transaction.description || "";
-    el.entryRemarks.value = transaction.remarks || "";
     setEntryType(type);
     if (type === "transfer") {
       el.transferFromAccount.value = transaction.from_account_id || "";
@@ -2096,7 +700,6 @@ function openTransactionModal(id = null, presetDate = "") {
       el.entryCategory.value = transaction.category_id || "";
     }
     el.transactionModalTitle.textContent = "Edit entry";
-    if (transaction.receipt_path) showExistingReceiptPreview(transaction);
   } else {
     setEntryType(type);
     el.transactionModalTitle.textContent = "Add entry";
@@ -2111,17 +714,12 @@ async function handleTransactionSubmit(event) {
   const id = el.transactionId.value;
   const type = el.entryType.value;
   const amount = number(el.entryAmount.value);
-  const remarks = el.entryRemarks.value.trim();
-  const existing = id ? state.transactions.find((item) => item.id === id) : null;
   const base = {
-    type, amount, entry_date: el.entryDate.value, description: el.entryDescription.value.trim(), remarks,
+    type, amount, entry_date: el.entryDate.value, description: el.entryDescription.value.trim(),
     account_id: null, category_id: null, from_account_id: null, to_account_id: null,
   };
   if (!(amount > 0)) return showFormError(el.transactionFormError, "Enter an amount greater than zero.");
   if (!base.entry_date) return showFormError(el.transactionFormError, "Choose a transaction date.");
-  if (base.description.length > 120) return showFormError(el.transactionFormError, "Description must be 120 characters or fewer.");
-  if (remarks.length > 2000) return showFormError(el.transactionFormError, "Remarks must be 2,000 characters or fewer.");
-  if (selectedReceiptFile && mode !== "cloud") return showFormError(el.transactionFormError, "Receipt uploads require Supabase cloud sync.");
   if (type === "transfer") {
     base.from_account_id = el.transferFromAccount.value;
     base.to_account_id = el.transferToAccount.value;
@@ -2133,242 +731,19 @@ async function handleTransactionSubmit(event) {
     if (!base.account_id) return showFormError(el.transactionFormError, "Choose an account.");
     if (!base.category_id) return showFormError(el.transactionFormError, `Create or select an ${type} category.`);
   }
-
-  let newlyUploadedPath = "";
-  let newlyInsertedId = "";
   try {
     if (id) {
-      let receiptChanges = {};
-      if (selectedReceiptFile) {
-        receiptChanges = await uploadReceipt(id, selectedReceiptFile);
-        newlyUploadedPath = receiptChanges.receipt_path;
-      } else if (removeExistingReceipt) {
-        receiptChanges = { receipt_path: null, receipt_name: null, receipt_mime_type: null, receipt_size: null };
-      }
-      const updated = await updateRow("transactions", id, { ...base, ...receiptChanges });
-      const mergedTransaction = { ...existing, ...updated };
-      state.transactions = state.transactions.map((item) => item.id === id ? mergedTransaction : item);
-      await cleanupTransactionClearingsForTransaction(id, mergedTransaction);
-      if ((selectedReceiptFile || removeExistingReceipt) && existing?.receipt_path && existing.receipt_path !== updated.receipt_path) {
-        await removeReceiptFile(existing.receipt_path, false);
-      }
-      newlyUploadedPath = "";
-      showToast(selectedReceiptFile ? "Entry and receipt updated." : "Entry updated.");
+      const updated = await updateRow("transactions", id, base);
+      state.transactions = state.transactions.map((item) => item.id === id ? { ...item, ...updated } : item);
+      showToast("Entry updated.");
     } else {
-      let inserted = await insertRow("transactions", base);
-      newlyInsertedId = inserted.id;
-      if (selectedReceiptFile) {
-        const receiptChanges = await uploadReceipt(inserted.id, selectedReceiptFile);
-        newlyUploadedPath = receiptChanges.receipt_path;
-        const updated = await updateRow("transactions", inserted.id, receiptChanges);
-        inserted = { ...inserted, ...updated };
-      }
-      state.transactions.push(inserted);
-      newlyInsertedId = "";
-      newlyUploadedPath = "";
-      showToast(selectedReceiptFile ? "Entry and receipt added." : "Entry added.");
+      state.transactions.push(await insertRow("transactions", base));
+      showToast("Entry added.");
     }
     persistLocal();
     closeModal(el.transactionModal);
-    clearReceiptFormState();
     render();
-  } catch (error) {
-    if (newlyUploadedPath) await removeReceiptFile(newlyUploadedPath, false);
-    if (newlyInsertedId) {
-      try { await deleteRow("transactions", newlyInsertedId); } catch (rollbackError) { console.warn("Could not roll back transaction", rollbackError); }
-    }
-    showFormError(el.transactionFormError, friendlyError(error));
-  }
-}
-
-function handleReceiptSelection(event) {
-  const file = event.target.files?.[0] || null;
-  if (!file) {
-    selectedReceiptFile = null;
-    const existing = state.transactions.find((item) => item.id === el.transactionId.value);
-    if (existing?.receipt_path && !removeExistingReceipt) showExistingReceiptPreview(existing);
-    else hideReceiptPreview();
-    return;
-  }
-  try {
-    validateReceiptFile(file);
-    if (mode !== "cloud") throw new Error("Receipt uploads require Supabase cloud sync.");
-    selectedReceiptFile = file;
-    removeExistingReceipt = false;
-    el.receiptFileHelp.textContent = "The selected receipt will be uploaded privately when you save this entry.";
-    showSelectedReceiptPreview(file);
-  } catch (error) {
-    event.target.value = "";
-    selectedReceiptFile = null;
-    showFormError(el.transactionFormError, friendlyError(error));
-  }
-}
-
-function validateReceiptFile(file) {
-  const type = receiptMimeType(file);
-  if (!file || !ALLOWED_RECEIPT_TYPES.has(type)) throw new Error("Choose a JPEG, PNG, WebP, HEIC, or HEIF image.");
-  if (file.size > MAX_RECEIPT_BYTES) throw new Error("Receipt image must be 8 MB or smaller.");
-}
-
-function receiptMimeType(file) {
-  const browserType = String(file?.type || "").toLowerCase();
-  if (ALLOWED_RECEIPT_TYPES.has(browserType)) return browserType;
-  const extension = String(file?.name || "").toLowerCase().split(".").pop();
-  return ({ jpg: "image/jpeg", jpeg: "image/jpeg", png: "image/png", webp: "image/webp", heic: "image/heic", heif: "image/heif" })[extension] || "";
-}
-
-function clearReceiptFormState() {
-  selectedReceiptFile = null;
-  removeExistingReceipt = false;
-  if (el.entryReceipt) el.entryReceipt.value = "";
-  hideReceiptPreview();
-}
-
-function revokeReceiptPreviewUrl() {
-  if (receiptPreviewObjectUrl) URL.revokeObjectURL(receiptPreviewObjectUrl);
-  receiptPreviewObjectUrl = "";
-}
-
-function hideReceiptPreview() {
-  revokeReceiptPreviewUrl();
-  if (!el.receiptPreview) return;
-  el.receiptPreview.hidden = true;
-  el.receiptPreviewImage.removeAttribute("src");
-  el.receiptPreviewImage.hidden = true;
-  el.receiptPreviewFallback.hidden = false;
-}
-
-function showSelectedReceiptPreview(file) {
-  revokeReceiptPreviewUrl();
-  receiptPreviewObjectUrl = URL.createObjectURL(file);
-  el.receiptPreview.hidden = false;
-  el.receiptPreviewName.textContent = file.name;
-  el.receiptPreviewInfo.textContent = `New receipt · ${formatFileSize(file.size)}`;
-  el.receiptPreviewImage.src = receiptPreviewObjectUrl;
-  el.receiptPreviewImage.hidden = false;
-  el.receiptPreviewFallback.hidden = true;
-  el.receiptPreviewImage.onerror = () => {
-    el.receiptPreviewImage.hidden = true;
-    el.receiptPreviewFallback.hidden = false;
-  };
-}
-
-async function showExistingReceiptPreview(transaction) {
-  revokeReceiptPreviewUrl();
-  el.receiptPreview.hidden = false;
-  el.receiptPreviewName.textContent = transaction.receipt_name || "Receipt image";
-  el.receiptPreviewInfo.textContent = `${formatFileSize(transaction.receipt_size)} · Stored privately`;
-  el.receiptPreviewImage.hidden = true;
-  el.receiptPreviewFallback.hidden = false;
-  if (mode !== "cloud") return;
-  try {
-    const url = await createReceiptSignedUrl(transaction.receipt_path, 300);
-    if (el.transactionId.value !== transaction.id || selectedReceiptFile || removeExistingReceipt) return;
-    el.receiptPreviewImage.src = url;
-    el.receiptPreviewImage.hidden = false;
-    el.receiptPreviewFallback.hidden = true;
-    el.receiptPreviewImage.onerror = () => {
-      el.receiptPreviewImage.hidden = true;
-      el.receiptPreviewFallback.hidden = false;
-    };
-  } catch (error) {
-    console.warn("Could not load receipt preview", error);
-  }
-}
-
-function removeReceiptFromForm() {
-  const existing = state.transactions.find((item) => item.id === el.transactionId.value);
-  selectedReceiptFile = null;
-  el.entryReceipt.value = "";
-  removeExistingReceipt = Boolean(existing?.receipt_path);
-  hideReceiptPreview();
-  el.receiptFileHelp.textContent = removeExistingReceipt
-    ? "The existing receipt will be removed when you save this entry."
-    : mode === "cloud"
-      ? "Receipts are stored privately in your Supabase project and are available on your signed-in devices."
-      : "Receipt uploads require Supabase cloud sync. Remarks are still saved in local preview.";
-}
-
-async function viewReceiptFromForm() {
-  if (selectedReceiptFile && receiptPreviewObjectUrl) {
-    window.open(receiptPreviewObjectUrl, "_blank", "noopener,noreferrer");
-    return;
-  }
-  const transaction = state.transactions.find((item) => item.id === el.transactionId.value);
-  if (transaction?.receipt_path && !removeExistingReceipt) await openReceiptPath(transaction.receipt_path);
-}
-
-async function openTransactionReceipt(id) {
-  const transaction = state.transactions.find((item) => item.id === id);
-  if (!transaction?.receipt_path) return showToast("This entry does not have a receipt.", true);
-  await openReceiptPath(transaction.receipt_path);
-}
-
-async function openReceiptPath(path) {
-  if (mode !== "cloud") return showToast("Receipt viewing requires Supabase cloud sync.", true);
-  const popup = window.open("about:blank", "_blank");
-  try {
-    const url = await createReceiptSignedUrl(path, 120);
-    if (popup) popup.location.href = url;
-    else window.open(url, "_blank", "noopener,noreferrer");
-  } catch (error) {
-    if (popup) popup.close();
-    showToast(friendlyError(error), true);
-  }
-}
-
-async function createReceiptSignedUrl(path, expiresIn = 120) {
-  const { data, error } = await supabase.storage.from(RECEIPT_BUCKET).createSignedUrl(path, expiresIn);
-  if (error) throw error;
-  const url = data?.signedUrl || data?.signedURL;
-  if (!url) throw new Error("Could not create a secure receipt link.");
-  return url;
-}
-
-async function uploadReceipt(transactionId, file) {
-  validateReceiptFile(file);
-  if (mode !== "cloud") throw new Error("Receipt uploads require Supabase cloud sync.");
-  setSyncStatus("syncing", "Uploading receipt");
-  const safeName = sanitizeReceiptFilename(file.name);
-  const path = `${user.id}/${transactionId}/${crypto.randomUUID()}-${safeName}`;
-  const mimeType = receiptMimeType(file);
-  const { data, error } = await supabase.storage.from(RECEIPT_BUCKET).upload(path, file, {
-    cacheControl: "3600",
-    upsert: false,
-    contentType: mimeType,
-  });
-  if (error) throw error;
-  setSyncStatus("cloud", "Cloud synchronized");
-  return {
-    receipt_path: data?.path || path,
-    receipt_name: file.name.slice(0, 255),
-    receipt_mime_type: mimeType.slice(0, 100),
-    receipt_size: file.size,
-  };
-}
-
-async function removeReceiptFile(path, showError = true) {
-  if (!path || mode !== "cloud") return true;
-  const { error } = await supabase.storage.from(RECEIPT_BUCKET).remove([path]);
-  if (error) {
-    if (showError) showToast(`The entry was saved, but the old receipt could not be removed: ${friendlyError(error)}`, true);
-    else console.warn("Could not remove receipt", error);
-    return false;
-  }
-  return true;
-}
-
-function sanitizeReceiptFilename(name) {
-  const cleaned = String(name || "receipt.jpg").normalize("NFKD").replace(/[^a-zA-Z0-9._-]+/g, "-").replace(/-+/g, "-").replace(/^[-.]+|[-.]+$/g, "");
-  return (cleaned || "receipt.jpg").slice(-120);
-}
-
-function formatFileSize(bytes) {
-  const value = number(bytes);
-  if (!value) return "Size unavailable";
-  if (value < 1024) return `${value} B`;
-  if (value < 1024 * 1024) return `${(value / 1024).toFixed(1)} KB`;
-  return `${(value / (1024 * 1024)).toFixed(1)} MB`;
+  } catch (error) { showFormError(el.transactionFormError, friendlyError(error)); }
 }
 
 function openAccountModal(id = null) {
@@ -2378,9 +753,6 @@ function openAccountModal(id = null) {
   el.accountIncludeNetWorth.checked = true;
   el.accountType.value = "current";
   el.accountColor.value = ACCOUNT_COLORS.current;
-  el.accountCreditLimit.value = "";
-  el.accountStatementClosingDay.value = "";
-  el.accountPaymentDueDay.value = "";
   el.accountFormError.textContent = "";
   if (id) {
     const account = state.accounts.find((item) => item.id === id);
@@ -2391,57 +763,26 @@ function openAccountModal(id = null) {
     el.accountOpeningBalance.value = number(account.opening_balance);
     el.accountColor.value = safeColor(account.color);
     el.accountIncludeNetWorth.checked = account.include_in_net_worth !== false;
-    el.accountCreditLimit.value = account.credit_limit == null ? "" : number(account.credit_limit);
-    el.accountStatementClosingDay.value = account.statement_closing_day || "";
-    el.accountPaymentDueDay.value = account.payment_due_day || "";
     el.accountModalTitle.textContent = "Edit account";
   } else {
     el.accountModalTitle.textContent = "Add account";
   }
-  updateCreditCardAccountFields();
   openModal(el.accountModal);
   el.accountName.focus();
-}
-
-function updateCreditCardAccountFields() {
-  const isCreditCard = el.accountType.value === "credit";
-  el.creditCardAccountFields.hidden = !isCreditCard;
-  [el.accountCreditLimit, el.accountStatementClosingDay, el.accountPaymentDueDay].forEach((input) => {
-    input.disabled = !isCreditCard;
-  });
-}
-
-function optionalAccountDay(input) {
-  const raw = String(input.value || "").trim();
-  return raw ? Math.round(number(raw)) : null;
 }
 
 async function handleAccountSubmit(event) {
   event.preventDefault();
   el.accountFormError.textContent = "";
   const id = el.accountId.value;
-  const isCreditCard = el.accountType.value === "credit";
-  const creditLimitRaw = String(el.accountCreditLimit.value || "").trim();
-  const creditLimit = creditLimitRaw ? number(creditLimitRaw) : null;
-  const closingDay = optionalAccountDay(el.accountStatementClosingDay);
-  const dueDay = optionalAccountDay(el.accountPaymentDueDay);
   const row = {
     name: el.accountName.value.trim(),
     type: el.accountType.value,
     opening_balance: number(el.accountOpeningBalance.value),
     color: safeColor(el.accountColor.value),
     include_in_net_worth: el.accountIncludeNetWorth.checked,
-    credit_limit: isCreditCard ? creditLimit : null,
-    statement_closing_day: isCreditCard ? closingDay : null,
-    payment_due_day: isCreditCard ? dueDay : null,
   };
   if (!row.name) return showFormError(el.accountFormError, "Enter an account name.");
-  if (isCreditCard && creditLimitRaw && !(creditLimit > 0)) return showFormError(el.accountFormError, "Credit limit must be greater than zero.");
-  if (closingDay !== null && (closingDay < 1 || closingDay > 31)) return showFormError(el.accountFormError, "Statement closing day must be between 1 and 31.");
-  if (dueDay !== null && (dueDay < 1 || dueDay > 31)) return showFormError(el.accountFormError, "Payment due day must be between 1 and 31.");
-  if (id && !isCreditCard && state.creditCardStatements.some((statement) => statement.account_id === id)) {
-    return showFormError(el.accountFormError, "Delete this account's credit-card statements before changing it to another account type.");
-  }
   const duplicate = state.accounts.some((account) => account.id !== id && account.name.toLowerCase() === row.name.toLowerCase());
   if (duplicate) return showFormError(el.accountFormError, "An account with that name already exists.");
   try {
@@ -2455,106 +796,6 @@ async function handleAccountSubmit(event) {
     }
     persistLocal(); closeModal(el.accountModal); render();
   } catch (error) { showFormError(el.accountFormError, friendlyError(error)); }
-}
-
-function openCreditCardStatementModal(id = null, presetAccountId = "") {
-  const cards = creditCardAccounts();
-  if (!cards.length) return showToast("Add a credit-card account first.", true);
-  el.creditCardStatementForm.reset();
-  el.creditCardStatementId.value = "";
-  el.creditCardStatementFormError.textContent = "";
-  el.creditCardStatementAccount.innerHTML = cards.map((account) => `<option value="${account.id}">${escapeHTML(account.name)}</option>`).join("");
-  el.creditCardStatementDate.value = todayISO();
-  el.creditCardMinimumPayment.value = "0";
-  if (id) {
-    const statement = state.creditCardStatements.find((item) => item.id === id);
-    if (!statement) return;
-    el.creditCardStatementId.value = statement.id;
-    el.creditCardStatementAccount.value = statement.account_id;
-    el.creditCardStatementDate.value = statement.statement_date;
-    el.creditCardDueDate.value = statement.due_date;
-    el.creditCardStatementBalance.value = number(statement.statement_balance);
-    el.creditCardMinimumPayment.value = number(statement.minimum_payment);
-    el.creditCardStatementNotes.value = statement.notes || "";
-    el.creditCardStatementModalTitle.textContent = "Edit statement";
-  } else {
-    if (presetAccountId && cards.some((account) => account.id === presetAccountId)) el.creditCardStatementAccount.value = presetAccountId;
-    el.creditCardStatementModalTitle.textContent = "Add statement";
-    updateCreditCardStatementDueDate();
-  }
-  openModal(el.creditCardStatementModal);
-  el.creditCardStatementBalance.focus();
-}
-
-function updateCreditCardStatementDueDate() {
-  if (el.creditCardStatementId.value) return;
-  const account = accountById(el.creditCardStatementAccount.value);
-  const dueDate = configuredDueDateForStatement(account, el.creditCardStatementDate.value);
-  if (dueDate) el.creditCardDueDate.value = dueDate;
-}
-
-async function handleCreditCardStatementSubmit(event) {
-  event.preventDefault();
-  el.creditCardStatementFormError.textContent = "";
-  const id = el.creditCardStatementId.value;
-  const row = {
-    account_id: el.creditCardStatementAccount.value,
-    statement_date: el.creditCardStatementDate.value,
-    due_date: el.creditCardDueDate.value,
-    statement_balance: number(el.creditCardStatementBalance.value),
-    minimum_payment: number(el.creditCardMinimumPayment.value),
-    notes: el.creditCardStatementNotes.value.trim(),
-  };
-  const account = accountById(row.account_id);
-  if (!account || account.type !== "credit") return showFormError(el.creditCardStatementFormError, "Choose a credit-card account.");
-  if (!row.statement_date || !row.due_date) return showFormError(el.creditCardStatementFormError, "Choose both the statement and payment due dates.");
-  if (row.due_date < row.statement_date) return showFormError(el.creditCardStatementFormError, "Payment due date cannot be before the statement date.");
-  if (row.statement_balance < 0) return showFormError(el.creditCardStatementFormError, "Statement amount due cannot be negative.");
-  if (row.minimum_payment < 0) return showFormError(el.creditCardStatementFormError, "Minimum payment cannot be negative.");
-  if (row.minimum_payment > row.statement_balance) return showFormError(el.creditCardStatementFormError, "Minimum payment cannot exceed the statement amount due.");
-  if (row.notes.length > 500) return showFormError(el.creditCardStatementFormError, "Notes must be 500 characters or fewer.");
-  const duplicate = state.creditCardStatements.some((statement) => statement.id !== id && statement.account_id === row.account_id && statement.statement_date === row.statement_date);
-  if (duplicate) return showFormError(el.creditCardStatementFormError, "A statement already exists for this card and closing date.");
-  try {
-    if (id) {
-      const updated = await updateRow("credit_card_statements", id, row);
-      state.creditCardStatements = state.creditCardStatements.map((item) => item.id === id ? { ...item, ...updated } : item);
-      showToast("Card statement updated.");
-    } else {
-      state.creditCardStatements.push(await insertRow("credit_card_statements", row));
-      showToast("Card statement added.");
-    }
-    persistLocal(); closeModal(el.creditCardStatementModal); render();
-  } catch (error) { showFormError(el.creditCardStatementFormError, friendlyError(error)); }
-}
-
-async function deleteCreditCardStatement(id) {
-  const statement = state.creditCardStatements.find((item) => item.id === id);
-  if (!statement || !confirm(`Delete the ${formatDate(statement.statement_date)} card statement?`)) return;
-  try {
-    await deleteRow("credit_card_statements", id);
-    state.creditCardStatements = state.creditCardStatements.filter((item) => item.id !== id);
-    persistLocal(); render(); showToast("Card statement deleted.");
-  } catch (error) { showToast(friendlyError(error), true); }
-}
-
-function openCreditCardPayment(accountId) {
-  const card = accountById(accountId);
-  if (!card || card.type !== "credit") return;
-  const source = state.accounts.find((account) => account.id !== accountId && account.type !== "credit") || state.accounts.find((account) => account.id !== accountId);
-  if (!source) return showToast("Add another account to pay this credit card from.", true);
-  openTransactionModal();
-  setEntryType("transfer");
-  el.transferFromAccount.value = source.id;
-  el.transferToAccount.value = accountId;
-  el.entryDescription.value = `${card.name} payment`;
-  const latest = latestCreditCardStatement(accountId);
-  if (latest) {
-    const status = creditCardStatementStatus(latest);
-    el.entryAmount.value = status.outstanding > 0 ? status.outstanding.toFixed(2) : "";
-    el.entryRemarks.value = `Payment for statement dated ${formatDate(latest.statement_date)}`;
-  }
-  el.entryAmount.focus();
 }
 
 function openBudgetModal(id = null) {
@@ -2629,7 +870,7 @@ async function handleCategorySubmit(event) {
   const duplicate = state.categories.some((category) => category.id !== id && category.kind === row.kind && category.name.toLowerCase() === row.name.toLowerCase());
   if (duplicate) return showFormError(el.categoryFormError, "That category already exists for this entry type.");
   if (id) {
-    const usedByWrongType = state.transactions.some((transaction) => transaction.category_id === id && transaction.type !== row.kind) || state.recurringEntries.some((rule) => rule.category_id === id && rule.type !== row.kind);
+    const usedByWrongType = state.transactions.some((transaction) => transaction.category_id === id && transaction.type !== row.kind);
     if (usedByWrongType) return showFormError(el.categoryFormError, "The category type cannot change while entries use it.");
   }
   try {
@@ -2648,8 +889,8 @@ async function handleCategorySubmit(event) {
 async function deleteAccount(id) {
   const account = state.accounts.find((item) => item.id === id);
   if (!account) return;
-  const inUse = state.transactions.some((transaction) => [transaction.account_id, transaction.from_account_id, transaction.to_account_id].includes(id)) || state.recurringEntries.some((rule) => [rule.account_id, rule.from_account_id, rule.to_account_id].includes(id)) || state.reconciliations.some((item) => item.account_id === id) || state.creditCardStatements.some((item) => item.account_id === id);
-  if (inUse) return showToast("Delete or move this account's transactions, recurring schedules, statements, and reconciliation history first.", true);
+  const inUse = state.transactions.some((transaction) => [transaction.account_id, transaction.from_account_id, transaction.to_account_id].includes(id));
+  if (inUse) return showToast("Delete or move this account's transactions first.", true);
   if (!confirm(`Delete ${account.name}?`)) return;
   try {
     await deleteRow("accounts", id);
@@ -2659,19 +900,11 @@ async function deleteAccount(id) {
 }
 
 async function deleteTransaction(id) {
-  const transaction = state.transactions.find((item) => item.id === id);
-  if (transaction && transactionHasReconciledSide(transaction)) return showToast("Undo the related reconciliation before deleting this entry.", true);
-  const warning = transaction?.recurring_entry_id
-    ? "Delete this entry? It came from a recurring schedule and may be posted again while that schedule remains active."
-    : "Delete this entry?";
-  if (!confirm(warning)) return;
+  if (!confirm("Delete this entry?")) return;
   try {
     await deleteRow("transactions", id);
     state.transactions = state.transactions.filter((item) => item.id !== id);
-    state.transactionClearings = state.transactionClearings.filter((item) => item.transaction_id !== id);
-    const receiptRemoved = transaction?.receipt_path ? await removeReceiptFile(transaction.receipt_path, false) : true;
-    persistLocal(); render();
-    showToast(receiptRemoved ? "Entry deleted." : "Entry deleted, but its receipt file could not be cleaned up.", !receiptRemoved);
+    persistLocal(); render(); showToast("Entry deleted.");
   } catch (error) { showToast(friendlyError(error), true); }
 }
 
@@ -2687,8 +920,8 @@ async function deleteBudget(id) {
 async function deleteCategory(id) {
   const category = state.categories.find((item) => item.id === id);
   if (!category) return;
-  const inUse = state.transactions.some((transaction) => transaction.category_id === id) || state.budgets.some((budget) => budget.category_id === id) || state.recurringEntries.some((rule) => rule.category_id === id);
-  if (inUse) return showToast("Remove this category from transactions, budgets, and recurring schedules first.", true);
+  const inUse = state.transactions.some((transaction) => transaction.category_id === id) || state.budgets.some((budget) => budget.category_id === id);
+  if (inUse) return showToast("Remove this category from transactions and budgets first.", true);
   if (!confirm(`Delete ${category.name}?`)) return;
   try {
     await deleteRow("categories", id);
@@ -2849,398 +1082,23 @@ function transactionAccountText(transaction) {
   return accountById(transaction.account_id)?.name || "Unknown account";
 }
 
-
-function openTransactionImportModal() {
-  if (!state.accounts.length) return showToast("Add an account before importing transactions.", true);
-  transactionImportSourceRows = [];
-  transactionImportValidation = [];
-  transactionImportFileName = "";
-  el.transactionImportInput.value = "";
-  el.importDefaultAccount.value = "";
-  el.importCreateCategories.checked = true;
-  el.importSkipDuplicates.checked = true;
-  el.transactionImportError.textContent = "";
-  el.transactionImportStatus.innerHTML = "<span>Select a CSV or Excel file to validate it before importing.</span>";
-  el.transactionImportPreview.innerHTML = "";
-  el.importTransactionsButton.disabled = true;
-  openModal(el.transactionImportModal);
-}
-
-async function handleTransactionImportFile(event) {
-  const file = event.target.files?.[0];
-  transactionImportSourceRows = [];
-  transactionImportValidation = [];
-  transactionImportFileName = file?.name || "";
-  el.transactionImportError.textContent = "";
-  el.importTransactionsButton.disabled = true;
-  el.transactionImportPreview.innerHTML = "";
-  if (!file) {
-    el.transactionImportStatus.innerHTML = "<span>Select a CSV or Excel file to validate it before importing.</span>";
-    return;
-  }
-  el.transactionImportStatus.innerHTML = `<span>Reading ${escapeHTML(file.name)}…</span>`;
-  try {
-    transactionImportSourceRows = await readTransactionImportFile(file);
-    validateTransactionImport();
-  } catch (error) {
-    el.transactionImportStatus.innerHTML = `<span class="negative">Could not read ${escapeHTML(file.name)}.</span>`;
-    el.transactionImportError.textContent = friendlyError(error);
-  }
-}
-
-async function getSpreadsheetModule() {
-  if (!spreadsheetModulePromise) {
-    spreadsheetModulePromise = import("https://cdn.jsdelivr.net/npm/xlsx@0.18.5/+esm").then((module) => module.default?.read ? module.default : module);
-  }
-  return spreadsheetModulePromise;
-}
-
-async function readTransactionImportFile(file) {
-  const XLSX = await getSpreadsheetModule();
-  const workbook = XLSX.read(await file.arrayBuffer(), { type: "array", cellDates: true });
-  if (!workbook.SheetNames.length) throw new Error("The workbook does not contain a worksheet.");
-  const sheet = workbook.Sheets[workbook.SheetNames[0]];
-  const matrix = XLSX.utils.sheet_to_json(sheet, { header: 1, defval: "", raw: true, blankrows: false });
-  const firstRowIndex = matrix.findIndex((row) => Array.isArray(row) && row.some((cell) => String(cell ?? "").trim()));
-  if (firstRowIndex < 0) throw new Error("The file is empty.");
-  const headers = matrix[firstRowIndex].map(normalizeImportHeader);
-  const indexByKey = {};
-  headers.forEach((key, index) => {
-    if (key && indexByKey[key] === undefined) indexByKey[key] = index;
-  });
-  for (const required of ["date", "type", "amount"]) {
-    if (indexByKey[required] === undefined) throw new Error(`Missing required column: ${capitalize(required)}.`);
-  }
-  return matrix.slice(firstRowIndex + 1).map((row, offset) => ({
-    sourceRow: firstRowIndex + offset + 2,
-    date: row[indexByKey.date] ?? "",
-    type: row[indexByKey.type] ?? "",
-    amount: row[indexByKey.amount] ?? "",
-    description: row[indexByKey.description] ?? "",
-    remarks: row[indexByKey.remarks] ?? "",
-    category: row[indexByKey.category] ?? "",
-    account: row[indexByKey.account] ?? "",
-    fromAccount: row[indexByKey.fromAccount] ?? "",
-    toAccount: row[indexByKey.toAccount] ?? "",
-    currency: row[indexByKey.currency] ?? "",
-  })).filter((row) => [row.date, row.type, row.amount, row.description, row.remarks, row.category, row.account, row.fromAccount, row.toAccount, row.currency].some((value) => String(value ?? "").trim()));
-}
-
-function normalizeImportHeader(value) {
-  const key = String(value ?? "").replace(/^\uFEFF/, "").trim().toLowerCase().replace(/[^a-z0-9]+/g, "");
-  const aliases = {
-    date: "date", entrydate: "date", transactiondate: "date",
-    type: "type", transactiontype: "type", entrytype: "type",
-    amount: "amount", value: "amount",
-    description: "description", details: "description", memo: "description", narrative: "description",
-    remarks: "remarks", remark: "remarks", comments: "remarks", comment: "remarks", notes: "remarks", note: "remarks",
-    category: "category", categoryname: "category",
-    account: "account", accountname: "account",
-    fromaccount: "fromAccount", sourceaccount: "fromAccount", from: "fromAccount",
-    toaccount: "toAccount", destinationaccount: "toAccount", to: "toAccount",
-    currency: "currency", currencycode: "currency",
-  };
-  return aliases[key] || "";
-}
-
-function validateTransactionImport() {
-  if (!transactionImportSourceRows.length) {
-    el.importTransactionsButton.disabled = true;
-    return;
-  }
-  const fallbackAccount = state.accounts.find((account) => account.id === el.importDefaultAccount.value) || null;
-  const accountMap = new Map(state.accounts.map((account) => [normalizeLookup(account.name), account]));
-  const categoryMap = new Map(state.categories.map((category) => [`${category.kind}:${normalizeLookup(category.name)}`, category]));
-  const createCategories = el.importCreateCategories.checked;
-  const skipDuplicates = el.importSkipDuplicates.checked;
-  const knownFingerprints = new Set(state.transactions.map(transactionFingerprintFromState));
-  const fileFingerprints = new Set();
-
-  transactionImportValidation = transactionImportSourceRows.map((source) => {
-    const errors = [];
-    const type = normalizeImportType(source.type);
-    const entryDate = parseImportDate(source.date);
-    const amount = parseImportAmount(source.amount);
-    const description = String(source.description ?? "").trim().replace(/\s+/g, " ");
-    const remarks = String(source.remarks ?? "").trim();
-    const currency = String(source.currency ?? "").trim().toUpperCase();
-    if (!entryDate) errors.push("Invalid date. Use YYYY-MM-DD.");
-    if (!type) errors.push("Type must be Expense, Income, or Transfer.");
-    if (!(amount > 0)) errors.push("Amount must be greater than zero.");
-    if (description.length > 120) errors.push("Description is longer than 120 characters.");
-    if (remarks.length > 2000) errors.push("Remarks are longer than 2,000 characters.");
-    if (currency && currency !== CURRENCY) errors.push(`Currency must be ${CURRENCY} or blank.`);
-
-    const normalized = {
-      type,
-      amount,
-      entry_date: entryDate,
-      description,
-      remarks,
-      categoryName: "",
-      accountName: "",
-      fromAccountName: "",
-      toAccountName: "",
-      createCategory: false,
-    };
-
-    if (type === "expense" || type === "income") {
-      normalized.accountName = String(source.account ?? "").trim() || fallbackAccount?.name || "";
-      normalized.categoryName = String(source.category ?? "").trim();
-      const account = accountMap.get(normalizeLookup(normalized.accountName));
-      if (!normalized.accountName) errors.push("Account is required.");
-      else if (!account) errors.push(`Account “${normalized.accountName}” does not exist.`);
-      const categoryKey = `${type}:${normalizeLookup(normalized.categoryName)}`;
-      const category = categoryMap.get(categoryKey);
-      if (!normalized.categoryName) errors.push("Category is required.");
-      else if (normalized.categoryName.length > 50) errors.push("Category is longer than 50 characters.");
-      else if (!category && !createCategories) errors.push(`${capitalize(type)} category “${normalized.categoryName}” does not exist.`);
-      else if (!category) normalized.createCategory = true;
-    } else if (type === "transfer") {
-      normalized.fromAccountName = String(source.fromAccount ?? "").trim() || fallbackAccount?.name || "";
-      normalized.toAccountName = String(source.toAccount ?? "").trim();
-      const fromAccount = accountMap.get(normalizeLookup(normalized.fromAccountName));
-      const toAccount = accountMap.get(normalizeLookup(normalized.toAccountName));
-      if (!normalized.fromAccountName) errors.push("From Account is required.");
-      else if (!fromAccount) errors.push(`From Account “${normalized.fromAccountName}” does not exist.`);
-      if (!normalized.toAccountName) errors.push("To Account is required.");
-      else if (!toAccount) errors.push(`To Account “${normalized.toAccountName}” does not exist.`);
-      if (fromAccount && toAccount && fromAccount.id === toAccount.id) errors.push("Transfer accounts must be different.");
-    }
-
-    const fingerprint = errors.length ? "" : transactionFingerprintFromImport(normalized);
-    const duplicate = Boolean(fingerprint && (knownFingerprints.has(fingerprint) || fileFingerprints.has(fingerprint)));
-    if (fingerprint) fileFingerprints.add(fingerprint);
-    return {
-      sourceRow: source.sourceRow,
-      source,
-      normalized,
-      errors,
-      status: errors.length ? "error" : duplicate && skipDuplicates ? "duplicate" : "valid",
-    };
-  });
-  renderTransactionImportPreview();
-}
-
-function renderTransactionImportPreview() {
-  const validCount = transactionImportValidation.filter((row) => row.status === "valid").length;
-  const duplicateCount = transactionImportValidation.filter((row) => row.status === "duplicate").length;
-  const errorCount = transactionImportValidation.filter((row) => row.status === "error").length;
-  el.transactionImportStatus.innerHTML = `
-    <div><strong>${escapeHTML(transactionImportFileName || "Selected file")}</strong><span>${transactionImportValidation.length} data row${transactionImportValidation.length === 1 ? "" : "s"}</span></div>
-    <div class="import-counts"><span class="import-count valid">${validCount} ready</span><span class="import-count duplicate">${duplicateCount} duplicate</span><span class="import-count error">${errorCount} error${errorCount === 1 ? "" : "s"}</span></div>`;
-  const previewRows = transactionImportValidation.slice(0, 100);
-  el.transactionImportPreview.innerHTML = previewRows.length ? `
-    <div class="import-preview-scroll">
-      <table class="import-preview-table">
-        <thead><tr><th>Row</th><th>Status</th><th>Date</th><th>Type</th><th>Description</th><th>Category / route</th><th>Amount</th></tr></thead>
-        <tbody>${previewRows.map((row) => {
-          const route = row.normalized.type === "transfer"
-            ? `${row.normalized.fromAccountName || "—"} → ${row.normalized.toAccountName || "—"}`
-            : `${row.normalized.categoryName || "—"} · ${row.normalized.accountName || "—"}`;
-          const detail = row.errors.length ? row.errors.join(" ") : row.status === "duplicate" ? "Already in Ledgerly or repeated in this file." : row.normalized.createCategory ? "Ready · new category will be created." : "Ready to import.";
-          return `<tr class="import-row-${row.status}"><td>${row.sourceRow}</td><td><span class="import-row-status ${row.status}">${capitalize(row.status)}</span><small>${escapeHTML(detail)}</small></td><td>${escapeHTML(row.normalized.entry_date || String(row.source.date ?? ""))}</td><td>${escapeHTML(capitalize(row.normalized.type || String(row.source.type ?? "")))}</td><td>${escapeHTML(row.normalized.description || "—")}</td><td>${escapeHTML(route)}</td><td>${row.normalized.amount > 0 ? formatMoneyHTML(row.normalized.amount) : escapeHTML(String(row.source.amount ?? ""))}</td></tr>`;
-        }).join("")}</tbody>
-      </table>
-    </div>
-    ${transactionImportValidation.length > 100 ? `<p class="field-help">Showing the first 100 of ${transactionImportValidation.length} rows.</p>` : ""}` : emptyHTML("No data rows", "Add transactions below the header row in your file.");
-  el.transactionImportError.textContent = errorCount ? "Correct the highlighted rows in the source file, then choose the file again." : "";
-  el.importTransactionsButton.disabled = errorCount > 0 || validCount === 0;
-  el.importTransactionsButton.textContent = validCount ? `Import ${validCount} transaction${validCount === 1 ? "" : "s"}` : "Import transactions";
-}
-
-async function importValidatedTransactions() {
-  validateTransactionImport();
-  const errorCount = transactionImportValidation.filter((row) => row.status === "error").length;
-  const ready = transactionImportValidation.filter((row) => row.status === "valid");
-  if (errorCount || !ready.length) return;
-  el.importTransactionsButton.disabled = true;
-  el.transactionImportError.textContent = "";
-  try {
-    const missingCategories = [];
-    const missingKeys = new Set();
-    for (const row of ready) {
-      if (!row.normalized.createCategory) continue;
-      const key = `${row.normalized.type}:${normalizeLookup(row.normalized.categoryName)}`;
-      if (missingKeys.has(key)) continue;
-      missingKeys.add(key);
-      missingCategories.push({
-        kind: row.normalized.type,
-        name: row.normalized.categoryName,
-        color: importCategoryColor(row.normalized.categoryName),
-      });
-    }
-    if (missingCategories.length) await insertImportedCategories(missingCategories);
-
-    const accountMap = new Map(state.accounts.map((account) => [normalizeLookup(account.name), account]));
-    const categoryMap = new Map(state.categories.map((category) => [`${category.kind}:${normalizeLookup(category.name)}`, category]));
-    const transactionRows = ready.map(({ normalized }) => {
-      const base = {
-        type: normalized.type,
-        amount: normalized.amount,
-        entry_date: normalized.entry_date,
-        description: normalized.description,
-        remarks: normalized.remarks,
-        category_id: null,
-        account_id: null,
-        from_account_id: null,
-        to_account_id: null,
-      };
-      if (normalized.type === "transfer") {
-        base.from_account_id = accountMap.get(normalizeLookup(normalized.fromAccountName)).id;
-        base.to_account_id = accountMap.get(normalizeLookup(normalized.toAccountName)).id;
-      } else {
-        base.account_id = accountMap.get(normalizeLookup(normalized.accountName)).id;
-        base.category_id = categoryMap.get(`${normalized.type}:${normalizeLookup(normalized.categoryName)}`).id;
-      }
-      return base;
-    });
-    await insertImportedTransactions(transactionRows);
-    persistLocal();
-    render();
-    closeModal(el.transactionImportModal);
-    const duplicateCount = transactionImportValidation.filter((row) => row.status === "duplicate").length;
-    showToast(`${transactionRows.length} transaction${transactionRows.length === 1 ? "" : "s"} imported${duplicateCount ? `; ${duplicateCount} duplicate${duplicateCount === 1 ? "" : "s"} skipped` : ""}.`);
-  } catch (error) {
-    el.transactionImportError.textContent = friendlyError(error);
-    el.importTransactionsButton.disabled = false;
-  }
-}
-
-async function insertImportedCategories(rows) {
-  if (mode === "cloud") {
-    setSyncStatus("syncing", "Creating categories");
-    const { data, error } = await supabase.from("categories").insert(rows.map((row) => ({ ...row, user_id: user.id }))).select();
-    if (error) throw error;
-    state.categories.push(...(data || []));
-  } else {
-    state.categories.push(...rows.map(localRow));
-  }
-}
-
-async function insertImportedTransactions(rows) {
-  if (mode === "cloud") {
-    setSyncStatus("syncing", "Importing transactions");
-    for (const batch of chunk(rows, 200)) {
-      const { data, error } = await supabase.from("transactions").insert(batch.map((row) => ({ ...row, user_id: user.id }))).select();
-      if (error) throw error;
-      state.transactions.push(...(data || []));
-    }
-    setSyncStatus("cloud", "Cloud synchronized");
-  } else {
-    state.transactions.push(...rows.map(localRow));
-  }
-}
-
-function normalizeImportType(value) {
-  const normalized = String(value ?? "").trim().toLowerCase();
-  return ["expense", "income", "transfer"].includes(normalized) ? normalized : "";
-}
-
-function parseImportDate(value) {
-  if (value instanceof Date && !Number.isNaN(value.getTime())) {
-    return `${value.getFullYear()}-${String(value.getMonth() + 1).padStart(2, "0")}-${String(value.getDate()).padStart(2, "0")}`;
-  }
-  const raw = String(value ?? "").trim();
-  if (!raw) return "";
-  let match = raw.match(/^(\d{4})[-\/.](\d{1,2})[-\/.](\d{1,2})$/);
-  if (match) return validISODate(Number(match[1]), Number(match[2]), Number(match[3]));
-  match = raw.match(/^(\d{1,2})[-\/.](\d{1,2})[-\/.](\d{2}|\d{4})$/);
-  if (match) {
-    let year = Number(match[3]);
-    if (year < 100) year += year >= 70 ? 1900 : 2000;
-    return validISODate(year, Number(match[2]), Number(match[1]));
-  }
-  const parsed = new Date(raw);
-  if (!Number.isNaN(parsed.getTime()) && /[A-Za-z]/.test(raw)) return validISODate(parsed.getFullYear(), parsed.getMonth() + 1, parsed.getDate());
-  return "";
-}
-
-function validISODate(year, month, day) {
-  const date = new Date(year, month - 1, day);
-  if (date.getFullYear() !== year || date.getMonth() !== month - 1 || date.getDate() !== day) return "";
-  return `${year}-${String(month).padStart(2, "0")}-${String(day).padStart(2, "0")}`;
-}
-
-function parseImportAmount(value) {
-  if (typeof value === "number") return Number.isFinite(value) ? Math.round(Math.abs(value) * 100) / 100 : 0;
-  let raw = String(value ?? "").trim();
-  if (!raw) return 0;
-  const parenthesized = /^\(.*\)$/.test(raw);
-  raw = raw.replace(/[()]/g, "").replace(/,/g, "").replace(/[^0-9.+-]/g, "");
-  const parsed = Number(raw);
-  if (!Number.isFinite(parsed)) return 0;
-  return Math.round(Math.abs(parenthesized ? -parsed : parsed) * 100) / 100;
-}
-
-function normalizeLookup(value) {
-  return String(value ?? "").trim().replace(/\s+/g, " ").toLowerCase();
-}
-
-function transactionFingerprintFromState(transaction) {
-  return transactionFingerprintFromImport({
-    type: transaction.type,
-    amount: number(transaction.amount),
-    entry_date: transaction.entry_date,
-    description: transaction.description || "",
-    remarks: transaction.remarks || "",
-    categoryName: categoryById(transaction.category_id)?.name || "",
-    accountName: accountById(transaction.account_id)?.name || "",
-    fromAccountName: accountById(transaction.from_account_id)?.name || "",
-    toAccountName: accountById(transaction.to_account_id)?.name || "",
-  });
-}
-
-function transactionFingerprintFromImport(transaction) {
-  return [
-    transaction.entry_date || "",
-    transaction.type || "",
-    number(transaction.amount).toFixed(2),
-    normalizeLookup(transaction.description),
-    normalizeLookup(transaction.remarks),
-    normalizeLookup(transaction.categoryName),
-    normalizeLookup(transaction.accountName),
-    normalizeLookup(transaction.fromAccountName),
-    normalizeLookup(transaction.toAccountName),
-  ].join("|");
-}
-
-function importCategoryColor(name) {
-  const palette = ["#2563eb", "#059669", "#d97706", "#7c3aed", "#db2777", "#0891b2", "#dc2626", "#65a30d", "#475569"];
-  let hash = 0;
-  for (const character of String(name || "")) hash = ((hash << 5) - hash + character.charCodeAt(0)) | 0;
-  return palette[Math.abs(hash) % palette.length];
-}
-
-function chunk(items, size) {
-  const batches = [];
-  for (let index = 0; index < items.length; index += size) batches.push(items.slice(index, index + size));
-  return batches;
-}
-
 function exportJSON() {
   downloadFile(`ledgerly-backup-${todayISO()}.json`, JSON.stringify({ ...state, exported_at: new Date().toISOString() }, null, 2), "application/json");
   showToast("JSON backup downloaded.");
 }
 
 function exportCSV() {
-  const header = ["Date", "Type", "Description", "Remarks", "Category", "Account", "From account", "To account", "Amount", "Currency", "Cleared accounts", "Reconciled accounts", "Recurring schedule ID", "Scheduled date", "Receipt filename"];
+  const header = ["Date", "Type", "Description", "Category", "Account", "From account", "To account", "Amount", "Currency"];
   const rows = sortedTransactions().map((transaction) => [
     transaction.entry_date,
     transaction.type,
     transaction.description || "",
-    transaction.remarks || "",
     categoryById(transaction.category_id)?.name || "",
     accountById(transaction.account_id)?.name || "",
     accountById(transaction.from_account_id)?.name || "",
     accountById(transaction.to_account_id)?.name || "",
     number(transaction.amount).toFixed(2),
     CURRENCY,
-    affectedAccountIds(transaction).filter((accountId) => clearingFor(transaction.id, accountId)?.is_cleared).map((accountId) => accountById(accountId)?.name || "").filter(Boolean).join(" | "),
-    affectedAccountIds(transaction).filter((accountId) => clearingFor(transaction.id, accountId)?.reconciliation_id).map((accountId) => accountById(accountId)?.name || "").filter(Boolean).join(" | "),
-    transaction.recurring_entry_id || "",
-    transaction.scheduled_date || "",
-    transaction.receipt_name || "",
   ]);
   const csv = [header, ...rows].map((row) => row.map(csvCell).join(",")).join("\r\n");
   downloadFile(`ledgerly-transactions-${todayISO()}.csv`, csv, "text/csv;charset=utf-8");
@@ -3268,13 +1126,13 @@ async function importJSON(event) {
 
 async function replaceCloudState(imported) {
   setSyncStatus("syncing", "Restoring backup");
-  for (const table of ["transaction_clearings", "reconciliations", "credit_card_statements", "transactions", "budgets", "recurring_entries", "accounts", "categories"]) {
+  for (const table of ["transactions", "budgets", "accounts", "categories"]) {
     const { error } = await supabase.from(table).delete().eq("user_id", user.id);
     if (error) throw error;
   }
   const clean = sanitizeImportedState(imported);
   const withUser = (rows) => rows.map((row) => ({ ...row, user_id: user.id }));
-  for (const [table, rows] of [["categories", clean.categories], ["accounts", clean.accounts], ["recurring_entries", clean.recurringEntries], ["budgets", clean.budgets], ["transactions", clean.transactions], ["credit_card_statements", clean.creditCardStatements], ["reconciliations", clean.reconciliations], ["transaction_clearings", clean.transactionClearings]]) {
+  for (const [table, rows] of [["categories", clean.categories], ["accounts", clean.accounts], ["budgets", clean.budgets], ["transactions", clean.transactions]]) {
     if (!rows.length) continue;
     const { error } = await supabase.from(table).insert(withUser(rows));
     if (error) throw error;
@@ -3289,17 +1147,12 @@ function sanitizeImportedState(imported) {
     delete copy.user_id;
     return copy;
   };
-  const clean = normalizeState(imported);
   return {
-    version: 5,
-    accounts: clean.accounts.map(strip),
-    categories: clean.categories.map(strip),
-    transactions: clean.transactions.map(strip),
-    budgets: clean.budgets.map(strip),
-    recurringEntries: clean.recurringEntries.map(strip),
-    reconciliations: clean.reconciliations.map(strip),
-    transactionClearings: clean.transactionClearings.map(strip),
-    creditCardStatements: clean.creditCardStatements.map(strip),
+    version: 2,
+    accounts: imported.accounts.map(strip),
+    categories: imported.categories.map(strip),
+    transactions: imported.transactions.map(strip),
+    budgets: imported.budgets.map(strip),
   };
 }
 
@@ -3308,7 +1161,7 @@ async function resetApplication() {
   try {
     if (mode === "cloud") {
       setSyncStatus("syncing", "Resetting data");
-      for (const table of ["transaction_clearings", "reconciliations", "credit_card_statements", "transactions", "budgets", "recurring_entries", "accounts", "categories"]) {
+      for (const table of ["transactions", "budgets", "accounts", "categories"]) {
         const { error } = await supabase.from(table).delete().eq("user_id", user.id);
         if (error) throw error;
       }
@@ -3348,16 +1201,8 @@ function showToast(message, isError = false) {
 function friendlyError(error) {
   const message = String(error?.message || error || "Something went wrong.");
   if (message.includes("Failed to fetch")) return "Could not reach Supabase. Check your connection and project configuration.";
-  if ((message.includes("reconciliations") || message.includes("transaction_clearings")) && (message.includes("does not exist") || message.includes("schema cache"))) return "Account reconciliation is not ready. Run supabase/add-account-reconciliation.sql in the Supabase SQL Editor.";
-  if (message.includes("reconciliations_user_id_account_id_statement_date_key") || (message.includes("duplicate key") && message.includes("reconciliations"))) return "This account already has a completed reconciliation for that statement date. Undo it before creating another.";
-  if ((message.includes("credit_card_statements") || message.includes("credit_limit") || message.includes("statement_closing_day") || message.includes("payment_due_day")) && (message.includes("does not exist") || message.includes("schema cache") || message.includes("column"))) return "Credit-card management is not ready. Run supabase/add-credit-card-management.sql in the Supabase SQL Editor.";
-  if (message.includes("credit_card_statements_user_id_account_id_statement_date_key") || (message.includes("duplicate key") && message.includes("credit_card_statements"))) return "A statement already exists for this card and closing date.";
   if (message.includes("duplicate key")) return "A record with the same name or category already exists.";
-  if (message.includes("recurring_entries") && (message.includes("does not exist") || message.includes("schema cache"))) return "Recurring schedules are not ready. Run supabase/add-recurring-entries.sql in the Supabase SQL Editor.";
-  if ((message.includes("recurring_entry_id") || message.includes("scheduled_date")) && message.includes("column")) return "Recurring transaction columns are not ready. Run supabase/add-recurring-entries.sql in the Supabase SQL Editor.";
   if (message.includes("violates foreign key")) return "This item is still used by another record.";
-  if (message.includes("Bucket not found") || message.includes("bucket not found")) return "Receipt storage is not ready. Run the supplied Supabase receipt migration first.";
-  if (message.includes("row-level security") && message.toLowerCase().includes("storage")) return "Supabase blocked the receipt. Run the supplied receipt-storage policies in the SQL Editor.";
   return message;
 }
 function emptyHTML(title, copy) { return `<div class="empty-state"><strong>${escapeHTML(title)}</strong><span>${escapeHTML(copy)}</span></div>`; }
