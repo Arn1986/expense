@@ -8,7 +8,7 @@
   <title>Ledgerly — Personal Finance</title>
   <link rel="manifest" href="manifest.webmanifest" />
   <link rel="icon" type="image/png" href="assets/dirham-symbol.png" />
-  <link rel="stylesheet" href="styles.css?v=9" />
+  <link rel="stylesheet" href="styles.css?v=10" />
 </head>
 <body>
   <section class="auth-screen" id="authScreen">
@@ -414,7 +414,13 @@
           <label class="field expense-income-field"><span id="accountLabel">Pay from account</span><select id="entryAccount"></select></label>
           <label class="field transfer-field" hidden><span>From account</span><select id="transferFromAccount"></select></label>
           <label class="field transfer-field" hidden><span>To account</span><select id="transferToAccount"></select></label>
-          <label class="field expense-income-field"><span id="categoryLabel">Expense category</span><select id="entryCategory"></select></label>
+          <label class="field expense-income-field" id="entryCategoryField"><span id="categoryLabel">Expense category</span><select id="entryCategory"></select></label>
+          <label class="check-field full-width expense-income-field split-toggle"><input id="entrySplitEnabled" type="checkbox" /><span><strong>Split this transaction across categories</strong><small>Keep one account transaction while dividing the amount between two or more categories.</small></span></label>
+          <div class="split-editor full-width expense-income-field" id="entrySplitEditor" hidden>
+            <div class="split-editor-heading"><div><strong>Category splits</strong><span>The split total must equal the transaction amount.</span></div><button class="secondary-button" id="addSplitRowButton" type="button">+ Add category</button></div>
+            <div class="split-rows" id="entrySplitRows"></div>
+            <div class="split-summary" id="entrySplitSummary"><span>Split total: <strong id="entrySplitTotal">AED 0.00</strong></span><span id="entrySplitRemaining">AED 0.00 remaining</span></div>
+          </div>
           <label class="field full-width"><span>Description</span><input id="entryDescription" type="text" maxlength="120" placeholder="e.g. Weekly groceries" /></label>
           <label class="field full-width"><span>Remarks / comments</span><textarea id="entryRemarks" maxlength="2000" rows="3" placeholder="Optional notes, reference number, who joined, or anything else to remember"></textarea></label>
           <div class="field full-width receipt-field">
@@ -619,7 +625,7 @@
       <div class="import-guide">
         <div>
           <strong>Use the Ledgerly column format</strong>
-          <p>Import the first worksheet from an Excel or CSV file. Dates should preferably use <code>YYYY-MM-DD</code>. Type, category, and account may be left blank when a matching import rule or fallback option can supply them.</p>
+          <p>Import the first worksheet from an Excel or CSV file. Dates should preferably use <code>YYYY-MM-DD</code>. Type, category, and account may be left blank when a matching import rule or fallback option can supply them. Split transactions can use the optional <code>Split Details</code> column.</p>
         </div>
         <div class="button-row import-template-buttons">
           <a class="secondary-button" href="templates/ledgerly-transaction-import-template.csv" download>Download CSV template</a>
@@ -628,7 +634,7 @@
       </div>
 
       <div class="import-rules-grid">
-        <div><strong>Expense / Income</strong><span>Use Date, Type, Amount, Description, Remarks, Category, and Account.</span></div>
+        <div><strong>Expense / Income</strong><span>Use Category for a normal entry, or Split Details such as <code>Groceries=120 | Household=30</code>.</span></div>
         <div><strong>Transfer</strong><span>Use Date, Type, Amount, Description, Remarks, From Account, and To Account.</span></div>
       </div>
 
@@ -671,6 +677,6 @@
   </div>
 
   <div class="toast" id="toast" role="status" aria-live="polite"></div>
-  <script type="module" src="app.js?v=9"></script>
+  <script type="module" src="app.js?v=10"></script>
 </body>
 </html>

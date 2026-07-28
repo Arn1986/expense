@@ -199,6 +199,18 @@ function bindEvents() {
 
   el.authForm.addEventListener("input", () => showAuthError(""));
   el.transactionForm.addEventListener("submit", handleTransactionSubmit);
+  el.entryAmount.addEventListener("input", updateSplitSummary);
+  el.entrySplitEnabled.addEventListener("change", () => setSplitMode(el.entrySplitEnabled.checked));
+  el.addSplitRowButton.addEventListener("click", () => addSplitRow());
+  el.entrySplitRows.addEventListener("input", updateSplitSummary);
+  el.entrySplitRows.addEventListener("change", updateSplitSummary);
+  el.entrySplitRows.addEventListener("click", (event) => {
+    const button = event.target.closest("[data-remove-split]");
+    if (!button) return;
+    button.closest(".split-row")?.remove();
+    ensureMinimumSplitRows();
+    updateSplitSummary();
+  });
   el.entryReceipt.addEventListener("change", handleReceiptSelection);
   el.viewReceiptButton.addEventListener("click", viewReceiptFromForm);
   el.removeReceiptButton.addEventListener("click", removeReceiptFromForm);
@@ -355,10 +367,11 @@ function setAuthBusy(busy) {
 function showAuthError(message) { el.authError.textContent = message; }
 
 async function loadCloudState() {
-  const [accountsResult, categoriesResult, transactionsResult, budgetsResult, recurringResult, reconciliationsResult, clearingsResult, cardStatementsResult, importRulesResult] = await Promise.all([
+  const [accountsResult, categoriesResult, transactionsResult, transactionSplitsResult, budgetsResult, recurringResult, reconciliationsResult, clearingsResult, cardStatementsResult, importRulesResult] = await Promise.all([
     supabase.from("accounts").select("*").order("created_at", { ascending: true }),
     supabase.from("categories").select("*").order("kind").order("name"),
     supabase.from("transactions").select("*").order("entry_date", { ascending: false }).order("created_at", { ascending: false }),
+    supabase.from("transaction_splits").select("*").order("created_at", { ascending: true }),
     supabase.from("budgets").select("*").order("created_at", { ascending: true }),
     supabase.from("recurring_entries").select("*").order("created_at", { ascending: true }),
     supabase.from("reconciliations").select("*").order("statement_date", { ascending: false }).order("completed_at", { ascending: false }),
@@ -366,14 +379,15 @@ async function loadCloudState() {
     supabase.from("credit_card_statements").select("*").order("statement_date", { ascending: false }),
     supabase.from("import_rules").select("*").order("priority", { ascending: true }).order("created_at", { ascending: true }),
   ]);
-  [accountsResult, categoriesResult, transactionsResult, budgetsResult, recurringResult, reconciliationsResult, clearingsResult, cardStatementsResult, importRulesResult].forEach((result) => {
+  [accountsResult, categoriesResult, transactionsResult, transactionSplitsResult, budgetsResult, recurringResult, reconciliationsResult, clearingsResult, cardStatementsResult, importRulesResult].forEach((result) => {
     if (result.error) throw result.error;
   });
   state = {
-    version: 6,
+    version: 7,
     accounts: accountsResult.data || [],
     categories: categoriesResult.data || [],
     transactions: transactionsResult.data || [],
+    transactionSplits: transactionSplitsResult.data || [],
     budgets: budgetsResult.data || [],
     recurringEntries: recurringResult.data || [],
     reconciliations: reconciliationsResult.data || [],
@@ -391,15 +405,16 @@ async function seedDefaultCategories() {
 }
 
 function emptyState() {
-  return { version: 6, accounts: [], categories: [], transactions: [], budgets: [], recurringEntries: [], reconciliations: [], transactionClearings: [], creditCardStatements: [], importRules: [] };
+  return { version: 7, accounts: [], categories: [], transactions: [], transactionSplits: [], budgets: [], recurringEntries: [], reconciliations: [], transactionClearings: [], creditCardStatements: [], importRules: [] };
 }
 
 function normalizeState(value) {
   return {
-    version: 6,
+    version: 7,
     accounts: Array.isArray(value?.accounts) ? value.accounts : [],
     categories: Array.isArray(value?.categories) ? value.categories : [],
     transactions: Array.isArray(value?.transactions) ? value.transactions : [],
+    transactionSplits: Array.isArray(value?.transactionSplits) ? value.transactionSplits : Array.isArray(value?.transaction_splits) ? value.transaction_splits : [],
     budgets: Array.isArray(value?.budgets) ? value.budgets : [],
     recurringEntries: Array.isArray(value?.recurringEntries) ? value.recurringEntries : Array.isArray(value?.recurring_entries) ? value.recurring_entries : [],
     reconciliations: Array.isArray(value?.reconciliations) ? value.reconciliations : [],
@@ -411,7 +426,7 @@ function normalizeState(value) {
 
 function defaultLocalState() {
   return {
-    version: 6,
+    version: 7,
     accounts: [
       localRow({ name: "Current Account", type: "current", opening_balance: 0, color: ACCOUNT_COLORS.current, include_in_net_worth: true }),
       localRow({ name: "Savings", type: "savings", opening_balance: 0, color: ACCOUNT_COLORS.savings, include_in_net_worth: true }),
@@ -419,6 +434,7 @@ function defaultLocalState() {
     ],
     categories: defaultCategoryRows().map(localRow),
     transactions: [],
+    transactionSplits: [],
     budgets: [],
     recurringEntries: [],
     reconciliations: [],
@@ -495,7 +511,7 @@ function migrateLegacyState(legacy) {
       to_account_id: transaction.toAccountId || transaction.to_account_id || null,
     });
   });
-  return { version: 6, accounts, categories, transactions, budgets: [], recurringEntries: [], reconciliations: [], transactionClearings: [], creditCardStatements: [], importRules: [] };
+  return { version: 7, accounts, categories, transactions, transactionSplits: [], budgets: [], recurringEntries: [], reconciliations: [], transactionClearings: [], creditCardStatements: [], importRules: [] };
 }
 
 function persistLocal() {
@@ -917,7 +933,7 @@ function renderAllTransactions() {
   const account = el.transactionAccountFilter.value || "all";
   const month = el.transactionMonthFilter.value || "";
   const items = sortedTransactions().filter((transaction) => {
-    const category = categoryById(transaction.category_id)?.name || "";
+    const category = transactionCategorySearchText(transaction);
     const accountText = transactionAccountText(transaction);
     const matchesSearch = !search || [transaction.description, transaction.remarks, category, accountText].some((value) => String(value || "").toLowerCase().includes(search));
     const matchesType = type === "all" || transaction.type === type;
@@ -931,8 +947,10 @@ function renderAllTransactions() {
 function transactionListHTML(items, showActions) {
   return `<div class="transaction-list">${items.map((transaction) => {
     const category = categoryById(transaction.category_id);
-    const title = transaction.description || (transaction.type === "transfer" ? "Account transfer" : category?.name || capitalize(transaction.type));
-    const subtitle = transaction.type === "transfer" ? transactionAccountText(transaction) : `${category?.name || "Uncategorized"} · ${transactionAccountText(transaction)}`;
+    const splitCount = splitsForTransaction(transaction.id).length;
+    const categorySummary = transactionCategorySummary(transaction);
+    const title = transaction.description || (transaction.type === "transfer" ? "Account transfer" : splitCount ? "Split transaction" : category?.name || capitalize(transaction.type));
+    const subtitle = transaction.type === "transfer" ? transactionAccountText(transaction) : `${categorySummary} · ${transactionAccountText(transaction)}`;
     const sign = transaction.type === "expense" ? "−" : transaction.type === "income" ? "+" : "";
     const remarks = String(transaction.remarks || "").trim();
     const reconciliationBadge = transactionReconciliationBadgeHTML(transaction);
@@ -940,7 +958,7 @@ function transactionListHTML(items, showActions) {
     return `<div class="transaction-row">
       <div class="transaction-main">
         <span class="transaction-icon ${transaction.type}">${transaction.type === "expense" ? "↓" : transaction.type === "income" ? "↑" : "⇄"}</span>
-        <div style="min-width:0"><div class="transaction-title">${escapeHTML(title)}</div><div class="transaction-subtitle">${escapeHTML(subtitle)}${transaction.recurring_entry_id ? ' · <span class="recurring-indicator">Recurring</span>' : ""}${transaction.receipt_path ? ' · <span class="receipt-indicator">Receipt</span>' : ""}${reconciliationBadge}</div>${remarks ? `<div class="transaction-remarks">${escapeHTML(remarks)}</div>` : ""}</div>
+        <div style="min-width:0"><div class="transaction-title">${escapeHTML(title)}</div><div class="transaction-subtitle">${escapeHTML(subtitle)}${splitCount ? ` · <span class="split-indicator">${splitCount} splits</span>` : ""}${transaction.recurring_entry_id ? ' · <span class="recurring-indicator">Recurring</span>' : ""}${transaction.receipt_path ? ' · <span class="receipt-indicator">Receipt</span>' : ""}${reconciliationBadge}</div>${remarks ? `<div class="transaction-remarks">${escapeHTML(remarks)}</div>` : ""}</div>
       </div>
       <div class="transaction-meta account-column">${escapeHTML(transactionAccountText(transaction))}</div>
       <div class="transaction-meta">${formatDate(transaction.entry_date)}</div>
@@ -1051,10 +1069,11 @@ function reconciliationTransactionHTML(transaction, accountId) {
   const checked = Boolean(clearing?.is_cleared);
   const effect = transactionEffectForAccount(transaction, accountId);
   const category = categoryById(transaction.category_id);
-  const title = transaction.description || (transaction.type === "transfer" ? "Account transfer" : category?.name || capitalize(transaction.type));
+  const splitCount = splitsForTransaction(transaction.id).length;
+  const title = transaction.description || (transaction.type === "transfer" ? "Account transfer" : splitCount ? "Split transaction" : category?.name || capitalize(transaction.type));
   const subtitle = transaction.type === "transfer"
     ? reconciliationTransferText(transaction, accountId)
-    : `${category?.name || "Uncategorized"} · ${formatDate(transaction.entry_date)}`;
+    : `${transactionCategorySummary(transaction)} · ${formatDate(transaction.entry_date)}`;
   const reconciliation = reconciled ? reconciliationById(clearing.reconciliation_id) : null;
   const status = reconciled
     ? `<span class="reconciliation-row-status reconciled">Reconciled ${reconciliation ? formatDate(reconciliation.statement_date) : ""}</span>`
@@ -2130,8 +2149,115 @@ function renderSelectors() {
 function renderEntryCategories(type) {
   if (type === "transfer") return;
   const previous = el.entryCategory.value;
-  el.entryCategory.innerHTML = state.categories.filter((category) => category.kind === type).sort((a, b) => a.name.localeCompare(b.name)).map((category) => `<option value="${category.id}">${escapeHTML(category.name)}</option>`).join("") || `<option value="">No ${type} categories</option>`;
+  el.entryCategory.innerHTML = entryCategoryOptionsHTML(type);
   if ([...el.entryCategory.options].some((option) => option.value === previous)) el.entryCategory.value = previous;
+  refreshSplitCategoryOptions(type);
+}
+
+function entryCategoryOptionsHTML(type, selected = "") {
+  const categories = state.categories.filter((category) => category.kind === type).sort((a, b) => a.name.localeCompare(b.name));
+  return categories.length
+    ? categories.map((category) => `<option value="${category.id}" ${category.id === selected ? "selected" : ""}>${escapeHTML(category.name)}</option>`).join("")
+    : `<option value="">No ${type} categories</option>`;
+}
+
+function refreshSplitCategoryOptions(type = el.entryType.value) {
+  if (type === "transfer" || !el.entrySplitRows) return;
+  el.entrySplitRows.querySelectorAll(".split-category").forEach((select) => {
+    const current = select.value;
+    select.innerHTML = entryCategoryOptionsHTML(type, current);
+    if ([...select.options].some((option) => option.value === current)) select.value = current;
+  });
+}
+
+function splitsForTransaction(transactionId) {
+  return state.transactionSplits.filter((split) => split.transaction_id === transactionId).sort((a, b) => String(a.created_at || "").localeCompare(String(b.created_at || "")));
+}
+
+function transactionAllocations(transaction) {
+  const splits = splitsForTransaction(transaction.id);
+  if (splits.length) return splits.map((split) => ({ category_id: split.category_id, amount: number(split.amount) }));
+  return transaction.category_id ? [{ category_id: transaction.category_id, amount: number(transaction.amount) }] : [];
+}
+
+function transactionCategorySearchText(transaction) {
+  return transactionAllocations(transaction).map((allocation) => categoryById(allocation.category_id)?.name || "Uncategorized").join(" ");
+}
+
+function transactionCategorySummary(transaction) {
+  const allocations = transactionAllocations(transaction);
+  if (!allocations.length) return "Uncategorized";
+  if (allocations.length === 1) return categoryById(allocations[0].category_id)?.name || "Uncategorized";
+  const visible = allocations.slice(0, 3).map((allocation) => `${categoryById(allocation.category_id)?.name || "Uncategorized"} ${formatMoneyText(allocation.amount)}`);
+  return `Split: ${visible.join(" + ")}${allocations.length > 3 ? ` + ${allocations.length - 3} more` : ""}`;
+}
+
+function setSplitMode(enabled, rows = null) {
+  const type = el.entryType.value;
+  const active = Boolean(enabled && type !== "transfer");
+  el.entrySplitEnabled.checked = active;
+  el.entryCategoryField.hidden = type === "transfer" || active;
+  el.entrySplitEditor.hidden = !active;
+  if (active) {
+    if (rows) {
+      el.entrySplitRows.innerHTML = "";
+      rows.forEach((row) => addSplitRow(row, true));
+    }
+    ensureMinimumSplitRows();
+    refreshSplitCategoryOptions(type);
+  }
+  updateSplitSummary();
+}
+
+function addSplitRow(row = {}, deferSummary = false) {
+  const type = el.entryType.value;
+  if (type === "transfer") return;
+  const wrapper = document.createElement("div");
+  wrapper.className = "split-row";
+  wrapper.innerHTML = `<label class="field"><span>Category</span><select class="split-category">${entryCategoryOptionsHTML(type, row.category_id || "")}</select></label><label class="field"><span>Amount</span><div class="money-input"><span class="aed-symbol" aria-hidden="true"></span><input class="split-amount" type="number" min="0.01" step="0.01" inputmode="decimal" value="${row.amount ? escapeHTML(number(row.amount).toFixed(2)) : ""}" placeholder="0.00" /></div></label><button class="row-action danger split-remove" type="button" data-remove-split aria-label="Remove split">×</button>`;
+  el.entrySplitRows.append(wrapper);
+  if (!deferSummary) updateSplitSummary();
+}
+
+function ensureMinimumSplitRows() {
+  if (!el.entrySplitEnabled.checked || el.entryType.value === "transfer") return;
+  while (el.entrySplitRows.children.length < 2) addSplitRow();
+  el.entrySplitRows.querySelectorAll("[data-remove-split]").forEach((button) => { button.disabled = el.entrySplitRows.children.length <= 2; });
+}
+
+function collectSplitRows() {
+  if (!el.entrySplitEnabled.checked || el.entryType.value === "transfer") return [];
+  const rows = [...el.entrySplitRows.querySelectorAll(".split-row")].map((row) => ({
+    category_id: row.querySelector(".split-category")?.value || "",
+    amount: roundMoney(row.querySelector(".split-amount")?.value),
+  }));
+  if (rows.length < 2) throw new Error("Add at least two category splits.");
+  if (rows.some((row) => !row.category_id)) throw new Error("Choose a category for every split.");
+  if (rows.some((row) => !(row.amount > 0))) throw new Error("Every split amount must be greater than zero.");
+  if (new Set(rows.map((row) => row.category_id)).size !== rows.length) throw new Error("Use each category only once in a split transaction.");
+  const type = el.entryType.value;
+  if (rows.some((row) => categoryById(row.category_id)?.kind !== type)) throw new Error(`Every split must use an ${type} category.`);
+  const total = roundMoney(rows.reduce((sum, row) => sum + row.amount, 0));
+  const transactionAmount = roundMoney(el.entryAmount.value);
+  if (Math.abs(total - transactionAmount) >= 0.005) throw new Error(`Split amounts must equal ${formatMoneyText(transactionAmount)}. ${formatMoneyText(transactionAmount - total)} remains.`);
+  return rows;
+}
+
+function updateSplitSummary() {
+  if (!el.entrySplitSummary) return;
+  const total = roundMoney([...el.entrySplitRows.querySelectorAll(".split-amount")].reduce((sum, input) => sum + number(input.value), 0));
+  const amount = roundMoney(el.entryAmount.value);
+  const remaining = roundMoney(amount - total);
+  const balanced = amount > 0 && Math.abs(remaining) < 0.005;
+  el.entrySplitSummary.classList.toggle("balanced", balanced);
+  el.entrySplitSummary.classList.toggle("unbalanced", !balanced && el.entrySplitEnabled.checked);
+  el.entrySplitTotal.textContent = formatMoneyText(total);
+  el.entrySplitRemaining.textContent = balanced ? "Balanced" : `${formatMoneyText(remaining)} remaining`;
+  ensureMinimumSplitRows();
+}
+
+function roundMoney(value) {
+  return Math.round(number(value) * 100) / 100;
 }
 
 function renderRecurringCategories(type) {
@@ -2149,6 +2275,8 @@ function setEntryType(type) {
   el.accountLabel.textContent = type === "income" ? "Add to account" : "Pay from account";
   el.categoryLabel.textContent = type === "income" ? "Income category" : "Expense category";
   renderEntryCategories(type);
+  if (type === "transfer") setSplitMode(false);
+  else setSplitMode(el.entrySplitEnabled.checked);
 }
 
 function openTransactionModal(id = null, presetDate = "") {
@@ -2156,6 +2284,8 @@ function openTransactionModal(id = null, presetDate = "") {
   clearReceiptFormState();
   el.transactionForm.reset();
   el.transactionId.value = "";
+  el.entrySplitRows.innerHTML = "";
+  el.entrySplitEnabled.checked = false;
   el.entryDate.value = presetDate || todayISO();
   el.transactionFormError.textContent = "";
   el.receiptFileHelp.textContent = mode === "cloud"
@@ -2178,12 +2308,18 @@ function openTransactionModal(id = null, presetDate = "") {
       el.transferToAccount.value = transaction.to_account_id || "";
     } else {
       el.entryAccount.value = transaction.account_id || "";
-      el.entryCategory.value = transaction.category_id || "";
+      const splits = splitsForTransaction(transaction.id);
+      if (splits.length) setSplitMode(true, splits);
+      else {
+        el.entryCategory.value = transaction.category_id || "";
+        setSplitMode(false);
+      }
     }
     el.transactionModalTitle.textContent = "Edit entry";
     if (transaction.receipt_path) showExistingReceiptPreview(transaction);
   } else {
     setEntryType(type);
+    setSplitMode(false);
     el.transactionModalTitle.textContent = "Add entry";
   }
   openModal(el.transactionModal);
@@ -2198,6 +2334,7 @@ async function handleTransactionSubmit(event) {
   const amount = number(el.entryAmount.value);
   const remarks = el.entryRemarks.value.trim();
   const existing = id ? state.transactions.find((item) => item.id === id) : null;
+  let splitRows = [];
   const base = {
     type, amount, entry_date: el.entryDate.value, description: el.entryDescription.value.trim(), remarks,
     account_id: null, category_id: null, from_account_id: null, to_account_id: null,
@@ -2214,9 +2351,14 @@ async function handleTransactionSubmit(event) {
     if (base.from_account_id === base.to_account_id) return showFormError(el.transactionFormError, "Choose two different accounts.");
   } else {
     base.account_id = el.entryAccount.value;
-    base.category_id = el.entryCategory.value || null;
     if (!base.account_id) return showFormError(el.transactionFormError, "Choose an account.");
-    if (!base.category_id) return showFormError(el.transactionFormError, `Create or select an ${type} category.`);
+    try {
+      splitRows = collectSplitRows();
+    } catch (error) {
+      return showFormError(el.transactionFormError, friendlyError(error));
+    }
+    base.category_id = splitRows.length ? null : el.entryCategory.value || null;
+    if (!splitRows.length && !base.category_id) return showFormError(el.transactionFormError, `Create or select an ${type} category.`);
   }
 
   let newlyUploadedPath = "";
@@ -2233,6 +2375,7 @@ async function handleTransactionSubmit(event) {
       const updated = await updateRow("transactions", id, { ...base, ...receiptChanges });
       const mergedTransaction = { ...existing, ...updated };
       state.transactions = state.transactions.map((item) => item.id === id ? mergedTransaction : item);
+      await replaceTransactionSplits(id, splitRows);
       await cleanupTransactionClearingsForTransaction(id, mergedTransaction);
       if ((selectedReceiptFile || removeExistingReceipt) && existing?.receipt_path && existing.receipt_path !== updated.receipt_path) {
         await removeReceiptFile(existing.receipt_path, false);
@@ -2249,6 +2392,7 @@ async function handleTransactionSubmit(event) {
         inserted = { ...inserted, ...updated };
       }
       state.transactions.push(inserted);
+      await replaceTransactionSplits(inserted.id, splitRows);
       newlyInsertedId = "";
       newlyUploadedPath = "";
       showToast(selectedReceiptFile ? "Entry and receipt added." : "Entry added.");
@@ -2261,9 +2405,28 @@ async function handleTransactionSubmit(event) {
     if (newlyUploadedPath) await removeReceiptFile(newlyUploadedPath, false);
     if (newlyInsertedId) {
       try { await deleteRow("transactions", newlyInsertedId); } catch (rollbackError) { console.warn("Could not roll back transaction", rollbackError); }
+      state.transactionSplits = state.transactionSplits.filter((split) => split.transaction_id !== newlyInsertedId);
     }
     showFormError(el.transactionFormError, friendlyError(error));
   }
+}
+
+async function replaceTransactionSplits(transactionId, rows) {
+  const cleanRows = rows.map((row) => ({ category_id: row.category_id, amount: roundMoney(row.amount) }));
+  if (mode === "cloud") {
+    setSyncStatus("syncing", "Saving category splits");
+    const { data, error } = await supabase.rpc("replace_transaction_splits", {
+      p_transaction_id: transactionId,
+      p_splits: cleanRows,
+    });
+    if (error) throw error;
+    state.transactionSplits = state.transactionSplits.filter((split) => split.transaction_id !== transactionId);
+    state.transactionSplits.push(...(data || []));
+    setSyncStatus("cloud", "Cloud synchronized");
+    return;
+  }
+  state.transactionSplits = state.transactionSplits.filter((split) => split.transaction_id !== transactionId);
+  state.transactionSplits.push(...cleanRows.map((row) => localRow({ ...row, transaction_id: transactionId })));
 }
 
 function handleReceiptSelection(event) {
@@ -2904,7 +3067,7 @@ async function handleCategorySubmit(event) {
   const duplicate = state.categories.some((category) => category.id !== id && category.kind === row.kind && category.name.toLowerCase() === row.name.toLowerCase());
   if (duplicate) return showFormError(el.categoryFormError, "That category already exists for this entry type.");
   if (id) {
-    const usedByWrongType = state.transactions.some((transaction) => transaction.category_id === id && transaction.type !== row.kind) || state.recurringEntries.some((rule) => rule.category_id === id && rule.type !== row.kind) || state.importRules.some((rule) => rule.category_id === id && rule.transaction_type !== row.kind);
+    const usedByWrongType = state.transactions.some((transaction) => transaction.category_id === id && transaction.type !== row.kind) || state.transactionSplits.some((split) => split.category_id === id && state.transactions.find((transaction) => transaction.id === split.transaction_id)?.type !== row.kind) || state.recurringEntries.some((rule) => rule.category_id === id && rule.type !== row.kind) || state.importRules.some((rule) => rule.category_id === id && rule.transaction_type !== row.kind);
     if (usedByWrongType) return showFormError(el.categoryFormError, "The category type cannot change while entries use it.");
   }
   try {
@@ -2944,6 +3107,7 @@ async function deleteTransaction(id) {
   try {
     await deleteRow("transactions", id);
     state.transactions = state.transactions.filter((item) => item.id !== id);
+    state.transactionSplits = state.transactionSplits.filter((item) => item.transaction_id !== id);
     state.transactionClearings = state.transactionClearings.filter((item) => item.transaction_id !== id);
     const receiptRemoved = transaction?.receipt_path ? await removeReceiptFile(transaction.receipt_path, false) : true;
     persistLocal(); render();
@@ -2963,7 +3127,7 @@ async function deleteBudget(id) {
 async function deleteCategory(id) {
   const category = state.categories.find((item) => item.id === id);
   if (!category) return;
-  const inUse = state.transactions.some((transaction) => transaction.category_id === id) || state.budgets.some((budget) => budget.category_id === id) || state.recurringEntries.some((rule) => rule.category_id === id) || state.importRules.some((rule) => rule.category_id === id);
+  const inUse = state.transactions.some((transaction) => transaction.category_id === id) || state.transactionSplits.some((split) => split.category_id === id) || state.budgets.some((budget) => budget.category_id === id) || state.recurringEntries.some((rule) => rule.category_id === id) || state.importRules.some((rule) => rule.category_id === id);
   if (inUse) return showToast("Remove this category from transactions, budgets, recurring schedules, and import rules first.", true);
   if (!confirm(`Delete ${category.name}?`)) return;
   try {
@@ -2998,10 +3162,12 @@ function sumTransactions(transactions, type) {
 function categoryTotals(transactions) {
   const map = new Map();
   transactions.forEach((transaction) => {
-    const category = categoryById(transaction.category_id) || { id: "uncategorized", name: "Uncategorized", color: "#94a3b8" };
-    const current = map.get(category.id) || { id: category.id, name: category.name, color: category.color, amount: 0 };
-    current.amount += number(transaction.amount);
-    map.set(category.id, current);
+    transactionAllocations(transaction).forEach((allocation) => {
+      const category = categoryById(allocation.category_id) || { id: "uncategorized", name: "Uncategorized", color: "#94a3b8" };
+      const current = map.get(category.id) || { id: category.id, name: category.name, color: category.color, amount: 0 };
+      current.amount += number(allocation.amount);
+      map.set(category.id, current);
+    });
   });
   return [...map.values()].sort((a, b) => b.amount - a.amount);
 }
@@ -3018,7 +3184,9 @@ function categoryBarsHTML(items, emptyMessage) {
 
 function spendingForBudget(budget, anchorMonth) {
   const prefix = budget.period === "yearly" ? anchorMonth.slice(0, 4) : anchorMonth;
-  return state.transactions.filter((transaction) => transaction.type === "expense" && transaction.category_id === budget.category_id && transaction.entry_date?.startsWith(prefix)).reduce((sum, item) => sum + number(item.amount), 0);
+  return state.transactions
+    .filter((transaction) => transaction.type === "expense" && transaction.entry_date?.startsWith(prefix))
+    .reduce((sum, transaction) => sum + transactionAllocations(transaction).filter((allocation) => allocation.category_id === budget.category_id).reduce((allocationSum, allocation) => allocationSum + number(allocation.amount), 0), 0);
 }
 
 function budgetMetrics(period, anchorMonth) {
@@ -3371,7 +3539,7 @@ function applyImportRule(source, normalized) {
     if (!normalized.fromAccountName) normalized.fromAccountName = accountById(rule.from_account_id)?.name || "";
     if (!normalized.toAccountName) normalized.toAccountName = accountById(rule.to_account_id)?.name || "";
   } else {
-    if (!normalized.categoryName) normalized.categoryName = categoryById(rule.category_id)?.name || "";
+    if (!normalized.splitItems?.length && !normalized.categoryName) normalized.categoryName = categoryById(rule.category_id)?.name || "";
     if (!normalized.accountName) normalized.accountName = accountById(rule.account_id)?.name || "";
   }
   return rule;
@@ -3448,11 +3616,12 @@ async function readTransactionImportFile(file) {
     description: row[indexByKey.description] ?? "",
     remarks: row[indexByKey.remarks] ?? "",
     category: row[indexByKey.category] ?? "",
+    splitDetails: row[indexByKey.splitDetails] ?? "",
     account: row[indexByKey.account] ?? "",
     fromAccount: row[indexByKey.fromAccount] ?? "",
     toAccount: row[indexByKey.toAccount] ?? "",
     currency: row[indexByKey.currency] ?? "",
-  })).filter((row) => [row.date, row.type, row.amount, row.description, row.remarks, row.category, row.account, row.fromAccount, row.toAccount, row.currency].some((value) => String(value ?? "").trim()));
+  })).filter((row) => [row.date, row.type, row.amount, row.description, row.remarks, row.category, row.splitDetails, row.account, row.fromAccount, row.toAccount, row.currency].some((value) => String(value ?? "").trim()));
 }
 
 function normalizeImportHeader(value) {
@@ -3464,6 +3633,7 @@ function normalizeImportHeader(value) {
     description: "description", details: "description", memo: "description", narrative: "description",
     remarks: "remarks", remark: "remarks", comments: "remarks", comment: "remarks", notes: "remarks", note: "remarks",
     category: "category", categoryname: "category",
+    splitdetails: "splitDetails", splits: "splitDetails", splitcategories: "splitDetails", categorysplits: "splitDetails",
     account: "account", accountname: "account",
     fromaccount: "fromAccount", sourceaccount: "fromAccount", from: "fromAccount",
     toaccount: "toAccount", destinationaccount: "toAccount", to: "toAccount",
@@ -3501,6 +3671,9 @@ function validateTransactionImport() {
       description,
       remarks,
       categoryName: String(source.category ?? "").trim(),
+      splitDetails: String(source.splitDetails ?? "").trim(),
+      splitItems: [],
+      splitCreateCategories: [],
       accountName: String(source.account ?? "").trim(),
       fromAccountName: String(source.fromAccount ?? "").trim(),
       toAccountName: String(source.toAccount ?? "").trim(),
@@ -3508,6 +3681,11 @@ function validateTransactionImport() {
       matchedRuleId: null,
       matchedRuleName: "",
     };
+
+    const parsedSplits = parseImportSplits(normalized.splitDetails);
+    normalized.splitItems = parsedSplits.items;
+    if (normalized.splitItems.length) normalized.splitDetails = normalized.splitItems.map((split) => `${split.categoryName}=${number(split.amount).toFixed(2)}`).sort().join("|");
+    errors.push(...parsedSplits.errors);
 
     const matchedRule = applyImportRule(source, normalized);
     if (matchedRule) {
@@ -3531,12 +3709,26 @@ function validateTransactionImport() {
       const account = accountMap.get(normalizeLookup(normalized.accountName));
       if (!normalized.accountName) errors.push("Account is required.");
       else if (!account) errors.push(`Account “${normalized.accountName}” does not exist.`);
-      const categoryKey = `${normalized.type}:${normalizeLookup(normalized.categoryName)}`;
-      const category = categoryMap.get(categoryKey);
-      if (!normalized.categoryName) errors.push("Category is required.");
-      else if (normalized.categoryName.length > 50) errors.push("Category is longer than 50 characters.");
-      else if (!category && !createCategories) errors.push(`${capitalize(normalized.type)} category “${normalized.categoryName}” does not exist.`);
-      else if (!category) normalized.createCategory = true;
+      if (normalized.splitItems.length) {
+        if (normalized.splitItems.length < 2) errors.push("Split Details must contain at least two category amounts.");
+        const splitTotal = roundMoney(normalized.splitItems.reduce((sum, split) => sum + split.amount, 0));
+        if (Math.abs(splitTotal - amount) >= 0.005) errors.push(`Split Details total ${formatMoneyText(splitTotal)} does not equal transaction amount ${formatMoneyText(amount)}.`);
+        const names = normalized.splitItems.map((split) => normalizeLookup(split.categoryName));
+        if (new Set(names).size !== names.length) errors.push("Split Details cannot repeat the same category.");
+        normalized.splitItems.forEach((split) => {
+          if (split.categoryName.length > 50) errors.push(`Split category “${split.categoryName}” is longer than 50 characters.`);
+          const key = `${normalized.type}:${normalizeLookup(split.categoryName)}`;
+          if (!categoryMap.has(key) && !createCategories) errors.push(`${capitalize(normalized.type)} category “${split.categoryName}” does not exist.`);
+          else if (!categoryMap.has(key)) normalized.splitCreateCategories.push(split.categoryName);
+        });
+      } else {
+        const categoryKey = `${normalized.type}:${normalizeLookup(normalized.categoryName)}`;
+        const category = categoryMap.get(categoryKey);
+        if (!normalized.categoryName) errors.push("Category is required when Split Details is blank.");
+        else if (normalized.categoryName.length > 50) errors.push("Category is longer than 50 characters.");
+        else if (!category && !createCategories) errors.push(`${capitalize(normalized.type)} category “${normalized.categoryName}” does not exist.`);
+        else if (!category) normalized.createCategory = true;
+      }
     } else if (normalized.type === "transfer") {
       normalized.fromAccountName = normalized.fromAccountName || fallbackAccount?.name || "";
       const fromAccount = accountMap.get(normalizeLookup(normalized.fromAccountName));
@@ -3578,9 +3770,12 @@ function renderTransactionImportPreview() {
         <tbody>${previewRows.map((row, index) => {
           const route = row.normalized.type === "transfer"
             ? `${row.normalized.fromAccountName || "—"} → ${row.normalized.toAccountName || "—"}`
-            : `${row.normalized.categoryName || "—"} · ${row.normalized.accountName || "—"}`;
-          const detail = row.errors.length ? row.errors.join(" ") : row.status === "duplicate" ? "Already in Ledgerly or repeated in this file." : row.normalized.createCategory ? "Ready · new category will be created." : "Ready to import.";
-          const canCreateRule = Boolean(row.normalized.description && row.normalized.type && row.normalized.type !== "transfer" ? row.normalized.categoryName && row.normalized.accountName : row.normalized.type === "transfer" && row.normalized.fromAccountName && row.normalized.toAccountName);
+            : row.normalized.splitItems.length
+              ? `Split: ${row.normalized.splitItems.map((split) => `${split.categoryName} ${formatMoneyText(split.amount)}`).join(" + ")} · ${row.normalized.accountName || "—"}`
+              : `${row.normalized.categoryName || "—"} · ${row.normalized.accountName || "—"}`;
+          const createsCategory = row.normalized.createCategory || row.normalized.splitCreateCategories.length;
+          const detail = row.errors.length ? row.errors.join(" ") : row.status === "duplicate" ? "Already in Ledgerly or repeated in this file." : createsCategory ? "Ready · new category will be created." : "Ready to import.";
+          const canCreateRule = !row.normalized.splitItems.length && Boolean(row.normalized.description && row.normalized.type && row.normalized.type !== "transfer" ? row.normalized.categoryName && row.normalized.accountName : row.normalized.type === "transfer" && row.normalized.fromAccountName && row.normalized.toAccountName);
           const ruleCell = row.normalized.matchedRuleName ? `<span class="matched-rule-chip">⚡ ${escapeHTML(row.normalized.matchedRuleName)}</span>` : canCreateRule ? `<button class="text-button compact-rule-button" data-action="create-rule-from-import" data-index="${index}" type="button">+ Save rule</button>` : "—";
           return `<tr class="import-row-${row.status}"><td>${row.sourceRow}</td><td><span class="import-row-status ${row.status}">${capitalize(row.status)}</span><small>${escapeHTML(detail)}</small></td><td>${escapeHTML(row.normalized.entry_date || String(row.source.date ?? ""))}</td><td>${escapeHTML(capitalize(row.normalized.type || String(row.source.type ?? "")))}</td><td>${escapeHTML(row.normalized.description || "—")}</td><td>${escapeHTML(route)}</td><td>${row.normalized.amount > 0 ? formatMoneyHTML(row.normalized.amount) : escapeHTML(String(row.source.amount ?? ""))}</td><td>${ruleCell}</td></tr>`;
         }).join("")}</tbody>
@@ -3603,22 +3798,27 @@ async function importValidatedTransactions() {
     const missingCategories = [];
     const missingKeys = new Set();
     for (const row of ready) {
-      if (!row.normalized.createCategory) continue;
-      const key = `${row.normalized.type}:${normalizeLookup(row.normalized.categoryName)}`;
-      if (missingKeys.has(key)) continue;
-      missingKeys.add(key);
-      missingCategories.push({
-        kind: row.normalized.type,
-        name: row.normalized.categoryName,
-        color: importCategoryColor(row.normalized.categoryName),
-      });
+      const names = [row.normalized.createCategory ? row.normalized.categoryName : "", ...row.normalized.splitCreateCategories].filter(Boolean);
+      for (const name of names) {
+        const key = `${row.normalized.type}:${normalizeLookup(name)}`;
+        if (missingKeys.has(key)) continue;
+        missingKeys.add(key);
+        missingCategories.push({
+          kind: row.normalized.type,
+          name,
+          color: importCategoryColor(name),
+        });
+      }
     }
     if (missingCategories.length) await insertImportedCategories(missingCategories);
 
     const accountMap = new Map(state.accounts.map((account) => [normalizeLookup(account.name), account]));
     const categoryMap = new Map(state.categories.map((category) => [`${category.kind}:${normalizeLookup(category.name)}`, category]));
+    const importedSplits = [];
     const transactionRows = ready.map(({ normalized }) => {
+      const id = crypto.randomUUID();
       const base = {
+        id,
         type: normalized.type,
         amount: normalized.amount,
         entry_date: normalized.entry_date,
@@ -3634,11 +3834,19 @@ async function importValidatedTransactions() {
         base.to_account_id = accountMap.get(normalizeLookup(normalized.toAccountName)).id;
       } else {
         base.account_id = accountMap.get(normalizeLookup(normalized.accountName)).id;
-        base.category_id = categoryMap.get(`${normalized.type}:${normalizeLookup(normalized.categoryName)}`).id;
+        if (normalized.splitItems.length) {
+          normalized.splitItems.forEach((split) => importedSplits.push({
+            transaction_id: id,
+            category_id: categoryMap.get(`${normalized.type}:${normalizeLookup(split.categoryName)}`).id,
+            amount: split.amount,
+          }));
+        } else {
+          base.category_id = categoryMap.get(`${normalized.type}:${normalizeLookup(normalized.categoryName)}`).id;
+        }
       }
       return base;
     });
-    await insertImportedTransactions(transactionRows);
+    await insertImportedTransactions(transactionRows, importedSplits);
     persistLocal();
     render();
     closeModal(el.transactionImportModal);
@@ -3661,18 +3869,53 @@ async function insertImportedCategories(rows) {
   }
 }
 
-async function insertImportedTransactions(rows) {
+async function insertImportedTransactions(rows, splitRows = []) {
   if (mode === "cloud") {
     setSyncStatus("syncing", "Importing transactions");
-    for (const batch of chunk(rows, 200)) {
-      const { data, error } = await supabase.from("transactions").insert(batch.map((row) => ({ ...row, user_id: user.id }))).select();
-      if (error) throw error;
-      state.transactions.push(...(data || []));
+    const insertedIds = [];
+    try {
+      for (const batch of chunk(rows, 200)) {
+        const { data, error } = await supabase.from("transactions").insert(batch.map((row) => ({ ...row, user_id: user.id }))).select();
+        if (error) throw error;
+        state.transactions.push(...(data || []));
+        insertedIds.push(...(data || []).map((row) => row.id));
+      }
+      for (const batch of chunk(splitRows, 500)) {
+        const { data, error } = await supabase.from("transaction_splits").insert(batch.map((row) => ({ ...row, user_id: user.id }))).select();
+        if (error) throw error;
+        state.transactionSplits.push(...(data || []));
+      }
+      setSyncStatus("cloud", "Cloud synchronized");
+    } catch (error) {
+      if (insertedIds.length) await supabase.from("transactions").delete().in("id", insertedIds);
+      state.transactions = state.transactions.filter((transaction) => !insertedIds.includes(transaction.id));
+      state.transactionSplits = state.transactionSplits.filter((split) => !insertedIds.includes(split.transaction_id));
+      throw error;
     }
-    setSyncStatus("cloud", "Cloud synchronized");
   } else {
     state.transactions.push(...rows.map(localRow));
+    state.transactionSplits.push(...splitRows.map(localRow));
   }
+}
+
+function parseImportSplits(value) {
+  const raw = String(value || "").trim();
+  if (!raw) return { items: [], errors: [] };
+  const items = [];
+  const errors = [];
+  const parts = raw.split(/\s*[|;]\s*/).filter(Boolean);
+  for (const part of parts) {
+    const match = part.match(/^(.+?)\s*(?:=|:)\s*(.+)$/);
+    if (!match) {
+      errors.push(`Invalid split “${part}”. Use Category=Amount separated by |.`);
+      continue;
+    }
+    const categoryName = match[1].trim();
+    const amount = parseImportAmount(match[2]);
+    if (!categoryName || !(amount > 0)) errors.push(`Invalid split “${part}”. Category and positive amount are required.`);
+    else items.push({ categoryName, amount });
+  }
+  return { items, errors };
 }
 
 function normalizeImportType(value) {
@@ -3739,6 +3982,7 @@ function transactionFingerprintFromState(transaction) {
     description: transaction.description || "",
     remarks: transaction.remarks || "",
     categoryName: categoryById(transaction.category_id)?.name || "",
+    splitDetails: splitsForTransaction(transaction.id).map((split) => `${categoryById(split.category_id)?.name || ""}=${number(split.amount).toFixed(2)}`).sort().join("|"),
     accountName: accountById(transaction.account_id)?.name || "",
     fromAccountName: accountById(transaction.from_account_id)?.name || "",
     toAccountName: accountById(transaction.to_account_id)?.name || "",
@@ -3753,6 +3997,7 @@ function transactionFingerprintFromImport(transaction) {
     normalizeLookup(transaction.description),
     normalizeLookup(transaction.remarks),
     normalizeLookup(transaction.categoryName),
+    normalizeLookup(transaction.splitDetails),
     normalizeLookup(transaction.accountName),
     normalizeLookup(transaction.fromAccountName),
     normalizeLookup(transaction.toAccountName),
@@ -3778,13 +4023,14 @@ function exportJSON() {
 }
 
 function exportCSV() {
-  const header = ["Date", "Type", "Description", "Remarks", "Category", "Account", "From account", "To account", "Amount", "Currency", "Cleared accounts", "Reconciled accounts", "Recurring schedule ID", "Scheduled date", "Receipt filename"];
+  const header = ["Date", "Type", "Description", "Remarks", "Category", "Split Details", "Account", "From account", "To account", "Amount", "Currency", "Cleared accounts", "Reconciled accounts", "Recurring schedule ID", "Scheduled date", "Receipt filename"];
   const rows = sortedTransactions().map((transaction) => [
     transaction.entry_date,
     transaction.type,
     transaction.description || "",
     transaction.remarks || "",
     categoryById(transaction.category_id)?.name || "",
+    splitsForTransaction(transaction.id).map((split) => `${categoryById(split.category_id)?.name || "Uncategorized"}=${number(split.amount).toFixed(2)}`).join(" | "),
     accountById(transaction.account_id)?.name || "",
     accountById(transaction.from_account_id)?.name || "",
     accountById(transaction.to_account_id)?.name || "",
@@ -3822,13 +4068,13 @@ async function importJSON(event) {
 
 async function replaceCloudState(imported) {
   setSyncStatus("syncing", "Restoring backup");
-  for (const table of ["transaction_clearings", "reconciliations", "credit_card_statements", "transactions", "budgets", "recurring_entries", "import_rules", "accounts", "categories"]) {
+  for (const table of ["transaction_clearings", "reconciliations", "credit_card_statements", "transaction_splits", "transactions", "budgets", "recurring_entries", "import_rules", "accounts", "categories"]) {
     const { error } = await supabase.from(table).delete().eq("user_id", user.id);
     if (error) throw error;
   }
   const clean = sanitizeImportedState(imported);
   const withUser = (rows) => rows.map((row) => ({ ...row, user_id: user.id }));
-  for (const [table, rows] of [["categories", clean.categories], ["accounts", clean.accounts], ["import_rules", clean.importRules], ["recurring_entries", clean.recurringEntries], ["budgets", clean.budgets], ["transactions", clean.transactions], ["credit_card_statements", clean.creditCardStatements], ["reconciliations", clean.reconciliations], ["transaction_clearings", clean.transactionClearings]]) {
+  for (const [table, rows] of [["categories", clean.categories], ["accounts", clean.accounts], ["import_rules", clean.importRules], ["recurring_entries", clean.recurringEntries], ["budgets", clean.budgets], ["transactions", clean.transactions], ["transaction_splits", clean.transactionSplits], ["credit_card_statements", clean.creditCardStatements], ["reconciliations", clean.reconciliations], ["transaction_clearings", clean.transactionClearings]]) {
     if (!rows.length) continue;
     const { error } = await supabase.from(table).insert(withUser(rows));
     if (error) throw error;
@@ -3845,10 +4091,11 @@ function sanitizeImportedState(imported) {
   };
   const clean = normalizeState(imported);
   return {
-    version: 6,
+    version: 7,
     accounts: clean.accounts.map(strip),
     categories: clean.categories.map(strip),
     transactions: clean.transactions.map(strip),
+    transactionSplits: clean.transactionSplits.map(strip),
     budgets: clean.budgets.map(strip),
     recurringEntries: clean.recurringEntries.map(strip),
     reconciliations: clean.reconciliations.map(strip),
@@ -3863,7 +4110,7 @@ async function resetApplication() {
   try {
     if (mode === "cloud") {
       setSyncStatus("syncing", "Resetting data");
-      for (const table of ["transaction_clearings", "reconciliations", "credit_card_statements", "transactions", "budgets", "recurring_entries", "import_rules", "accounts", "categories"]) {
+      for (const table of ["transaction_clearings", "reconciliations", "credit_card_statements", "transaction_splits", "transactions", "budgets", "recurring_entries", "import_rules", "accounts", "categories"]) {
         const { error } = await supabase.from(table).delete().eq("user_id", user.id);
         if (error) throw error;
       }

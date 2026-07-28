@@ -22,6 +22,13 @@
   --red-100: #fee2e2;
   --amber-700: #b45309;
   --amber-100: #fef3c7;
+  --border: var(--slate-200);
+  --surface: var(--white);
+  --surface-soft: var(--slate-50);
+  --muted: var(--slate-500);
+  --text: var(--slate-900);
+  --positive: var(--green-700);
+  --negative: var(--red-700);
   --radius-lg: 20px;
   --radius-md: 14px;
   --shadow: 0 16px 38px rgba(15, 23, 42, 0.07);
@@ -772,4 +779,65 @@ a.secondary-button { display: inline-flex; align-items: center; justify-content:
   .import-rule-example-grid { grid-template-columns: 1fr; }
   .import-rule-row { grid-template-columns: 42px minmax(0, 1fr); }
   .import-rule-row .row-actions { grid-column: 1 / -1; justify-content: flex-end; }
+}
+
+/* Split transactions */
+.split-toggle {
+  align-items: flex-start;
+  border: 1px solid var(--slate-200);
+  border-radius: 14px;
+  padding: 14px 16px;
+  background: var(--slate-50);
+}
+.split-toggle span { display: grid; gap: 3px; }
+.split-toggle small { color: var(--slate-500); font-weight: 500; line-height: 1.45; }
+.split-editor {
+  border: 1px solid var(--slate-200);
+  border-radius: 16px;
+  padding: 16px;
+  background: var(--slate-50);
+}
+.split-editor-heading,
+.split-summary {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+}
+.split-editor-heading > div { display: grid; gap: 3px; }
+.split-editor-heading span { color: var(--slate-500); font-size: .86rem; }
+.split-rows { display: grid; gap: 10px; margin: 14px 0; }
+.split-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(150px, .65fr) auto;
+  align-items: end;
+  gap: 10px;
+  padding: 12px;
+  border: 1px solid var(--slate-200);
+  border-radius: 13px;
+  background: var(--white);
+}
+.split-row .field { margin: 0; }
+.split-remove { margin-bottom: 5px; }
+.split-remove:disabled { opacity: .35; cursor: not-allowed; }
+.split-summary {
+  border-top: 1px solid var(--slate-200);
+  padding-top: 12px;
+  color: var(--slate-500);
+  font-size: .9rem;
+}
+.split-summary strong { color: var(--slate-900); }
+.split-summary.balanced #entrySplitRemaining { color: var(--green-700); font-weight: 750; }
+.split-summary.unbalanced #entrySplitRemaining { color: var(--red-700); font-weight: 750; }
+.split-indicator {
+  color: #7c3aed;
+  font-weight: 750;
+}
+
+@media (max-width: 640px) {
+  .split-editor-heading,
+  .split-summary { align-items: flex-start; flex-direction: column; }
+  .split-editor-heading .secondary-button { width: 100%; }
+  .split-row { grid-template-columns: 1fr auto; }
+  .split-row .field:first-child { grid-column: 1 / -1; }
 }
