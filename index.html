@@ -7,7 +7,8 @@
   <meta name="description" content="Ledgerly is a multi-account personal finance tracker with budgets, reports, and optional Supabase cloud sync." />
   <title>Ledgerly — Personal Finance</title>
   <link rel="manifest" href="manifest.webmanifest" />
-  <link rel="stylesheet" href="styles.css?v=3" />
+  <link rel="icon" type="image/png" href="assets/dirham-symbol.png" />
+  <link rel="stylesheet" href="styles.css?v=8" />
 </head>
 <body>
   <section class="auth-screen" id="authScreen">
@@ -67,7 +68,11 @@
       <nav class="nav" aria-label="Primary navigation">
         <button class="nav-item active" data-view="dashboard"><span>⌂</span> Dashboard</button>
         <button class="nav-item" data-view="accounts"><span>▣</span> Accounts</button>
+        <button class="nav-item" data-view="creditcards"><span>▤</span> Credit cards</button>
         <button class="nav-item" data-view="transactions"><span>↕</span> Transactions</button>
+        <button class="nav-item" data-view="reconcile"><span>✓</span> Reconcile</button>
+        <button class="nav-item" data-view="calendar"><span>▦</span> Calendar</button>
+        <button class="nav-item" data-view="recurring"><span>↻</span> Recurring</button>
         <button class="nav-item" data-view="budgets"><span>◎</span> Budgets</button>
         <button class="nav-item" data-view="reports"><span>⌁</span> Reports</button>
         <button class="nav-item" data-view="categories"><span>◇</span> Categories</button>
@@ -116,6 +121,14 @@
           </section>
         </div>
 
+        <section class="panel dashboard-credit-cards-panel" id="dashboardCreditCardsPanel" hidden>
+          <div class="panel-heading">
+            <div><p class="eyebrow">Cards</p><h2>Credit-card overview</h2></div>
+            <button class="text-button" data-go-to="creditcards">Manage cards</button>
+          </div>
+          <div id="dashboardCreditCards"></div>
+        </section>
+
         <div class="content-grid two-columns">
           <section class="panel">
             <div class="panel-heading">
@@ -150,7 +163,29 @@
         <div class="account-grid" id="accountsGrid"></div>
       </section>
 
+      <section class="view" id="creditcardsView">
+        <div class="section-toolbar">
+          <div>
+            <p class="section-copy">Track card limits, utilization, statement balances, minimum payments, due dates, and payment status. Card payments are recorded as transfers into the credit-card account.</p>
+            <p class="section-note">Ledgerly keeps account debt negative, while statement amounts are entered as positive amounts due.</p>
+          </div>
+          <button class="secondary-button" id="openCreditCardStatementButton" type="button">+ Add statement</button>
+        </div>
+        <div class="summary-grid" id="creditCardSummary"></div>
+        <div class="credit-card-grid" id="creditCardsGrid"></div>
+        <section class="panel credit-card-statements-panel">
+          <div class="panel-heading">
+            <div><p class="eyebrow">History</p><h2>Card statements</h2></div>
+          </div>
+          <div id="creditCardStatementsList"></div>
+        </section>
+      </section>
+
       <section class="view" id="transactionsView">
+        <div class="section-toolbar">
+          <p class="section-copy">Upload a standardized CSV or Excel file to add expenses, income, and transfers in bulk. Account and category names are matched case-insensitively.</p>
+          <button class="secondary-button" id="openTransactionImportButton" type="button">↑ Import CSV / Excel</button>
+        </div>
         <section class="panel">
           <div class="filters transaction-filters">
             <label><span>Search</span><input id="transactionSearch" type="search" placeholder="Description or category" /></label>
@@ -159,6 +194,104 @@
             <label><span>Month</span><input id="transactionMonthFilter" type="month" /></label>
           </div>
           <div id="allTransactions"></div>
+        </section>
+      </section>
+
+
+      <section class="view" id="calendarView">
+        <div class="calendar-toolbar">
+          <div class="calendar-navigation" aria-label="Calendar navigation">
+            <button class="icon-button" id="calendarPreviousMonth" type="button" aria-label="Previous month">‹</button>
+            <div class="calendar-month-copy"><p class="eyebrow">Calendar</p><h2 id="calendarMonthLabel"></h2></div>
+            <button class="icon-button" id="calendarNextMonth" type="button" aria-label="Next month">›</button>
+            <button class="secondary-button" id="calendarTodayButton" type="button">Today</button>
+          </div>
+          <label class="calendar-account-filter"><span>Account</span><select id="calendarAccountFilter"><option value="all">All accounts</option></select></label>
+        </div>
+
+        <div class="summary-grid calendar-summary-grid" id="calendarSummary"></div>
+
+        <section class="panel calendar-panel">
+          <div class="calendar-scroll">
+            <div class="calendar-weekdays" aria-hidden="true">
+              <span>Sun</span><span>Mon</span><span>Tue</span><span>Wed</span><span>Thu</span><span>Fri</span><span>Sat</span>
+            </div>
+            <div class="calendar-grid" id="calendarGrid" aria-label="Monthly transaction calendar"></div>
+          </div>
+        </section>
+
+        <section class="panel calendar-day-panel">
+          <div class="panel-heading calendar-day-heading">
+            <div><p class="eyebrow">Selected day</p><h2 id="calendarDayHeading"></h2></div>
+            <button class="primary-button" id="calendarAddEntryButton" type="button">+ Add entry for this day</button>
+          </div>
+          <div class="calendar-day-summary" id="calendarDaySummary"></div>
+          <div id="calendarDayTransactions"></div>
+        </section>
+      </section>
+
+      <section class="view" id="recurringView">
+        <div class="section-toolbar">
+          <div>
+            <p class="section-copy">Schedule salary, subscriptions, loan payments, bills, and transfers. Upcoming occurrences appear on the calendar; due entries can be posted automatically.</p>
+            <p class="section-note">A schedule may end on a selected date or continue until you pause or delete it.</p>
+          </div>
+          <button class="secondary-button" id="openRecurringButton" type="button">+ Add recurring entry</button>
+        </div>
+        <div class="summary-grid" id="recurringSummary"></div>
+        <section class="panel">
+          <div class="filters recurring-filters">
+            <label><span>Status</span><select id="recurringStatusFilter"><option value="all">All schedules</option><option value="active">Active</option><option value="paused">Paused</option></select></label>
+            <label><span>Type</span><select id="recurringTypeFilter"><option value="all">All types</option><option value="expense">Expenses</option><option value="income">Income</option><option value="transfer">Transfers</option></select></label>
+          </div>
+          <div id="recurringEntriesList"></div>
+        </section>
+      </section>
+
+      <section class="view" id="reconcileView">
+        <div class="section-toolbar">
+          <div>
+            <p class="section-copy">Compare Ledgerly with a bank or credit-card statement, mark the transactions that have cleared, and finish only when the difference is zero.</p>
+            <p class="section-note">For credit cards, enter the statement balance as a negative amount, matching the way the card balance appears in Ledgerly.</p>
+          </div>
+        </div>
+
+        <section class="panel reconciliation-setup-panel">
+          <div class="panel-heading">
+            <div><p class="eyebrow">Statement</p><h2>Reconcile an account</h2></div>
+            <div class="reconciliation-last-status" id="reconcileLastStatus"></div>
+          </div>
+          <div class="reconciliation-form-grid">
+            <label class="field"><span>Account</span><select id="reconcileAccount"></select></label>
+            <label class="field"><span>Statement ending date</span><input id="reconcileStatementDate" type="date" required /></label>
+            <label class="field"><span>Statement ending balance</span><div class="money-input"><span class="aed-symbol" aria-hidden="true"></span><input id="reconcileStatementBalance" type="number" step="0.01" inputmode="decimal" placeholder="0.00" /></div></label>
+            <label class="field reconciliation-notes-field"><span>Statement note <span class="optional-label">Optional</span></span><input id="reconcileNotes" type="text" maxlength="300" placeholder="e.g. Visa statement ending August 2026" /></label>
+          </div>
+          <p class="form-error" id="reconcileFormError" role="alert"></p>
+        </section>
+
+        <div class="summary-grid reconciliation-summary-grid" id="reconcileSummary"></div>
+
+        <section class="panel reconciliation-transactions-panel">
+          <div class="panel-heading reconciliation-list-heading">
+            <div><p class="eyebrow">Statement activity</p><h2>Clear transactions</h2></div>
+            <div class="reconciliation-toolbar-actions">
+              <label class="compact-check"><input id="reconcileShowReconciled" type="checkbox" /> Show previously reconciled</label>
+              <button class="secondary-button" id="reconcileMarkAllButton" type="button">Mark all shown cleared</button>
+              <button class="secondary-button" id="reconcileUnclearAllButton" type="button">Unclear pending</button>
+            </div>
+          </div>
+          <div class="reconciliation-help">Tick only transactions that appear on the selected statement. Transfers can be reconciled independently for each account.</div>
+          <div id="reconcileTransactionsList"></div>
+          <div class="reconciliation-complete-bar">
+            <div><strong id="reconcileDifferenceLabel">Enter a statement balance</strong><span id="reconcileCompletionHint">The Finish button becomes available when the difference is zero.</span></div>
+            <button class="primary-button" id="completeReconciliationButton" type="button" disabled>Finish reconciliation</button>
+          </div>
+        </section>
+
+        <section class="panel">
+          <div class="panel-heading"><div><p class="eyebrow">Audit trail</p><h2>Reconciliation history</h2></div></div>
+          <div id="reconciliationHistory"></div>
         </section>
       </section>
 
@@ -211,7 +344,7 @@
           </section>
           <section class="panel">
             <div class="panel-heading"><div><p class="eyebrow">Exports</p><h2>Download your data</h2></div></div>
-            <p class="muted">JSON preserves the complete application state. CSV creates a spreadsheet-friendly transaction list.</p>
+            <p class="muted">JSON preserves accounts, categories, budgets, recurring schedules, reconciliations, and transactions. CSV creates a spreadsheet-friendly transaction list.</p>
             <div class="button-row"><button class="secondary-button" id="exportButton">Export JSON backup</button><button class="secondary-button" id="exportCsvButton">Export transactions CSV</button></div>
           </section>
         </div>
@@ -224,14 +357,14 @@
           </section>
           <section class="panel danger-panel">
             <div class="panel-heading"><div><p class="eyebrow">Danger zone</p><h2>Reset financial data</h2></div></div>
-            <p class="muted">Deletes accounts, transactions, categories, and budgets for the current user.</p>
+            <p class="muted">Deletes accounts, transactions, categories, budgets, recurring schedules, and reconciliation history for the current user.</p>
             <button class="danger-button" id="resetButton">Reset application</button>
           </section>
         </div>
 
         <section class="panel info-panel">
           <h2>How balances work</h2>
-          <p>Opening balance plus income minus expenses determines each account balance. Transfers reduce the source and increase the destination without changing total net worth. Credit-card purchases push the card balance further below zero; card payments move it toward zero.</p>
+          <p>Opening balance plus income minus expenses determines each account balance. Transfers reduce the source and increase the destination without changing total net worth. Credit-card purchases push the card balance further below zero; card payments move it toward zero. Reconciliation compares cleared activity with an external statement and does not change balances.</p>
         </section>
       </section>
     </main>
@@ -251,9 +384,65 @@
           <label class="field transfer-field" hidden><span>To account</span><select id="transferToAccount"></select></label>
           <label class="field expense-income-field"><span id="categoryLabel">Expense category</span><select id="entryCategory"></select></label>
           <label class="field full-width"><span>Description</span><input id="entryDescription" type="text" maxlength="120" placeholder="e.g. Weekly groceries" /></label>
+          <label class="field full-width"><span>Remarks / comments</span><textarea id="entryRemarks" maxlength="2000" rows="3" placeholder="Optional notes, reference number, who joined, or anything else to remember"></textarea></label>
+          <div class="field full-width receipt-field">
+            <span>Receipt picture <span class="optional-label">Optional</span></span>
+            <label class="receipt-upload" for="entryReceipt">
+              <span class="receipt-upload-icon" aria-hidden="true">▧</span>
+              <span><strong>Choose a receipt image</strong><small>JPEG, PNG, WebP, HEIC or HEIF · maximum 8 MB</small></span>
+              <input id="entryReceipt" type="file" accept="image/jpeg,image/png,image/webp,image/heic,image/heif,.jpg,.jpeg,.png,.webp,.heic,.heif" />
+            </label>
+            <p class="field-help receipt-help" id="receiptFileHelp">Receipts are stored privately in your Supabase project and are available on your signed-in devices.</p>
+            <div class="receipt-preview" id="receiptPreview" hidden>
+              <div class="receipt-thumbnail">
+                <img id="receiptPreviewImage" alt="Receipt preview" />
+                <span id="receiptPreviewFallback" aria-hidden="true">▧</span>
+              </div>
+              <div class="receipt-preview-copy"><strong id="receiptPreviewName"></strong><span id="receiptPreviewInfo"></span></div>
+              <div class="receipt-preview-actions">
+                <button class="text-button" id="viewReceiptButton" type="button">View</button>
+                <button class="text-button danger-text" id="removeReceiptButton" type="button">Remove</button>
+              </div>
+            </div>
+          </div>
         </div>
         <p class="form-error" id="transactionFormError" role="alert"></p>
         <div class="modal-actions"><button class="secondary-button" type="button" data-close-modal="transactionModal">Cancel</button><button class="primary-button" type="submit">Save entry</button></div>
+      </form>
+    </section>
+  </div>
+
+  <div class="modal-backdrop" id="recurringModal" hidden>
+    <section class="modal recurring-modal" role="dialog" aria-modal="true" aria-labelledby="recurringModalTitle">
+      <div class="modal-header"><div><p class="eyebrow">Schedule</p><h2 id="recurringModalTitle">Add recurring entry</h2></div><button class="icon-button" data-close-modal="recurringModal" aria-label="Close">×</button></div>
+      <div class="segmented-control" role="tablist" aria-label="Recurring entry type"><button class="segment active" data-recurring-type="expense" type="button">Expense</button><button class="segment" data-recurring-type="income" type="button">Income</button><button class="segment" data-recurring-type="transfer" type="button">Transfer</button></div>
+      <form id="recurringForm">
+        <input type="hidden" id="recurringId" /><input type="hidden" id="recurringType" value="expense" />
+        <div class="form-grid">
+          <label class="field full-width"><span>Amount</span><div class="money-input"><span class="aed-symbol" aria-hidden="true"></span><input id="recurringAmount" type="number" min="0.01" step="0.01" inputmode="decimal" placeholder="0.00" required /></div></label>
+          <label class="field recurring-expense-income-field"><span id="recurringAccountLabel">Pay from account</span><select id="recurringAccount"></select></label>
+          <label class="field recurring-transfer-field" hidden><span>From account</span><select id="recurringFromAccount"></select></label>
+          <label class="field recurring-transfer-field" hidden><span>To account</span><select id="recurringToAccount"></select></label>
+          <label class="field recurring-expense-income-field"><span id="recurringCategoryLabel">Expense category</span><select id="recurringCategory"></select></label>
+          <label class="field full-width"><span>Description</span><input id="recurringDescription" type="text" maxlength="120" placeholder="e.g. Monthly apartment rent" /></label>
+          <label class="field full-width"><span>Remarks / comments</span><textarea id="recurringRemarks" maxlength="2000" rows="3" placeholder="Optional notes, reference number, payment instructions, or reminder details"></textarea></label>
+
+          <div class="recurrence-box full-width">
+            <div class="recurrence-box-heading"><div><strong>Repeat schedule</strong><span>Choose how often this entry occurs.</span></div></div>
+            <div class="recurrence-grid">
+              <label class="field"><span>Frequency</span><select id="recurringFrequency"><option value="monthly">Monthly</option><option value="weekly">Weekly</option><option value="yearly">Yearly</option><option value="daily">Daily</option></select></label>
+              <label class="field"><span>Repeat every</span><div class="repeat-every-control"><input id="recurringInterval" type="number" min="1" max="365" value="1" required /><span id="recurringIntervalUnit">month</span></div></label>
+              <label class="field"><span>Start date</span><input id="recurringStartDate" type="date" required /></label>
+              <label class="field"><span>Ends</span><select id="recurringEndMode"><option value="never">No end date</option><option value="date">On a selected date</option></select></label>
+              <label class="field" id="recurringEndDateField" hidden><span>End date</span><input id="recurringEndDate" type="date" /></label>
+            </div>
+          </div>
+
+          <label class="check-field full-width recurring-auto-post"><input id="recurringAutoPost" type="checkbox" checked /><span><strong>Post automatically when due</strong><small>Due occurrences become real transactions when Ledgerly opens. Future occurrences stay planned on the calendar.</small></span></label>
+        </div>
+        <p class="field-help">Edits change future planned occurrences. Transactions already posted from this schedule remain unchanged.</p>
+        <p class="form-error" id="recurringFormError" role="alert"></p>
+        <div class="modal-actions"><button class="secondary-button" type="button" data-close-modal="recurringModal">Cancel</button><button class="primary-button" type="submit">Save schedule</button></div>
       </form>
     </section>
   </div>
@@ -267,12 +456,52 @@
           <label class="field full-width"><span>Account name</span><input id="accountName" type="text" maxlength="60" placeholder="e.g. Everyday Current" required /></label>
           <label class="field"><span>Account type</span><select id="accountType"><option value="current">Current</option><option value="savings">Savings</option><option value="credit">Credit card</option><option value="cash">Cash</option><option value="investment">Investment</option><option value="other">Other</option></select></label>
           <label class="field"><span>Starting balance</span><div class="money-input"><span class="aed-symbol" aria-hidden="true"></span><input id="accountOpeningBalance" type="number" step="0.01" inputmode="decimal" value="0" required /></div></label>
-          <label class="field"><span>Card color</span><input id="accountColor" type="color" value="#2563eb" /></label>
+          <label class="field"><span>Account / card color</span><input id="accountColor" type="color" value="#2563eb" /></label>
           <label class="check-field"><input id="accountIncludeNetWorth" type="checkbox" checked /><span>Include in net worth</span></label>
+          <div class="credit-card-account-fields full-width" id="creditCardAccountFields" hidden>
+            <div class="credit-card-account-heading"><strong>Credit-card settings</strong><span>Used for utilization, statement reminders, and due-date planning.</span></div>
+            <div class="form-grid">
+              <label class="field"><span>Card network</span><select id="accountCardNetwork"><option value="visa">Visa</option><option value="mastercard">Mastercard</option><option value="amex">American Express</option><option value="discover">Discover</option><option value="unionpay">UnionPay</option><option value="jcb">JCB</option><option value="diners">Diners Club</option><option value="rupay">RuPay</option><option value="other">Other</option></select></label>
+              <label class="field"><span>Last 4 digits <small>(optional)</small></span><input id="accountCardLastFour" type="text" maxlength="4" inputmode="numeric" autocomplete="off" placeholder="e.g. 1234" /></label>
+              <label class="field"><span>Credit limit</span><div class="money-input"><span class="aed-symbol" aria-hidden="true"></span><input id="accountCreditLimit" type="number" min="0.01" step="0.01" inputmode="decimal" placeholder="e.g. 25000" /></div></label>
+              <label class="field"><span>Statement closes on day</span><input id="accountStatementClosingDay" type="number" min="1" max="31" inputmode="numeric" placeholder="e.g. 18" /></label>
+              <label class="field"><span>Payment is due on day</span><input id="accountPaymentDueDay" type="number" min="1" max="31" inputmode="numeric" placeholder="e.g. 8" /></label>
+              <label class="field"><span>Accent color</span><input id="accountCardAccentColor" type="color" value="#0f172a" /></label>
+              <label class="field full-width"><span>Card artwork <small>(optional)</small></span><input id="accountCardArtwork" type="file" accept="image/jpeg,image/png,image/webp,image/heic,image/heif" /></label>
+              <div class="card-appearance-editor full-width">
+                <div class="card-appearance-preview" id="accountCardPreview" aria-label="Credit-card appearance preview"></div>
+                <div class="card-artwork-controls">
+                  <button class="secondary-button" id="viewCardArtworkButton" type="button" hidden>View artwork</button>
+                  <button class="secondary-button danger-button" id="removeCardArtworkButton" type="button" hidden>Remove artwork</button>
+                  <span id="cardArtworkHelp">Use colors for a clean digital card, or upload a cropped artwork image with all sensitive card details hidden.</span>
+                </div>
+              </div>
+            </div>
+          </div>
         </div>
-        <p class="field-help">For money owed on a credit card, use a negative starting balance, such as -500.</p>
+        <p class="field-help">For money owed on a credit card, use a negative starting balance, such as -500. Never upload an uncensored card photo: hide the full number, name, expiry date, signature, and security code.</p>
         <p class="form-error" id="accountFormError" role="alert"></p>
         <div class="modal-actions"><button class="secondary-button" type="button" data-close-modal="accountModal">Cancel</button><button class="primary-button" type="submit">Save account</button></div>
+      </form>
+    </section>
+  </div>
+
+  <div class="modal-backdrop" id="creditCardStatementModal" hidden>
+    <section class="modal small-modal" role="dialog" aria-modal="true" aria-labelledby="creditCardStatementModalTitle">
+      <div class="modal-header"><div><p class="eyebrow">Credit card</p><h2 id="creditCardStatementModalTitle">Add statement</h2></div><button class="icon-button" data-close-modal="creditCardStatementModal" aria-label="Close">×</button></div>
+      <form id="creditCardStatementForm">
+        <input type="hidden" id="creditCardStatementId" />
+        <div class="form-grid">
+          <label class="field full-width"><span>Credit-card account</span><select id="creditCardStatementAccount" required></select></label>
+          <label class="field"><span>Statement closing date</span><input id="creditCardStatementDate" type="date" required /></label>
+          <label class="field"><span>Payment due date</span><input id="creditCardDueDate" type="date" required /></label>
+          <label class="field"><span>Statement amount due</span><div class="money-input"><span class="aed-symbol" aria-hidden="true"></span><input id="creditCardStatementBalance" type="number" min="0" step="0.01" inputmode="decimal" required /></div></label>
+          <label class="field"><span>Minimum payment</span><div class="money-input"><span class="aed-symbol" aria-hidden="true"></span><input id="creditCardMinimumPayment" type="number" min="0" step="0.01" inputmode="decimal" value="0" required /></div></label>
+          <label class="field full-width"><span>Notes</span><textarea id="creditCardStatementNotes" maxlength="500" rows="3" placeholder="Optional statement reference, bank note, or reminder"></textarea></label>
+        </div>
+        <p class="field-help">Enter the statement amount as a positive amount due. Payments are detected from transfers into this card after the statement date.</p>
+        <p class="form-error" id="creditCardStatementFormError" role="alert"></p>
+        <div class="modal-actions"><button class="secondary-button" type="button" data-close-modal="creditCardStatementModal">Cancel</button><button class="primary-button" type="submit">Save statement</button></div>
       </form>
     </section>
   </div>
@@ -309,7 +538,58 @@
     </section>
   </div>
 
+  <div class="modal-backdrop" id="transactionImportModal" hidden>
+    <section class="modal import-modal" role="dialog" aria-modal="true" aria-labelledby="transactionImportModalTitle">
+      <div class="modal-header">
+        <div><p class="eyebrow">Bulk upload</p><h2 id="transactionImportModalTitle">Import transactions</h2></div>
+        <button class="icon-button" data-close-modal="transactionImportModal" aria-label="Close">×</button>
+      </div>
+
+      <div class="import-guide">
+        <div>
+          <strong>Use the Ledgerly column format</strong>
+          <p>Import the first worksheet from an Excel file or a CSV file. Dates should preferably use <code>YYYY-MM-DD</code> and amounts should be positive numbers.</p>
+        </div>
+        <div class="button-row import-template-buttons">
+          <a class="secondary-button" href="templates/ledgerly-transaction-import-template.csv" download>Download CSV template</a>
+          <a class="secondary-button" href="templates/ledgerly-transaction-import-template.xlsx" download>Download Excel template</a>
+        </div>
+      </div>
+
+      <div class="import-rules-grid">
+        <div><strong>Expense / Income</strong><span>Use Date, Type, Amount, Description, Remarks, Category, and Account.</span></div>
+        <div><strong>Transfer</strong><span>Use Date, Type, Amount, Description, Remarks, From Account, and To Account.</span></div>
+      </div>
+
+      <div class="form-grid import-options">
+        <label class="field full-width">
+          <span>Transaction file</span>
+          <input id="transactionImportInput" type="file" accept=".csv,.xlsx,.xls,text/csv,application/vnd.ms-excel,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" />
+        </label>
+        <label class="field">
+          <span>Fallback account</span>
+          <select id="importDefaultAccount"><option value="">Use account names from file</option></select>
+        </label>
+        <div class="import-checks">
+          <label class="check-field"><input id="importCreateCategories" type="checkbox" checked /><span>Create missing categories</span></label>
+          <label class="check-field"><input id="importSkipDuplicates" type="checkbox" checked /><span>Skip duplicate transactions</span></label>
+        </div>
+      </div>
+
+      <div class="import-status" id="transactionImportStatus">
+        <span>Select a CSV or Excel file to validate it before importing.</span>
+      </div>
+      <div class="import-preview" id="transactionImportPreview"></div>
+      <p class="form-error" id="transactionImportError" role="alert"></p>
+
+      <div class="modal-actions">
+        <button class="secondary-button" type="button" data-close-modal="transactionImportModal">Cancel</button>
+        <button class="primary-button" id="importTransactionsButton" type="button" disabled>Import transactions</button>
+      </div>
+    </section>
+  </div>
+
   <div class="toast" id="toast" role="status" aria-live="polite"></div>
-  <script type="module" src="app.js?v=3"></script>
+  <script type="module" src="app.js?v=8"></script>
 </body>
 </html>
