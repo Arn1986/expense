@@ -7,6 +7,21 @@ const RECEIPT_BUCKET = "receipts";
 const CARD_ARTWORK_BUCKET = "card-artwork";
 const MAX_RECEIPT_BYTES = 8 * 1024 * 1024;
 const MAX_CARD_ARTWORK_BYTES = 5 * 1024 * 1024;
+const TESSERACT_ESM_URL = "https://cdn.jsdelivr.net/npm/tesseract.js@7.0.0/dist/tesseract.esm.min.js";
+const OCR_IMAGE_TYPES = new Set(["image/jpeg", "image/png", "image/webp"]);
+const DASHBOARD_WIDGETS = [
+  { id: "net-worth", label: "Net worth", description: "Total value of included accounts" },
+  { id: "income", label: "Income this month", description: "Monthly money received" },
+  { id: "expenses", label: "Expenses this month", description: "Monthly money spent" },
+  { id: "cash-flow", label: "Net cash flow", description: "Income minus expenses" },
+  { id: "accounts", label: "Account balances", description: "Current balance of your accounts" },
+  { id: "budgets", label: "Budget progress", description: "Monthly category budget usage" },
+  { id: "credit-cards", label: "Credit-card overview", description: "Debt, utilization, and statement status" },
+  { id: "bills", label: "Bills and reminders", description: "Upcoming and overdue payments" },
+  { id: "cash-flow-chart", label: "Cash-flow chart", description: "Income and expenses for six months" },
+  { id: "spending-categories", label: "Spending by category", description: "Current month category breakdown" },
+  { id: "recent-transactions", label: "Recent transactions", description: "Latest account activity" },
+];
 const ALLOWED_RECEIPT_TYPES = new Set(["image/jpeg", "image/png", "image/webp", "image/heic", "image/heif"]);
 const ALLOWED_CARD_ARTWORK_TYPES = ALLOWED_RECEIPT_TYPES;
 const CARD_NETWORKS = new Set(["visa", "mastercard", "amex", "discover", "unionpay", "jcb", "diners", "rupay", "other"]);
@@ -68,6 +83,9 @@ let reconciliationBusy = false;
 let importRuleReturnToImport = false;
 let pendingBillPaymentId = "";
 let reminderNoticeShown = false;
+let receiptOcrBusy = false;
+let receiptOcrResult = null;
+let dashboardPreferenceDraft = [];
 
 const el = Object.fromEntries([...document.querySelectorAll("[id]")].map((node) => [node.id, node]));
 
@@ -156,6 +174,11 @@ function bindEvents() {
   });
 
   el.openTransactionButton.addEventListener("click", () => openTransactionModal());
+  el.openDashboardCustomizationButton.addEventListener("click", openDashboardCustomizationModal);
+  el.dashboardCustomizationForm.addEventListener("submit", saveDashboardCustomization);
+  el.resetDashboardCustomizationButton.addEventListener("click", resetDashboardCustomizationDraft);
+  el.dashboardWidgetList.addEventListener("click", handleDashboardWidgetListClick);
+  el.dashboardWidgetList.addEventListener("change", handleDashboardWidgetVisibilityChange);
   el.openTransactionImportButton.addEventListener("click", openTransactionImportModal);
   el.openImportRuleButton.addEventListener("click", () => openImportRuleModal());
   el.testImportRulesButton.addEventListener("click", openImportRuleTestModal);
@@ -223,6 +246,8 @@ function bindEvents() {
   el.entryReceipt.addEventListener("change", handleReceiptSelection);
   el.viewReceiptButton.addEventListener("click", viewReceiptFromForm);
   el.removeReceiptButton.addEventListener("click", removeReceiptFromForm);
+  el.scanReceiptButton.addEventListener("click", scanReceiptWithOcr);
+  el.applyReceiptOcrButton.addEventListener("click", applyReceiptOcrResult);
   el.accountForm.addEventListener("submit", handleAccountSubmit);
   el.creditCardStatementForm.addEventListener("submit", handleCreditCardStatementSubmit);
   el.budgetForm.addEventListener("submit", handleBudgetSubmit);
@@ -383,7 +408,7 @@ function setAuthBusy(busy) {
 function showAuthError(message) { el.authError.textContent = message; }
 
 async function loadCloudState() {
-  const [accountsResult, categoriesResult, transactionsResult, transactionSplitsResult, budgetsResult, recurringResult, billsResult, reconciliationsResult, clearingsResult, cardStatementsResult, importRulesResult] = await Promise.all([
+  const [accountsResult, categoriesResult, transactionsResult, transactionSplitsResult, budgetsResult, recurringResult, billsResult, reconciliationsResult, clearingsResult, cardStatementsResult, importRulesResult, preferencesResult] = await Promise.all([
     supabase.from("accounts").select("*").order("created_at", { ascending: true }),
     supabase.from("categories").select("*").order("kind").order("name"),
     supabase.from("transactions").select("*").order("entry_date", { ascending: false }).order("created_at", { ascending: false }),
@@ -395,12 +420,13 @@ async function loadCloudState() {
     supabase.from("transaction_clearings").select("*").order("created_at", { ascending: true }),
     supabase.from("credit_card_statements").select("*").order("statement_date", { ascending: false }),
     supabase.from("import_rules").select("*").order("priority", { ascending: true }).order("created_at", { ascending: true }),
+    supabase.from("user_preferences").select("*").eq("user_id", user.id).maybeSingle(),
   ]);
-  [accountsResult, categoriesResult, transactionsResult, transactionSplitsResult, budgetsResult, recurringResult, billsResult, reconciliationsResult, clearingsResult, cardStatementsResult, importRulesResult].forEach((result) => {
+  [accountsResult, categoriesResult, transactionsResult, transactionSplitsResult, budgetsResult, recurringResult, billsResult, reconciliationsResult, clearingsResult, cardStatementsResult, importRulesResult, preferencesResult].forEach((result) => {
     if (result.error) throw result.error;
   });
   state = {
-    version: 8,
+    version: 9,
     accounts: accountsResult.data || [],
     categories: categoriesResult.data || [],
     transactions: transactionsResult.data || [],
@@ -412,6 +438,7 @@ async function loadCloudState() {
     transactionClearings: clearingsResult.data || [],
     creditCardStatements: cardStatementsResult.data || [],
     importRules: importRulesResult.data || [],
+    preferences: normalizePreferences(preferencesResult.data),
   };
 }
 
@@ -423,12 +450,12 @@ async function seedDefaultCategories() {
 }
 
 function emptyState() {
-  return { version: 8, accounts: [], categories: [], transactions: [], transactionSplits: [], budgets: [], recurringEntries: [], bills: [], reconciliations: [], transactionClearings: [], creditCardStatements: [], importRules: [] };
+  return { version: 9, accounts: [], categories: [], transactions: [], transactionSplits: [], budgets: [], recurringEntries: [], bills: [], reconciliations: [], transactionClearings: [], creditCardStatements: [], importRules: [], preferences: defaultPreferences() };
 }
 
 function normalizeState(value) {
   return {
-    version: 8,
+    version: 9,
     accounts: Array.isArray(value?.accounts) ? value.accounts : [],
     categories: Array.isArray(value?.categories) ? value.categories : [],
     transactions: Array.isArray(value?.transactions) ? value.transactions : [],
@@ -440,12 +467,40 @@ function normalizeState(value) {
     transactionClearings: Array.isArray(value?.transactionClearings) ? value.transactionClearings : Array.isArray(value?.transaction_clearings) ? value.transaction_clearings : [],
     creditCardStatements: Array.isArray(value?.creditCardStatements) ? value.creditCardStatements : Array.isArray(value?.credit_card_statements) ? value.credit_card_statements : [],
     importRules: Array.isArray(value?.importRules) ? value.importRules : Array.isArray(value?.import_rules) ? value.import_rules : [],
+    preferences: normalizePreferences(value?.preferences || value?.user_preferences),
   };
+}
+
+function defaultDashboardWidgets() {
+  return DASHBOARD_WIDGETS.map((widget, index) => ({ id: widget.id, visible: true, order: index }));
+}
+
+function defaultPreferences() {
+  return { dashboard_widgets: defaultDashboardWidgets() };
+}
+
+function normalizeDashboardWidgets(value) {
+  const source = Array.isArray(value) ? value : [];
+  const sourceMap = new Map(source.map((item, index) => [String(item?.id || ""), { visible: item?.visible !== false, order: Number.isFinite(Number(item?.order)) ? Number(item.order) : index }]));
+  return DASHBOARD_WIDGETS.map((widget, index) => {
+    const saved = sourceMap.get(widget.id);
+    return { id: widget.id, visible: saved?.visible !== false, order: saved ? saved.order : index };
+  }).sort((a, b) => a.order - b.order || DASHBOARD_WIDGETS.findIndex((item) => item.id === a.id) - DASHBOARD_WIDGETS.findIndex((item) => item.id === b.id)).map((item, index) => ({ ...item, order: index }));
+}
+
+function normalizePreferences(value) {
+  const row = value && typeof value === "object" ? value : {};
+  return { dashboard_widgets: normalizeDashboardWidgets(row.dashboard_widgets) };
+}
+
+function dashboardWidgets() {
+  state.preferences = normalizePreferences(state.preferences);
+  return state.preferences.dashboard_widgets;
 }
 
 function defaultLocalState() {
   return {
-    version: 8,
+    version: 9,
     accounts: [
       localRow({ name: "Current Account", type: "current", opening_balance: 0, color: ACCOUNT_COLORS.current, include_in_net_worth: true }),
       localRow({ name: "Savings", type: "savings", opening_balance: 0, color: ACCOUNT_COLORS.savings, include_in_net_worth: true }),
@@ -461,6 +516,7 @@ function defaultLocalState() {
     transactionClearings: [],
     creditCardStatements: [],
     importRules: [],
+    preferences: defaultPreferences(),
   };
 }
 
@@ -531,7 +587,7 @@ function migrateLegacyState(legacy) {
       to_account_id: transaction.toAccountId || transaction.to_account_id || null,
     });
   });
-  return { version: 8, accounts, categories, transactions, transactionSplits: [], budgets: [], recurringEntries: [], bills: [], reconciliations: [], transactionClearings: [], creditCardStatements: [], importRules: [] };
+  return { version: 9, accounts, categories, transactions, transactionSplits: [], budgets: [], recurringEntries: [], bills: [], reconciliations: [], transactionClearings: [], creditCardStatements: [], importRules: [], preferences: defaultPreferences() };
 }
 
 function persistLocal() {
@@ -593,6 +649,7 @@ function switchView(view) {
 }
 
 function render() {
+  applyDashboardPreferences();
   renderSelectors();
   renderSummary();
   renderAccounts();
@@ -612,6 +669,79 @@ function render() {
   renderSettings();
 }
 
+function applyDashboardPreferences() {
+  dashboardWidgets().forEach((preference, index) => {
+    const widget = document.querySelector(`[data-dashboard-widget="${preference.id}"]`);
+    if (!widget) return;
+    widget.style.order = String(index);
+    widget.classList.toggle("dashboard-user-hidden", preference.visible === false);
+  });
+}
+
+function openDashboardCustomizationModal() {
+  dashboardPreferenceDraft = dashboardWidgets().map((item) => ({ ...item }));
+  el.dashboardCustomizationError.textContent = "";
+  renderDashboardCustomizationList();
+  openModal(el.dashboardCustomizationModal);
+}
+
+function renderDashboardCustomizationList() {
+  const metadata = new Map(DASHBOARD_WIDGETS.map((item) => [item.id, item]));
+  el.dashboardWidgetList.innerHTML = dashboardPreferenceDraft.map((preference, index) => {
+    const widget = metadata.get(preference.id);
+    return `<div class="dashboard-widget-option" data-widget-id="${escapeHTML(preference.id)}">
+      <label class="dashboard-widget-toggle"><input type="checkbox" data-dashboard-visible="${escapeHTML(preference.id)}" ${preference.visible !== false ? "checked" : ""} /><span><strong>${escapeHTML(widget?.label || preference.id)}</strong><small>${escapeHTML(widget?.description || "")}</small></span></label>
+      <div class="dashboard-widget-order"><button class="icon-button compact-icon" type="button" data-dashboard-move="up" data-widget-id="${escapeHTML(preference.id)}" aria-label="Move ${escapeHTML(widget?.label || preference.id)} up" ${index === 0 ? "disabled" : ""}>↑</button><button class="icon-button compact-icon" type="button" data-dashboard-move="down" data-widget-id="${escapeHTML(preference.id)}" aria-label="Move ${escapeHTML(widget?.label || preference.id)} down" ${index === dashboardPreferenceDraft.length - 1 ? "disabled" : ""}>↓</button></div>
+    </div>`;
+  }).join("");
+}
+
+function handleDashboardWidgetListClick(event) {
+  const button = event.target.closest("[data-dashboard-move]");
+  if (!button) return;
+  const index = dashboardPreferenceDraft.findIndex((item) => item.id === button.dataset.widgetId);
+  const target = button.dataset.dashboardMove === "up" ? index - 1 : index + 1;
+  if (index < 0 || target < 0 || target >= dashboardPreferenceDraft.length) return;
+  [dashboardPreferenceDraft[index], dashboardPreferenceDraft[target]] = [dashboardPreferenceDraft[target], dashboardPreferenceDraft[index]];
+  renderDashboardCustomizationList();
+}
+
+function handleDashboardWidgetVisibilityChange(event) {
+  const checkbox = event.target.closest("[data-dashboard-visible]");
+  if (!checkbox) return;
+  const preference = dashboardPreferenceDraft.find((item) => item.id === checkbox.dataset.dashboardVisible);
+  if (preference) preference.visible = checkbox.checked;
+}
+
+function resetDashboardCustomizationDraft() {
+  dashboardPreferenceDraft = defaultDashboardWidgets();
+  renderDashboardCustomizationList();
+}
+
+async function saveDashboardCustomization(event) {
+  event.preventDefault();
+  const normalized = normalizeDashboardWidgets(dashboardPreferenceDraft);
+  if (!normalized.some((item) => item.visible)) return showFormError(el.dashboardCustomizationError, "Keep at least one dashboard widget visible.");
+  const preferences = { dashboard_widgets: normalized };
+  try {
+    if (mode === "cloud") {
+      setSyncStatus("syncing", "Saving dashboard");
+      const { data, error } = await supabase.from("user_preferences").upsert({ user_id: user.id, dashboard_widgets: normalized, updated_at: new Date().toISOString() }, { onConflict: "user_id" }).select().single();
+      if (error) throw error;
+      state.preferences = normalizePreferences(data);
+      setSyncStatus("cloud", "Cloud synchronized");
+    } else {
+      state.preferences = preferences;
+      persistLocal();
+    }
+    applyDashboardPreferences();
+    closeModal(el.dashboardCustomizationModal);
+    showToast("Dashboard preferences saved.");
+  } catch (error) {
+    showFormError(el.dashboardCustomizationError, friendlyError(error));
+  }
+}
+
 function renderSummary() {
   const month = todayISO().slice(0, 7);
   const monthTx = state.transactions.filter((item) => item.entry_date?.startsWith(month));
@@ -620,13 +750,10 @@ function renderSummary() {
   const netWorth = calculateNetWorth();
   const cashFlow = income - expenses;
   const budget = budgetMetrics("monthly", month);
-  const cards = [
-    summaryCard("Net worth", netWorth, `${state.accounts.filter((a) => a.include_in_net_worth !== false).length} included accounts`, tone(netWorth)),
-    summaryCard("Income this month", income, `${monthTx.filter((item) => item.type === "income").length} entries`, "positive"),
-    summaryCard("Expenses this month", expenses, budget.total ? `${Math.round((expenses / budget.total) * 100)}% of monthly budget` : `${monthTx.filter((item) => item.type === "expense").length} entries`, expenses ? "negative" : ""),
-    summaryCard("Net cash flow", cashFlow, "Income minus expenses", tone(cashFlow)),
-  ];
-  el.summaryGrid.innerHTML = cards.join("");
+  el.summaryNetWorth.innerHTML = summaryCard("Net worth", netWorth, `${state.accounts.filter((a) => a.include_in_net_worth !== false).length} included accounts`, tone(netWorth));
+  el.summaryIncome.innerHTML = summaryCard("Income this month", income, `${monthTx.filter((item) => item.type === "income").length} entries`, "positive");
+  el.summaryExpenses.innerHTML = summaryCard("Expenses this month", expenses, budget.total ? `${Math.round((expenses / budget.total) * 100)}% of monthly budget` : `${monthTx.filter((item) => item.type === "expense").length} entries`, expenses ? "negative" : "");
+  el.summaryCashFlow.innerHTML = summaryCard("Net cash flow", cashFlow, "Income minus expenses", tone(cashFlow));
 }
 
 function renderAccounts() {
@@ -2632,6 +2759,7 @@ function openTransactionModal(id = null, presetDate = "", billId = "") {
   pendingBillPaymentId = billId || "";
   if (!state.accounts.length) return showToast("Add an account before recording an entry.", true);
   clearReceiptFormState();
+  resetReceiptOcrState();
   el.transactionForm.reset();
   el.transactionId.value = "";
   el.entrySplitRows.innerHTML = "";
@@ -2790,6 +2918,8 @@ function handleReceiptSelection(event) {
     const existing = state.transactions.find((item) => item.id === el.transactionId.value);
     if (existing?.receipt_path && !removeExistingReceipt) showExistingReceiptPreview(existing);
     else hideReceiptPreview();
+    resetReceiptOcrState();
+    updateReceiptOcrAvailability();
     return;
   }
   try {
@@ -2799,10 +2929,251 @@ function handleReceiptSelection(event) {
     removeExistingReceipt = false;
     el.receiptFileHelp.textContent = "The selected receipt will be uploaded privately when you save this entry.";
     showSelectedReceiptPreview(file);
+    updateReceiptOcrAvailability();
   } catch (error) {
     event.target.value = "";
     selectedReceiptFile = null;
+    updateReceiptOcrAvailability();
     showFormError(el.transactionFormError, friendlyError(error));
+  }
+}
+
+function resetReceiptOcrState() {
+  receiptOcrBusy = false;
+  receiptOcrResult = null;
+  if (!el.receiptOcrPanel) return;
+  el.receiptOcrPanel.hidden = true;
+  el.receiptOcrMerchant.value = "";
+  el.receiptOcrDate.value = "";
+  el.receiptOcrTotal.value = "";
+  el.receiptOcrTax.value = "";
+  el.receiptOcrReference.value = "";
+  el.receiptOcrRawText.value = "";
+  el.receiptOcrConfidence.textContent = "";
+  el.receiptOcrRuleHint.textContent = "";
+  el.receiptOcrStatus.textContent = "Choose a receipt image to scan.";
+  el.scanReceiptButton.textContent = "⌕ Scan receipt";
+}
+
+function currentReceiptForOcr() {
+  if (selectedReceiptFile) return { source: selectedReceiptFile, type: receiptMimeType(selectedReceiptFile), name: selectedReceiptFile.name };
+  const transaction = state.transactions.find((item) => item.id === el.transactionId.value);
+  if (transaction?.receipt_path && !removeExistingReceipt) return { source: transaction.receipt_path, type: String(transaction.receipt_mime_type || "").toLowerCase(), name: transaction.receipt_name || "Receipt" };
+  return null;
+}
+
+function updateReceiptOcrAvailability() {
+  if (!el.scanReceiptButton) return;
+  const receipt = currentReceiptForOcr();
+  const supported = receipt && OCR_IMAGE_TYPES.has(receipt.type);
+  el.scanReceiptButton.disabled = receiptOcrBusy || !supported;
+  if (receiptOcrBusy) return;
+  if (!receipt) el.receiptOcrStatus.textContent = "Choose a receipt image to scan.";
+  else if (!supported) el.receiptOcrStatus.textContent = "OCR supports JPEG, PNG, or WebP. HEIC/HEIF can still be attached.";
+  else el.receiptOcrStatus.textContent = "Ready to scan in this browser.";
+}
+
+async function scanReceiptWithOcr() {
+  if (receiptOcrBusy) return;
+  const receipt = currentReceiptForOcr();
+  if (!receipt) return showFormError(el.transactionFormError, "Choose or open a receipt before scanning.");
+  if (!OCR_IMAGE_TYPES.has(receipt.type)) return showFormError(el.transactionFormError, "Receipt OCR supports JPEG, PNG, and WebP images.");
+  receiptOcrBusy = true;
+  receiptOcrResult = null;
+  el.transactionFormError.textContent = "";
+  el.scanReceiptButton.disabled = true;
+  el.scanReceiptButton.textContent = "Scanning…";
+  el.receiptOcrStatus.textContent = "Preparing receipt image…";
+  el.receiptOcrPanel.hidden = true;
+  let worker = null;
+  try {
+    const image = await prepareReceiptImageForOcr(receipt);
+    const { createWorker } = await import(TESSERACT_ESM_URL);
+    worker = await createWorker("eng", 1, {
+      logger: (message) => {
+        if (!message?.status) return;
+        const progress = Number.isFinite(message.progress) ? ` ${Math.round(message.progress * 100)}%` : "";
+        el.receiptOcrStatus.textContent = `${capitalize(message.status.replaceAll("_", " "))}${progress}`;
+      },
+    });
+    const { data } = await worker.recognize(image, { rotateAuto: true });
+    const parsed = parseReceiptText(data?.text || "");
+    receiptOcrResult = { ...parsed, rawText: data?.text || "", confidence: number(data?.confidence) };
+    showReceiptOcrResult(receiptOcrResult);
+    el.receiptOcrStatus.textContent = "Scan complete. Review the detected values below.";
+  } catch (error) {
+    el.receiptOcrStatus.textContent = "Could not scan this receipt.";
+    showFormError(el.transactionFormError, `Receipt OCR failed: ${friendlyError(error)}`);
+  } finally {
+    if (worker) await worker.terminate().catch(() => {});
+    receiptOcrBusy = false;
+    el.scanReceiptButton.textContent = "⌕ Scan again";
+    updateReceiptOcrAvailability();
+  }
+}
+
+async function prepareReceiptImageForOcr(receipt) {
+  let sourceUrl = "";
+  let revoke = false;
+  if (receipt.source instanceof File || receipt.source instanceof Blob) {
+    sourceUrl = URL.createObjectURL(receipt.source);
+    revoke = true;
+  } else {
+    sourceUrl = await createReceiptSignedUrl(receipt.source, 300);
+  }
+  try {
+    const image = await loadImageElement(sourceUrl);
+    const longest = Math.max(image.naturalWidth, image.naturalHeight);
+    const scale = Math.min(2.4, Math.max(1, 1900 / Math.max(1, longest)));
+    const maxDimension = 2800;
+    const finalScale = Math.min(scale, maxDimension / Math.max(1, longest));
+    const canvas = document.createElement("canvas");
+    canvas.width = Math.max(1, Math.round(image.naturalWidth * finalScale));
+    canvas.height = Math.max(1, Math.round(image.naturalHeight * finalScale));
+    const context = canvas.getContext("2d", { willReadFrequently: true });
+    context.filter = "grayscale(1) contrast(1.35) brightness(1.05)";
+    context.drawImage(image, 0, 0, canvas.width, canvas.height);
+    return await new Promise((resolve, reject) => canvas.toBlob((blob) => blob ? resolve(blob) : reject(new Error("Could not prepare the receipt image.")), "image/png", 0.95));
+  } finally {
+    if (revoke) URL.revokeObjectURL(sourceUrl);
+  }
+}
+
+function loadImageElement(url) {
+  return new Promise((resolve, reject) => {
+    const image = new Image();
+    image.crossOrigin = "anonymous";
+    image.onload = () => resolve(image);
+    image.onerror = () => reject(new Error("The receipt image could not be opened for OCR."));
+    image.src = url;
+  });
+}
+
+function parseReceiptText(text) {
+  const lines = String(text || "").split(/\r?\n/).map((line) => line.replace(/\s+/g, " ").trim()).filter(Boolean);
+  const merchant = detectReceiptMerchant(lines);
+  const date = detectReceiptDate(lines);
+  const total = detectReceiptAmount(lines, ["grand total", "amount due", "total due", "net total", "balance due", "total"], ["subtotal", "sub total", "tax", "vat", "change"]);
+  const tax = detectReceiptAmount(lines, ["vat", "tax"], ["total"]);
+  const reference = detectReceiptReference(lines);
+  return { merchant, date, total, tax, reference, lineCount: lines.length };
+}
+
+function detectReceiptMerchant(lines) {
+  const banned = /\b(receipt|tax invoice|invoice|date|time|tel|phone|mobile|trn|vat|total|subtotal|cashier|branch|address|www\.|https?|thank you)\b/i;
+  const candidate = lines.slice(0, 10).find((line) => /[A-Za-z]{3}/.test(line) && !banned.test(line) && !/^\W*\d/.test(line) && line.length >= 3 && line.length <= 80);
+  return candidate ? candidate.replace(/[^\p{L}\p{N}&.'’\- ]/gu, "").trim().slice(0, 120) : "";
+}
+
+function detectReceiptDate(lines) {
+  const joined = lines.join(" | ");
+  const patterns = [
+    /\b(20\d{2})[\/.\-](\d{1,2})[\/.\-](\d{1,2})\b/,
+    /\b(\d{1,2})[\/.\-](\d{1,2})[\/.\-](20\d{2}|\d{2})\b/,
+    /\b(\d{1,2})\s+(Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|Jul(?:y)?|Aug(?:ust)?|Sep(?:tember)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)\s+(20\d{2}|\d{2})\b/i,
+    /\b(Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|Jul(?:y)?|Aug(?:ust)?|Sep(?:tember)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)\s+(\d{1,2}),?\s+(20\d{2}|\d{2})\b/i,
+  ];
+  for (let index = 0; index < patterns.length; index += 1) {
+    const match = joined.match(patterns[index]);
+    if (!match) continue;
+    let year; let month; let day;
+    if (index === 0) [year, month, day] = [Number(match[1]), Number(match[2]), Number(match[3])];
+    if (index === 1) [day, month, year] = [Number(match[1]), Number(match[2]), normalizeReceiptYear(match[3])];
+    if (index === 2) [day, month, year] = [Number(match[1]), receiptMonthNumber(match[2]), normalizeReceiptYear(match[3])];
+    if (index === 3) [month, day, year] = [receiptMonthNumber(match[1]), Number(match[2]), normalizeReceiptYear(match[3])];
+    const iso = validISODate(year, month, day);
+    if (iso) return iso;
+  }
+  return "";
+}
+
+function normalizeReceiptYear(value) {
+  const year = Number(value);
+  return year < 100 ? 2000 + year : year;
+}
+
+function receiptMonthNumber(value) {
+  return ["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"].indexOf(String(value || "").slice(0, 3).toLowerCase()) + 1;
+}
+
+function detectReceiptAmount(lines, keywords, exclusions = []) {
+  const amountPattern = /(?:AED|DHS?|د\.?\s?إ\.?)?\s*([0-9]{1,3}(?:[, ]?[0-9]{3})*(?:[.,][0-9]{2})|[0-9]+(?:[.,][0-9]{2}))\s*(?:AED|DHS?|د\.?\s?إ\.?)?/gi;
+  const candidates = [];
+  lines.forEach((line, lineIndex) => {
+    const lower = line.toLowerCase();
+    const keywordIndex = keywords.findIndex((keyword) => lower.includes(keyword));
+    if (keywordIndex < 0 || exclusions.some((keyword) => lower.includes(keyword))) return;
+    const matches = [...line.matchAll(amountPattern)];
+    matches.forEach((match) => {
+      const amount = parseReceiptNumber(match[1]);
+      if (amount > 0) candidates.push({ amount, score: (keywords.length - keywordIndex) * 100 + lineIndex });
+    });
+  });
+  if (candidates.length) return candidates.sort((a, b) => b.score - a.score || b.amount - a.amount)[0].amount;
+  if (keywords.includes("total")) {
+    const all = lines.flatMap((line, lineIndex) => [...line.matchAll(amountPattern)].map((match) => ({ amount: parseReceiptNumber(match[1]), lineIndex }))).filter((item) => item.amount > 0);
+    return all.sort((a, b) => b.lineIndex - a.lineIndex || b.amount - a.amount)[0]?.amount || 0;
+  }
+  return 0;
+}
+
+function parseReceiptNumber(value) {
+  const raw = String(value || "").replace(/\s/g, "");
+  if (raw.includes(",") && raw.includes(".")) return number(raw.replace(/,/g, ""));
+  if (raw.includes(",") && /,\d{2}$/.test(raw)) return number(raw.replace(",", "."));
+  return number(raw.replace(/,/g, ""));
+}
+
+function detectReceiptReference(lines) {
+  const pattern = /\b(?:receipt|invoice|bill|reference|ref|transaction)\s*(?:no\.?|number|#)?\s*[:#-]?\s*([A-Z0-9][A-Z0-9\/-]{3,})\b/i;
+  for (const line of lines) {
+    const match = line.match(pattern);
+    if (match) return match[1].slice(0, 120);
+  }
+  return "";
+}
+
+function showReceiptOcrResult(result) {
+  el.receiptOcrMerchant.value = result.merchant || "";
+  el.receiptOcrDate.value = result.date || "";
+  el.receiptOcrTotal.value = result.total ? result.total.toFixed(2) : "";
+  el.receiptOcrTax.value = result.tax ? result.tax.toFixed(2) : "";
+  el.receiptOcrReference.value = result.reference || "";
+  el.receiptOcrRawText.value = result.rawText || "";
+  el.receiptOcrConfidence.textContent = result.confidence ? `${Math.round(result.confidence)}% OCR confidence` : "";
+  const rule = result.merchant ? findMatchingImportRule({ description: result.merchant, remarks: "", type: el.entryType.value }) : null;
+  el.receiptOcrRuleHint.textContent = rule ? `Matching rule: ${rule.name}` : "No matching import rule found.";
+  el.receiptOcrPanel.hidden = false;
+}
+
+function applyReceiptOcrResult() {
+  if (!receiptOcrResult) return;
+  const merchant = el.receiptOcrMerchant.value.trim();
+  const date = el.receiptOcrDate.value;
+  const total = number(el.receiptOcrTotal.value);
+  const tax = number(el.receiptOcrTax.value);
+  const reference = el.receiptOcrReference.value.trim();
+  if (merchant) el.entryDescription.value = merchant;
+  if (date) el.entryDate.value = date;
+  if (total > 0) {
+    el.entryAmount.value = total.toFixed(2);
+    updateSplitSummary();
+  }
+  const detailParts = [];
+  if (tax > 0) detailParts.push(`VAT: ${formatMoneyText(tax)}`);
+  if (reference) detailParts.push(`Receipt reference: ${reference}`);
+  if (detailParts.length) {
+    const existing = el.entryRemarks.value.trim();
+    const addition = detailParts.join(" · ");
+    if (!existing.toLowerCase().includes(addition.toLowerCase())) el.entryRemarks.value = [existing, addition].filter(Boolean).join("\n");
+  }
+  const rule = merchant ? findMatchingImportRule({ description: merchant, remarks: el.entryRemarks.value, type: el.entryType.value }) : null;
+  if (rule && rule.transaction_type === el.entryType.value && rule.transaction_type !== "transfer") {
+    if (rule.account_id && [...el.entryAccount.options].some((option) => option.value === rule.account_id)) el.entryAccount.value = rule.account_id;
+    if (!el.entrySplitEnabled.checked && rule.category_id && [...el.entryCategory.options].some((option) => option.value === rule.category_id)) el.entryCategory.value = rule.category_id;
+    showToast(`Receipt details applied with rule “${rule.name}”.`);
+  } else {
+    showToast("Receipt details applied. Review them before saving.");
   }
 }
 
@@ -2820,10 +3191,12 @@ function receiptMimeType(file) {
 }
 
 function clearReceiptFormState() {
+  resetReceiptOcrState();
   selectedReceiptFile = null;
   removeExistingReceipt = false;
   if (el.entryReceipt) el.entryReceipt.value = "";
   hideReceiptPreview();
+  updateReceiptOcrAvailability();
 }
 
 function revokeReceiptPreviewUrl() {
@@ -2862,6 +3235,7 @@ async function showExistingReceiptPreview(transaction) {
   el.receiptPreviewInfo.textContent = `${formatFileSize(transaction.receipt_size)} · Stored privately`;
   el.receiptPreviewImage.hidden = true;
   el.receiptPreviewFallback.hidden = false;
+  updateReceiptOcrAvailability();
   if (mode !== "cloud") return;
   try {
     const url = await createReceiptSignedUrl(transaction.receipt_path, 300);
@@ -2875,6 +3249,8 @@ async function showExistingReceiptPreview(transaction) {
     };
   } catch (error) {
     console.warn("Could not load receipt preview", error);
+  } finally {
+    updateReceiptOcrAvailability();
   }
 }
 
@@ -2884,6 +3260,8 @@ function removeReceiptFromForm() {
   el.entryReceipt.value = "";
   removeExistingReceipt = Boolean(existing?.receipt_path);
   hideReceiptPreview();
+  resetReceiptOcrState();
+  updateReceiptOcrAvailability();
   el.receiptFileHelp.textContent = removeExistingReceipt
     ? "The existing receipt will be removed when you save this entry."
     : mode === "cloud"
@@ -4427,7 +4805,7 @@ async function importJSON(event) {
 
 async function replaceCloudState(imported) {
   setSyncStatus("syncing", "Restoring backup");
-  for (const table of ["transaction_clearings", "reconciliations", "credit_card_statements", "transaction_splits", "transactions", "bills", "budgets", "recurring_entries", "import_rules", "accounts", "categories"]) {
+  for (const table of ["transaction_clearings", "reconciliations", "credit_card_statements", "transaction_splits", "transactions", "bills", "budgets", "recurring_entries", "import_rules", "accounts", "categories", "user_preferences"]) {
     const { error } = await supabase.from(table).delete().eq("user_id", user.id);
     if (error) throw error;
   }
@@ -4438,6 +4816,8 @@ async function replaceCloudState(imported) {
     const { error } = await supabase.from(table).insert(withUser(rows));
     if (error) throw error;
   }
+  const { error: preferenceError } = await supabase.from("user_preferences").upsert({ user_id: user.id, dashboard_widgets: normalizeDashboardWidgets(clean.preferences?.dashboard_widgets) }, { onConflict: "user_id" });
+  if (preferenceError) throw preferenceError;
   await loadCloudState();
   setSyncStatus("cloud", "Cloud synchronized");
 }
@@ -4450,7 +4830,7 @@ function sanitizeImportedState(imported) {
   };
   const clean = normalizeState(imported);
   return {
-    version: 8,
+    version: 9,
     accounts: clean.accounts.map(strip),
     categories: clean.categories.map(strip),
     transactions: clean.transactions.map(strip),
@@ -4462,6 +4842,7 @@ function sanitizeImportedState(imported) {
     transactionClearings: clean.transactionClearings.map(strip),
     creditCardStatements: clean.creditCardStatements.map(strip),
     importRules: clean.importRules.map(strip),
+    preferences: normalizePreferences(clean.preferences),
   };
 }
 
@@ -4470,7 +4851,7 @@ async function resetApplication() {
   try {
     if (mode === "cloud") {
       setSyncStatus("syncing", "Resetting data");
-      for (const table of ["transaction_clearings", "reconciliations", "credit_card_statements", "transaction_splits", "transactions", "bills", "budgets", "recurring_entries", "import_rules", "accounts", "categories"]) {
+      for (const table of ["transaction_clearings", "reconciliations", "credit_card_statements", "transaction_splits", "transactions", "bills", "budgets", "recurring_entries", "import_rules", "accounts", "categories", "user_preferences"]) {
         const { error } = await supabase.from(table).delete().eq("user_id", user.id);
         if (error) throw error;
       }
@@ -4510,6 +4891,7 @@ function showToast(message, isError = false) {
 function friendlyError(error) {
   const message = String(error?.message || error || "Something went wrong.");
   if (message.includes("Failed to fetch")) return "Could not reach Supabase. Check your connection and project configuration.";
+  if (message.includes("user_preferences") && (message.includes("does not exist") || message.includes("schema cache"))) return "Dashboard customization is not ready. Run supabase/add-receipt-ocr-dashboard-customization.sql in the Supabase SQL Editor.";
   if ((message.includes("reconciliations") || message.includes("transaction_clearings")) && (message.includes("does not exist") || message.includes("schema cache"))) return "Account reconciliation is not ready. Run supabase/add-account-reconciliation.sql in the Supabase SQL Editor.";
   if (message.includes("reconciliations_user_id_account_id_statement_date_key") || (message.includes("duplicate key") && message.includes("reconciliations"))) return "This account already has a completed reconciliation for that statement date. Undo it before creating another.";
   if ((message.includes("credit_card_statements") || message.includes("credit_limit") || message.includes("statement_closing_day") || message.includes("payment_due_day")) && (message.includes("does not exist") || message.includes("schema cache") || message.includes("column"))) return "Credit-card management is not ready. Run supabase/add-credit-card-management.sql in the Supabase SQL Editor.";

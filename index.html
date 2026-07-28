@@ -8,7 +8,7 @@
   <title>Ledgerly — Personal Finance</title>
   <link rel="manifest" href="manifest.webmanifest" />
   <link rel="icon" type="image/png" href="assets/dirham-symbol.png" />
-  <link rel="stylesheet" href="styles.css?v=11" />
+  <link rel="stylesheet" href="styles.css?v=12" />
 </head>
 <body>
   <section class="auth-screen" id="authScreen">
@@ -113,10 +113,18 @@
       </div>
 
       <section class="view active" id="dashboardView">
-        <div class="summary-grid" id="summaryGrid"></div>
+        <div class="section-toolbar dashboard-toolbar">
+          <p class="section-copy">Choose the information that matters most and arrange the dashboard in your preferred order.</p>
+          <button class="secondary-button" id="openDashboardCustomizationButton" type="button">⚙ Customize dashboard</button>
+        </div>
 
-        <div class="content-grid dashboard-primary-grid">
-          <section class="panel">
+        <div class="dashboard-layout" id="dashboardLayout">
+          <div class="dashboard-widget dashboard-stat-widget" id="dashboardWidgetNetWorth" data-dashboard-widget="net-worth"><div id="summaryNetWorth"></div></div>
+          <div class="dashboard-widget dashboard-stat-widget" id="dashboardWidgetIncome" data-dashboard-widget="income"><div id="summaryIncome"></div></div>
+          <div class="dashboard-widget dashboard-stat-widget" id="dashboardWidgetExpenses" data-dashboard-widget="expenses"><div id="summaryExpenses"></div></div>
+          <div class="dashboard-widget dashboard-stat-widget" id="dashboardWidgetCashFlow" data-dashboard-widget="cash-flow"><div id="summaryCashFlow"></div></div>
+
+          <section class="panel dashboard-widget dashboard-span-6" id="dashboardAccountsPanel" data-dashboard-widget="accounts">
             <div class="panel-heading">
               <div><p class="eyebrow">Balances</p><h2>Your accounts</h2></div>
               <button class="text-button" data-go-to="accounts">Manage</button>
@@ -124,33 +132,31 @@
             <div class="account-list compact" id="dashboardAccounts"></div>
           </section>
 
-          <section class="panel">
+          <section class="panel dashboard-widget dashboard-span-6" id="dashboardBudgetsPanel" data-dashboard-widget="budgets">
             <div class="panel-heading">
               <div><p class="eyebrow">This month</p><h2>Budget progress</h2></div>
               <button class="text-button" data-go-to="budgets">View budgets</button>
             </div>
             <div id="dashboardBudgets"></div>
           </section>
-        </div>
 
-        <section class="panel dashboard-credit-cards-panel" id="dashboardCreditCardsPanel" hidden>
-          <div class="panel-heading">
-            <div><p class="eyebrow">Cards</p><h2>Credit-card overview</h2></div>
-            <button class="text-button" data-go-to="creditcards">Manage cards</button>
-          </div>
-          <div id="dashboardCreditCards"></div>
-        </section>
+          <section class="panel dashboard-widget dashboard-span-12 dashboard-credit-cards-panel" id="dashboardCreditCardsPanel" data-dashboard-widget="credit-cards" hidden>
+            <div class="panel-heading">
+              <div><p class="eyebrow">Cards</p><h2>Credit-card overview</h2></div>
+              <button class="text-button" data-go-to="creditcards">Manage cards</button>
+            </div>
+            <div id="dashboardCreditCards"></div>
+          </section>
 
-        <section class="panel dashboard-bills-panel" id="dashboardBillsPanel">
-          <div class="panel-heading">
-            <div><p class="eyebrow">Coming up</p><h2>Bills and reminders</h2></div>
-            <button class="text-button" data-go-to="bills">View bills</button>
-          </div>
-          <div id="dashboardBills"></div>
-        </section>
+          <section class="panel dashboard-widget dashboard-span-12 dashboard-bills-panel" id="dashboardBillsPanel" data-dashboard-widget="bills">
+            <div class="panel-heading">
+              <div><p class="eyebrow">Coming up</p><h2>Bills and reminders</h2></div>
+              <button class="text-button" data-go-to="bills">View bills</button>
+            </div>
+            <div id="dashboardBills"></div>
+          </section>
 
-        <div class="content-grid two-columns">
-          <section class="panel">
+          <section class="panel dashboard-widget dashboard-span-6" id="dashboardCashFlowPanel" data-dashboard-widget="cash-flow-chart">
             <div class="panel-heading">
               <div><p class="eyebrow">Cash flow</p><h2>Last 6 months</h2></div>
               <button class="text-button" data-go-to="reports">Full report</button>
@@ -158,21 +164,21 @@
             <div id="cashFlowChart" class="cash-flow-chart"></div>
           </section>
 
-          <section class="panel">
+          <section class="panel dashboard-widget dashboard-span-6" id="dashboardCategoryPanel" data-dashboard-widget="spending-categories">
             <div class="panel-heading">
               <div><p class="eyebrow">This month</p><h2>Spending by category</h2></div>
             </div>
             <div id="categoryChart" class="category-chart"></div>
           </section>
-        </div>
 
-        <section class="panel">
-          <div class="panel-heading">
-            <div><p class="eyebrow">Activity</p><h2>Recent transactions</h2></div>
-            <button class="text-button" data-go-to="transactions">View all</button>
-          </div>
-          <div id="recentTransactions"></div>
-        </section>
+          <section class="panel dashboard-widget dashboard-span-12" id="dashboardRecentPanel" data-dashboard-widget="recent-transactions">
+            <div class="panel-heading">
+              <div><p class="eyebrow">Activity</p><h2>Recent transactions</h2></div>
+              <button class="text-button" data-go-to="transactions">View all</button>
+            </div>
+            <div id="recentTransactions"></div>
+          </section>
+        </div>
       </section>
 
       <section class="view" id="accountsView">
@@ -487,10 +493,41 @@
                 <button class="text-button danger-text" id="removeReceiptButton" type="button">Remove</button>
               </div>
             </div>
+            <div class="receipt-ocr-actions">
+              <button class="secondary-button" id="scanReceiptButton" type="button" disabled>⌕ Scan receipt</button>
+              <span class="receipt-ocr-status" id="receiptOcrStatus">Choose a receipt image to scan.</span>
+            </div>
+            <div class="receipt-ocr-panel" id="receiptOcrPanel" hidden>
+              <div class="receipt-ocr-heading">
+                <div><strong>Detected receipt details</strong><span>Review and edit the suggestions before applying them.</span></div>
+                <span class="receipt-ocr-confidence" id="receiptOcrConfidence"></span>
+              </div>
+              <div class="form-grid receipt-ocr-grid">
+                <label class="field"><span>Merchant</span><input id="receiptOcrMerchant" type="text" maxlength="120" /></label>
+                <label class="field"><span>Receipt date</span><input id="receiptOcrDate" type="date" /></label>
+                <label class="field"><span>Total</span><div class="money-input"><span class="aed-symbol" aria-hidden="true"></span><input id="receiptOcrTotal" type="number" min="0" step="0.01" /></div></label>
+                <label class="field"><span>VAT / tax</span><div class="money-input"><span class="aed-symbol" aria-hidden="true"></span><input id="receiptOcrTax" type="number" min="0" step="0.01" /></div></label>
+                <label class="field full-width"><span>Receipt / invoice reference</span><input id="receiptOcrReference" type="text" maxlength="120" /></label>
+              </div>
+              <details class="receipt-ocr-text"><summary>View recognized text</summary><textarea id="receiptOcrRawText" rows="7" readonly></textarea></details>
+              <div class="receipt-ocr-footer"><span id="receiptOcrRuleHint"></span><button class="primary-button" id="applyReceiptOcrButton" type="button">Use detected details</button></div>
+            </div>
           </div>
         </div>
         <p class="form-error" id="transactionFormError" role="alert"></p>
         <div class="modal-actions"><button class="secondary-button" type="button" data-close-modal="transactionModal">Cancel</button><button class="primary-button" type="submit">Save entry</button></div>
+      </form>
+    </section>
+  </div>
+
+  <div class="modal-backdrop" id="dashboardCustomizationModal" hidden>
+    <section class="modal small-modal dashboard-customization-modal" role="dialog" aria-modal="true" aria-labelledby="dashboardCustomizationTitle">
+      <div class="modal-header"><div><p class="eyebrow">Personalize</p><h2 id="dashboardCustomizationTitle">Customize dashboard</h2></div><button class="icon-button" data-close-modal="dashboardCustomizationModal" aria-label="Close">×</button></div>
+      <p class="muted dashboard-customization-copy">Show or hide widgets and use the arrow buttons to choose their order. Your choices synchronize across devices.</p>
+      <form id="dashboardCustomizationForm">
+        <div class="dashboard-widget-list" id="dashboardWidgetList"></div>
+        <p class="form-error" id="dashboardCustomizationError" role="alert"></p>
+        <div class="modal-actions dashboard-customization-actions"><button class="text-button" id="resetDashboardCustomizationButton" type="button">Reset default</button><span></span><button class="secondary-button" type="button" data-close-modal="dashboardCustomizationModal">Cancel</button><button class="primary-button" type="submit">Save dashboard</button></div>
       </form>
     </section>
   </div>
@@ -744,6 +781,6 @@
   </div>
 
   <div class="toast" id="toast" role="status" aria-live="polite"></div>
-  <script type="module" src="app.js?v=11"></script>
+  <script type="module" src="app.js?v=12"></script>
 </body>
 </html>
