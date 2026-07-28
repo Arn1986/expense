@@ -66,6 +66,8 @@ let selectedCalendarDate = todayISO();
 let postingRecurringEntries = false;
 let reconciliationBusy = false;
 let importRuleReturnToImport = false;
+let pendingBillPaymentId = "";
+let reminderNoticeShown = false;
 
 const el = Object.fromEntries([...document.querySelectorAll("[id]")].map((node) => [node.id, node]));
 
@@ -79,6 +81,7 @@ async function initialize() {
   el.recurringStartDate.value = todayISO();
   el.reportMonth.value = todayISO().slice(0, 7);
   el.reconcileStatementDate.value = todayISO();
+  el.billDueDate.value = todayISO();
   bindEvents();
 
   if (!configuredForCloud) {
@@ -160,6 +163,12 @@ function bindEvents() {
   el.importRuleForm.addEventListener("submit", handleImportRuleSubmit);
   el.importRuleTestForm.addEventListener("submit", handleImportRuleTest);
   el.openRecurringButton.addEventListener("click", () => openRecurringModal());
+  el.openBillButton.addEventListener("click", () => openBillModal());
+  el.openRecurringBillButton.addEventListener("click", () => openRecurringModal(null, "expense"));
+  el.billForm.addEventListener("submit", handleBillSubmit);
+  [el.billStatusFilter, el.billRangeFilter].forEach((input) => input.addEventListener("input", renderBills));
+  el.reminderButton.addEventListener("click", toggleReminderPopover);
+  el.closeReminderPopover.addEventListener("click", closeReminderPopover);
   [el.reconcileAccount, el.reconcileStatementDate, el.reconcileStatementBalance].forEach((input) => input.addEventListener("input", renderReconciliation));
   el.reconcileShowReconciled.addEventListener("change", renderReconciliation);
   el.reconcileMarkAllButton.addEventListener("click", () => bulkSetReconciliationCleared(true));
@@ -264,6 +273,12 @@ function bindEvents() {
       "toggle-recurring": () => toggleRecurringEntry(id),
       "post-recurring": () => postRecurringOccurrenceById(id, actionTarget.dataset.date),
       "delete-recurring": () => deleteRecurringEntry(id),
+      "edit-bill": () => openBillModal(id),
+      "delete-bill": () => deleteBill(id),
+      "record-bill-payment": () => recordBillPayment(id),
+      "mark-bill-paid": () => markBillPaid(id),
+      "reopen-bill": () => reopenBill(id),
+      "snooze-bill": () => snoozeBill(id),
       "open-reconcile-account": () => openReconciliationForAccount(id),
       "toggle-reconciliation-cleared": () => toggleTransactionCleared(id, actionTarget.dataset.accountId),
       "undo-reconciliation": () => undoReconciliation(id),
@@ -310,6 +325,7 @@ async function enterCloudApp(authUser) {
     await postDueRecurringEntries();
     setSyncStatus("cloud", "Cloud synchronized");
     render();
+    showReminderNoticeOnce();
   } catch (error) {
     setSyncStatus("local", "Sync error");
     showToast(friendlyError(error), true);
@@ -322,7 +338,7 @@ function enterLocalApp() {
   state = loadLocalState();
   showAppScreen();
   setSyncStatus("local", "Local browser only");
-  postDueRecurringEntries().finally(render);
+  postDueRecurringEntries().finally(() => { render(); showReminderNoticeOnce(); });
 }
 
 async function handleSignOut() {
@@ -367,29 +383,31 @@ function setAuthBusy(busy) {
 function showAuthError(message) { el.authError.textContent = message; }
 
 async function loadCloudState() {
-  const [accountsResult, categoriesResult, transactionsResult, transactionSplitsResult, budgetsResult, recurringResult, reconciliationsResult, clearingsResult, cardStatementsResult, importRulesResult] = await Promise.all([
+  const [accountsResult, categoriesResult, transactionsResult, transactionSplitsResult, budgetsResult, recurringResult, billsResult, reconciliationsResult, clearingsResult, cardStatementsResult, importRulesResult] = await Promise.all([
     supabase.from("accounts").select("*").order("created_at", { ascending: true }),
     supabase.from("categories").select("*").order("kind").order("name"),
     supabase.from("transactions").select("*").order("entry_date", { ascending: false }).order("created_at", { ascending: false }),
     supabase.from("transaction_splits").select("*").order("created_at", { ascending: true }),
     supabase.from("budgets").select("*").order("created_at", { ascending: true }),
     supabase.from("recurring_entries").select("*").order("created_at", { ascending: true }),
+    supabase.from("bills").select("*").order("due_date", { ascending: true }).order("created_at", { ascending: true }),
     supabase.from("reconciliations").select("*").order("statement_date", { ascending: false }).order("completed_at", { ascending: false }),
     supabase.from("transaction_clearings").select("*").order("created_at", { ascending: true }),
     supabase.from("credit_card_statements").select("*").order("statement_date", { ascending: false }),
     supabase.from("import_rules").select("*").order("priority", { ascending: true }).order("created_at", { ascending: true }),
   ]);
-  [accountsResult, categoriesResult, transactionsResult, transactionSplitsResult, budgetsResult, recurringResult, reconciliationsResult, clearingsResult, cardStatementsResult, importRulesResult].forEach((result) => {
+  [accountsResult, categoriesResult, transactionsResult, transactionSplitsResult, budgetsResult, recurringResult, billsResult, reconciliationsResult, clearingsResult, cardStatementsResult, importRulesResult].forEach((result) => {
     if (result.error) throw result.error;
   });
   state = {
-    version: 7,
+    version: 8,
     accounts: accountsResult.data || [],
     categories: categoriesResult.data || [],
     transactions: transactionsResult.data || [],
     transactionSplits: transactionSplitsResult.data || [],
     budgets: budgetsResult.data || [],
     recurringEntries: recurringResult.data || [],
+    bills: billsResult.data || [],
     reconciliations: reconciliationsResult.data || [],
     transactionClearings: clearingsResult.data || [],
     creditCardStatements: cardStatementsResult.data || [],
@@ -405,18 +423,19 @@ async function seedDefaultCategories() {
 }
 
 function emptyState() {
-  return { version: 7, accounts: [], categories: [], transactions: [], transactionSplits: [], budgets: [], recurringEntries: [], reconciliations: [], transactionClearings: [], creditCardStatements: [], importRules: [] };
+  return { version: 8, accounts: [], categories: [], transactions: [], transactionSplits: [], budgets: [], recurringEntries: [], bills: [], reconciliations: [], transactionClearings: [], creditCardStatements: [], importRules: [] };
 }
 
 function normalizeState(value) {
   return {
-    version: 7,
+    version: 8,
     accounts: Array.isArray(value?.accounts) ? value.accounts : [],
     categories: Array.isArray(value?.categories) ? value.categories : [],
     transactions: Array.isArray(value?.transactions) ? value.transactions : [],
     transactionSplits: Array.isArray(value?.transactionSplits) ? value.transactionSplits : Array.isArray(value?.transaction_splits) ? value.transaction_splits : [],
     budgets: Array.isArray(value?.budgets) ? value.budgets : [],
     recurringEntries: Array.isArray(value?.recurringEntries) ? value.recurringEntries : Array.isArray(value?.recurring_entries) ? value.recurring_entries : [],
+    bills: Array.isArray(value?.bills) ? value.bills : [],
     reconciliations: Array.isArray(value?.reconciliations) ? value.reconciliations : [],
     transactionClearings: Array.isArray(value?.transactionClearings) ? value.transactionClearings : Array.isArray(value?.transaction_clearings) ? value.transaction_clearings : [],
     creditCardStatements: Array.isArray(value?.creditCardStatements) ? value.creditCardStatements : Array.isArray(value?.credit_card_statements) ? value.credit_card_statements : [],
@@ -426,7 +445,7 @@ function normalizeState(value) {
 
 function defaultLocalState() {
   return {
-    version: 7,
+    version: 8,
     accounts: [
       localRow({ name: "Current Account", type: "current", opening_balance: 0, color: ACCOUNT_COLORS.current, include_in_net_worth: true }),
       localRow({ name: "Savings", type: "savings", opening_balance: 0, color: ACCOUNT_COLORS.savings, include_in_net_worth: true }),
@@ -437,6 +456,7 @@ function defaultLocalState() {
     transactionSplits: [],
     budgets: [],
     recurringEntries: [],
+    bills: [],
     reconciliations: [],
     transactionClearings: [],
     creditCardStatements: [],
@@ -511,7 +531,7 @@ function migrateLegacyState(legacy) {
       to_account_id: transaction.toAccountId || transaction.to_account_id || null,
     });
   });
-  return { version: 7, accounts, categories, transactions, transactionSplits: [], budgets: [], recurringEntries: [], reconciliations: [], transactionClearings: [], creditCardStatements: [], importRules: [] };
+  return { version: 8, accounts, categories, transactions, transactionSplits: [], budgets: [], recurringEntries: [], bills: [], reconciliations: [], transactionClearings: [], creditCardStatements: [], importRules: [] };
 }
 
 function persistLocal() {
@@ -560,7 +580,7 @@ function switchView(view) {
   activeView = view;
   document.querySelectorAll(".view").forEach((section) => section.classList.toggle("active", section.id === `${view}View`));
   document.querySelectorAll(".nav-item").forEach((button) => button.classList.toggle("active", button.dataset.view === view));
-  const titles = { dashboard: "Dashboard", accounts: "Accounts", creditcards: "Credit cards", transactions: "Transactions", rules: "Import rules", reconcile: "Reconcile", calendar: "Calendar", recurring: "Recurring", budgets: "Budgets", reports: "Reports", categories: "Categories", settings: "Data & settings" };
+  const titles = { dashboard: "Dashboard", accounts: "Accounts", creditcards: "Credit cards", transactions: "Transactions", rules: "Import rules", reconcile: "Reconcile", calendar: "Calendar", recurring: "Recurring", bills: "Bills & reminders", budgets: "Budgets", reports: "Reports", categories: "Categories", settings: "Data & settings" };
   el.pageTitle.textContent = titles[view] || "Ledgerly";
   el.sidebar.classList.remove("open");
   if (view === "reports") renderReports();
@@ -569,6 +589,7 @@ function switchView(view) {
   if (view === "reconcile") renderReconciliation();
   if (view === "calendar") renderCalendar();
   if (view === "recurring") renderRecurringEntries();
+  if (view === "bills") renderBills();
 }
 
 function render() {
@@ -581,6 +602,8 @@ function render() {
   renderReconciliation();
   renderCalendar();
   renderRecurringEntries();
+  renderBills();
+  renderReminderCenter();
   renderCategoryChart();
   renderCashFlowChart();
   renderBudgets();
@@ -1465,6 +1488,7 @@ function setRecurringType(type) {
   document.querySelectorAll("[data-recurring-type]").forEach((button) => button.classList.toggle("active", button.dataset.recurringType === type));
   document.querySelectorAll(".recurring-expense-income-field").forEach((field) => field.hidden = type === "transfer");
   document.querySelectorAll(".recurring-transfer-field").forEach((field) => field.hidden = type !== "transfer");
+  document.querySelectorAll(".recurring-reminder-field").forEach((field) => field.hidden = type !== "expense");
   el.recurringAccountLabel.textContent = type === "income" ? "Add to account" : "Pay from account";
   el.recurringCategoryLabel.textContent = type === "income" ? "Income category" : "Expense category";
   renderRecurringCategories(type);
@@ -1487,7 +1511,7 @@ function updateRecurringEndDateVisibility() {
   if (!hasEnd) el.recurringEndDate.value = "";
 }
 
-function openRecurringModal(id = null) {
+function openRecurringModal(id = null, presetType = "expense") {
   if (!state.accounts.length) return showToast("Add an account before creating a recurring entry.", true);
   el.recurringForm.reset();
   el.recurringId.value = "";
@@ -1496,8 +1520,9 @@ function openRecurringModal(id = null) {
   el.recurringInterval.value = "1";
   el.recurringEndMode.value = "never";
   el.recurringAutoPost.checked = true;
+  el.recurringReminderDays.value = "3";
   el.recurringFormError.textContent = "";
-  let type = "expense";
+  let type = presetType || "expense";
   if (id) {
     const rule = state.recurringEntries.find((item) => item.id === id);
     if (!rule) return;
@@ -1512,6 +1537,7 @@ function openRecurringModal(id = null) {
     el.recurringEndMode.value = rule.end_date ? "date" : "never";
     el.recurringEndDate.value = rule.end_date || "";
     el.recurringAutoPost.checked = rule.auto_post !== false;
+    el.recurringReminderDays.value = String(Math.max(0, Math.trunc(number(rule.reminder_days_before) || 0)));
     setRecurringType(type);
     if (type === "transfer") {
       el.recurringFromAccount.value = rule.from_account_id || "";
@@ -1548,6 +1574,7 @@ async function handleRecurringSubmit(event) {
     start_date: el.recurringStartDate.value,
     end_date: el.recurringEndMode.value === "date" ? el.recurringEndDate.value : null,
     auto_post: el.recurringAutoPost.checked,
+    reminder_days_before: Math.max(0, Math.min(365, Math.trunc(number(el.recurringReminderDays.value) || 0))),
     account_id: null,
     category_id: null,
     from_account_id: null,
@@ -1802,6 +1829,320 @@ function addYearsISO(value, years) {
 }
 
 
+
+
+function billById(id) {
+  return state.bills.find((bill) => bill.id === id);
+}
+
+function billStatusInfo(bill) {
+  if (bill.status === "paid") {
+    return { key: "paid", label: "Paid", detail: bill.paid_at ? `Paid ${formatDate(String(bill.paid_at).slice(0, 10))}` : "Marked paid" };
+  }
+  const today = todayISO();
+  const days = daysBetweenISO(today, bill.due_date);
+  if (bill.due_date < today) return { key: "overdue", label: "Overdue", detail: `${Math.abs(days)} day${Math.abs(days) === 1 ? "" : "s"} overdue` };
+  if (days === 0) return { key: "due-today", label: "Due today", detail: "Payment is due today" };
+  const snoozed = bill.snoozed_until && bill.snoozed_until > today;
+  const reminderDays = Math.max(0, Math.trunc(number(bill.reminder_days_before) || 0));
+  if (!snoozed && days <= reminderDays) return { key: "due-soon", label: "Reminder", detail: `Due in ${days} day${days === 1 ? "" : "s"}` };
+  if (snoozed) return { key: "snoozed", label: "Snoozed", detail: `Hidden until ${formatDate(bill.snoozed_until)}` };
+  return { key: "upcoming", label: "Upcoming", detail: `Due in ${days} day${days === 1 ? "" : "s"}` };
+}
+
+function openOneTimeBills() {
+  return state.bills.filter((bill) => bill.status !== "paid");
+}
+
+function billsDueBetween(startDate, endDate, accountId = "all") {
+  return state.bills
+    .filter((bill) => bill.status !== "paid" && bill.due_date >= startDate && bill.due_date <= endDate)
+    .filter((bill) => accountId === "all" || bill.account_id === accountId)
+    .sort((a, b) => a.due_date.localeCompare(b.due_date) || String(a.created_at || "").localeCompare(String(b.created_at || "")));
+}
+
+function billReminderItems() {
+  const today = todayISO();
+  return openOneTimeBills()
+    .filter((bill) => !bill.snoozed_until || bill.snoozed_until <= today)
+    .filter((bill) => bill.due_date <= addDaysISO(today, Math.max(0, Math.trunc(number(bill.reminder_days_before) || 0))))
+    .map((bill) => ({ kind: "bill", date: bill.due_date, amount: number(bill.amount), bill, title: bill.name, status: billStatusInfo(bill) }));
+}
+
+function recurringBillReminderItems() {
+  const today = todayISO();
+  const items = [];
+  for (const rule of state.recurringEntries.filter((item) => item.type === "expense" && item.active !== false)) {
+    const reminderDays = Math.max(0, Math.trunc(number(rule.reminder_days_before) || 0));
+    const overdueDate = earliestDueUnpostedOccurrence(rule);
+    const date = overdueDate || nextUnpostedOccurrence(rule, today);
+    if (!date || (!overdueDate && date > addDaysISO(today, reminderDays))) continue;
+    const days = daysBetweenISO(today, date);
+    items.push({
+      kind: "recurring",
+      date,
+      amount: number(rule.amount),
+      rule,
+      title: rule.description || categoryById(rule.category_id)?.name || "Recurring expense",
+      status: date < today
+        ? { key: "overdue", label: "Overdue", detail: `${Math.abs(days)} day${Math.abs(days) === 1 ? "" : "s"} overdue` }
+        : date === today
+          ? { key: "due-today", label: "Due today", detail: "Scheduled for today" }
+          : { key: "due-soon", label: "Reminder", detail: `Due in ${days} day${days === 1 ? "" : "s"}` },
+    });
+  }
+  return items;
+}
+
+function creditCardReminderItems() {
+  return state.creditCardStatements.flatMap((statement) => {
+    const status = creditCardStatementStatus(statement);
+    if (["paid", "paid-late"].includes(status.key)) return [];
+    const days = daysBetweenISO(todayISO(), statement.due_date);
+    if (days > 7) return [];
+    const account = accountById(statement.account_id);
+    if (!account) return [];
+    return [{ kind: "card", date: statement.due_date, amount: status.outstanding, statement, account, title: `${account.name} payment`, status: days < 0 ? { ...status, key: "overdue", label: "Overdue" } : status }];
+  });
+}
+
+function allReminderItems() {
+  return [...billReminderItems(), ...recurringBillReminderItems(), ...creditCardReminderItems()]
+    .sort((a, b) => a.date.localeCompare(b.date) || a.title.localeCompare(b.title));
+}
+
+function renderBills() {
+  if (!el.billsList) return;
+  const today = todayISO();
+  const open = openOneTimeBills();
+  const overdue = open.filter((bill) => bill.due_date < today);
+  const dueToday = open.filter((bill) => bill.due_date === today);
+  const nextSeven = open.filter((bill) => bill.due_date >= today && bill.due_date <= addDaysISO(today, 7));
+  const nextThirtyAmount = open.filter((bill) => bill.due_date >= today && bill.due_date <= addDaysISO(today, 30)).reduce((sum, bill) => sum + number(bill.amount), 0);
+  el.billSummary.innerHTML = [
+    summaryCard("Overdue", overdue.length, overdue.length ? `${formatMoneyText(overdue.reduce((sum, bill) => sum + number(bill.amount), 0))} outstanding` : "Nothing overdue", overdue.length ? "negative" : "positive", false),
+    summaryCard("Due today", dueToday.length, dueToday.length ? `${formatMoneyText(dueToday.reduce((sum, bill) => sum + number(bill.amount), 0))} due` : "No bills today", dueToday.length ? "warning" : "", false),
+    summaryCard("Next 7 days", nextSeven.length, `${formatMoneyText(nextSeven.reduce((sum, bill) => sum + number(bill.amount), 0))} scheduled`, nextSeven.length ? "warning" : "", false),
+    summaryCard("Next 30 days", nextThirtyAmount, `${open.filter((bill) => bill.due_date >= today && bill.due_date <= addDaysISO(today, 30)).length} one-time bills`, nextThirtyAmount ? "negative" : ""),
+  ].join("");
+
+  const statusFilter = el.billStatusFilter.value || "open";
+  const range = el.billRangeFilter.value || "30";
+  const rangeEnd = range === "all" ? "9999-12-31" : addDaysISO(today, number(range));
+  const filtered = [...state.bills]
+    .filter((bill) => {
+      if (statusFilter === "paid") return bill.status === "paid";
+      if (statusFilter === "overdue") return bill.status !== "paid" && bill.due_date < today;
+      if (statusFilter === "open") return bill.status !== "paid";
+      return true;
+    })
+    .filter((bill) => bill.status === "paid" || range === "all" || bill.due_date <= rangeEnd)
+    .sort((a, b) => Number(a.status === "paid") - Number(b.status === "paid") || a.due_date.localeCompare(b.due_date));
+  el.billsList.innerHTML = filtered.length ? `<div class="bill-list">${filtered.map(billRowHTML).join("")}</div>` : emptyHTML("No matching bills", "Add a one-time bill or change the filters.");
+
+  const recurring = state.recurringEntries
+    .filter((rule) => rule.type === "expense")
+    .sort((a, b) => Number(b.active !== false) - Number(a.active !== false) || String(nextUnpostedOccurrence(a) || "9999").localeCompare(String(nextUnpostedOccurrence(b) || "9999")));
+  el.recurringBillsList.innerHTML = recurring.length ? `<div class="bill-list recurring-bill-list">${recurring.map(recurringBillRowHTML).join("")}</div>` : emptyHTML("No recurring bills", "Create a recurring expense for rent, subscriptions, loan payments, or utilities.");
+
+  renderDashboardBills();
+}
+
+function billRowHTML(bill) {
+  const status = billStatusInfo(bill);
+  const account = accountById(bill.account_id);
+  const category = categoryById(bill.category_id);
+  return `<article class="bill-row ${status.key}">
+    <div class="bill-date-block"><span>${new Intl.DateTimeFormat("en-US", { month: "short" }).format(new Date(`${bill.due_date}T12:00:00`))}</span><strong>${Number(bill.due_date.slice(8, 10))}</strong></div>
+    <div class="bill-main"><div class="bill-title-line"><strong>${escapeHTML(bill.name)}</strong><span class="bill-status ${status.key}">${escapeHTML(status.label)}</span></div><span>${escapeHTML(category?.name || "Uncategorized")} · ${escapeHTML(account?.name || "No account")} · ${escapeHTML(status.detail)}</span>${bill.notes ? `<small>${escapeHTML(bill.notes)}</small>` : ""}</div>
+    <strong class="bill-amount">${formatMoneyHTML(bill.amount)}</strong>
+    <div class="bill-actions">${bill.status === "paid" ? `<button class="secondary-button" data-action="reopen-bill" data-id="${bill.id}" type="button">Reopen</button>` : `<button class="primary-button" data-action="record-bill-payment" data-id="${bill.id}" type="button">Record payment</button><button class="secondary-button" data-action="mark-bill-paid" data-id="${bill.id}" type="button">Mark paid</button><button class="row-action" data-action="snooze-bill" data-id="${bill.id}" title="Snooze reminder for one day">Zz</button>`}<button class="row-action" data-action="edit-bill" data-id="${bill.id}" aria-label="Edit bill">✎</button><button class="row-action danger" data-action="delete-bill" data-id="${bill.id}" aria-label="Delete bill">×</button></div>
+  </article>`;
+}
+
+function recurringBillRowHTML(rule) {
+  const next = nextUnpostedOccurrence(rule);
+  const active = rule.active !== false;
+  const due = earliestDueUnpostedOccurrence(rule);
+  return `<article class="bill-row recurring-bill-row ${active ? "" : "paused"}">
+    <div class="bill-date-block"><span>${next ? new Intl.DateTimeFormat("en-US", { month: "short" }).format(new Date(`${next}T12:00:00`)) : "—"}</span><strong>${next ? Number(next.slice(8, 10)) : "—"}</strong></div>
+    <div class="bill-main"><div class="bill-title-line"><strong>${escapeHTML(rule.description || categoryById(rule.category_id)?.name || "Recurring expense")}</strong><span class="bill-status ${active ? "upcoming" : "snoozed"}">${active ? "Recurring" : "Paused"}</span></div><span>${escapeHTML(recurringTargetText(rule))} · ${escapeHTML(recurringScheduleText(rule))}</span><small>Reminder ${number(rule.reminder_days_before) ? `${number(rule.reminder_days_before)} day${number(rule.reminder_days_before) === 1 ? "" : "s"} before` : "on the due date"}</small></div>
+    <strong class="bill-amount">${formatMoneyHTML(rule.amount)}</strong>
+    <div class="bill-actions">${due ? `<button class="primary-button" data-action="post-recurring" data-id="${rule.id}" data-date="${due}" type="button">Post due</button>` : ""}<button class="secondary-button" data-action="edit-recurring" data-id="${rule.id}" type="button">Edit</button></div>
+  </article>`;
+}
+
+function renderDashboardBills() {
+  if (!el.dashboardBills) return;
+  const today = todayISO();
+  const upcomingOneTime = openOneTimeBills().filter((bill) => bill.due_date <= addDaysISO(today, 14)).map((bill) => ({ kind: "bill", date: bill.due_date, title: bill.name, amount: bill.amount, id: bill.id, status: billStatusInfo(bill) }));
+  const upcomingRecurring = plannedOccurrencesBetween(today, addDaysISO(today, 14)).filter((item) => item.rule.type === "expense").map(({ rule, date }) => ({ kind: "recurring", date, title: rule.description || categoryById(rule.category_id)?.name || "Recurring expense", amount: rule.amount, id: rule.id, status: { key: date === today ? "due-today" : "upcoming", label: date === today ? "Due today" : "Planned" } }));
+  const items = [...upcomingOneTime, ...upcomingRecurring].sort((a, b) => a.date.localeCompare(b.date)).slice(0, 6);
+  el.dashboardBills.innerHTML = items.length ? `<div class="dashboard-bill-list">${items.map((item) => `<div class="dashboard-bill-row"><span class="dashboard-bill-date">${formatDate(item.date)}</span><div><strong>${escapeHTML(item.title)}</strong><span class="bill-status ${item.status.key}">${escapeHTML(item.status.label)}</span></div><strong>${formatMoneyHTML(item.amount)}</strong>${item.kind === "bill" ? `<button class="text-button" data-action="record-bill-payment" data-id="${item.id}" type="button">Pay</button>` : ""}</div>`).join("")}</div>` : emptyHTML("No bills in the next 14 days", "Upcoming one-time and recurring bills will appear here.");
+}
+
+function openBillModal(id = null) {
+  if (!state.accounts.length) return showToast("Add an account before creating a bill.", true);
+  el.billForm.reset();
+  el.billId.value = "";
+  el.billDueDate.value = todayISO();
+  el.billReminderDays.value = "3";
+  el.billFormError.textContent = "";
+  if (id) {
+    const bill = billById(id);
+    if (!bill) return;
+    el.billId.value = bill.id;
+    el.billName.value = bill.name || "";
+    el.billAmount.value = number(bill.amount);
+    el.billDueDate.value = bill.due_date || todayISO();
+    el.billAccount.value = bill.account_id || "";
+    el.billCategory.value = bill.category_id || "";
+    el.billReminderDays.value = String(Math.max(0, Math.trunc(number(bill.reminder_days_before) || 0)));
+    el.billNotes.value = bill.notes || "";
+    el.billModalTitle.textContent = "Edit bill";
+  } else {
+    el.billModalTitle.textContent = "Add one-time bill";
+  }
+  openModal(el.billModal);
+  el.billName.focus();
+}
+
+async function handleBillSubmit(event) {
+  event.preventDefault();
+  el.billFormError.textContent = "";
+  const id = el.billId.value;
+  const row = {
+    name: el.billName.value.trim(),
+    amount: number(el.billAmount.value),
+    due_date: el.billDueDate.value,
+    account_id: el.billAccount.value,
+    category_id: el.billCategory.value,
+    reminder_days_before: Math.max(0, Math.min(365, Math.trunc(number(el.billReminderDays.value) || 0))),
+    notes: el.billNotes.value.trim(),
+  };
+  if (!row.name) return showFormError(el.billFormError, "Enter a bill name.");
+  if (!(row.amount > 0)) return showFormError(el.billFormError, "Enter an amount greater than zero.");
+  if (!row.due_date) return showFormError(el.billFormError, "Choose a due date.");
+  if (!row.account_id) return showFormError(el.billFormError, "Choose the account used to pay this bill.");
+  if (!row.category_id) return showFormError(el.billFormError, "Choose an expense category.");
+  if (row.notes.length > 1000) return showFormError(el.billFormError, "Notes must be 1,000 characters or fewer.");
+  try {
+    if (id) {
+      const updated = await updateRow("bills", id, row);
+      state.bills = state.bills.map((bill) => bill.id === id ? { ...bill, ...updated } : bill);
+      showToast("Bill updated.");
+    } else {
+      state.bills.push(await insertRow("bills", { ...row, status: "open", snoozed_until: null, paid_at: null, paid_transaction_id: null }));
+      showToast("Bill reminder created.");
+    }
+    persistLocal();
+    closeModal(el.billModal);
+    render();
+  } catch (error) { showFormError(el.billFormError, friendlyError(error)); }
+}
+
+function recordBillPayment(id) {
+  const bill = billById(id);
+  if (!bill || bill.status === "paid") return;
+  openTransactionModal(null, bill.due_date <= todayISO() ? bill.due_date : todayISO(), id);
+  setEntryType("expense");
+  el.entryAmount.value = number(bill.amount);
+  el.entryAccount.value = bill.account_id || "";
+  el.entryCategory.value = bill.category_id || "";
+  el.entryDescription.value = bill.name || "";
+  el.entryRemarks.value = bill.notes || "";
+  updateSplitSummary();
+}
+
+async function completeBillWithTransaction(id, transactionId) {
+  const bill = billById(id);
+  if (!bill) return;
+  const changes = { status: "paid", paid_at: new Date().toISOString(), paid_transaction_id: transactionId, snoozed_until: null };
+  const updated = await updateRow("bills", id, changes);
+  state.bills = state.bills.map((item) => item.id === id ? { ...item, ...updated } : item);
+}
+
+async function markBillPaid(id) {
+  const bill = billById(id);
+  if (!bill || !confirm(`Mark ${bill.name} as paid without adding a transaction?`)) return;
+  try {
+    const changes = { status: "paid", paid_at: new Date().toISOString(), paid_transaction_id: null, snoozed_until: null };
+    const updated = await updateRow("bills", id, changes);
+    state.bills = state.bills.map((item) => item.id === id ? { ...item, ...updated } : item);
+    persistLocal(); render(); showToast("Bill marked paid.");
+  } catch (error) { showToast(friendlyError(error), true); }
+}
+
+async function reopenBill(id) {
+  const bill = billById(id);
+  if (!bill) return;
+  try {
+    const updated = await updateRow("bills", id, { status: "open", paid_at: null, paid_transaction_id: null });
+    state.bills = state.bills.map((item) => item.id === id ? { ...item, ...updated } : item);
+    persistLocal(); render(); showToast("Bill reopened.");
+  } catch (error) { showToast(friendlyError(error), true); }
+}
+
+async function snoozeBill(id) {
+  const bill = billById(id);
+  if (!bill) return;
+  try {
+    const updated = await updateRow("bills", id, { snoozed_until: addDaysISO(todayISO(), 1) });
+    state.bills = state.bills.map((item) => item.id === id ? { ...item, ...updated } : item);
+    persistLocal(); render(); showToast("Reminder snoozed until tomorrow.");
+  } catch (error) { showToast(friendlyError(error), true); }
+}
+
+async function deleteBill(id) {
+  const bill = billById(id);
+  if (!bill || !confirm(`Delete ${bill.name}?`)) return;
+  try {
+    await deleteRow("bills", id);
+    state.bills = state.bills.filter((item) => item.id !== id);
+    persistLocal(); render(); showToast("Bill deleted.");
+  } catch (error) { showToast(friendlyError(error), true); }
+}
+
+function renderReminderCenter() {
+  if (!el.reminderBadge) return;
+  const items = allReminderItems();
+  el.reminderBadge.hidden = !items.length;
+  el.reminderBadge.textContent = items.length > 99 ? "99+" : String(items.length);
+  el.reminderButton.classList.toggle("has-reminders", Boolean(items.length));
+  el.reminderPopoverList.innerHTML = items.length ? `<div class="reminder-list">${items.slice(0, 8).map(reminderItemHTML).join("")}</div>${items.length > 8 ? `<p class="reminder-more">${items.length - 8} more reminder${items.length - 8 === 1 ? "" : "s"}</p>` : ""}` : emptyHTML("You're all caught up", "No bill reminders need attention right now.");
+}
+
+function reminderItemHTML(item) {
+  const action = item.kind === "bill"
+    ? `<button class="text-button" data-action="record-bill-payment" data-id="${item.bill.id}" type="button">Record</button>`
+    : item.kind === "recurring"
+      ? (item.date <= todayISO() ? `<button class="text-button" data-action="post-recurring" data-id="${item.rule.id}" data-date="${item.date}" type="button">Post</button>` : "")
+      : `<button class="text-button" data-action="record-credit-card-payment" data-id="${item.account.id}" type="button">Pay</button>`;
+  return `<div class="reminder-item"><span class="reminder-item-icon ${item.status.key}">!</span><div><strong>${escapeHTML(item.title)}</strong><span>${formatDate(item.date)} · ${escapeHTML(item.status.label)} · ${formatMoneyText(item.amount)}</span></div>${action}</div>`;
+}
+
+function toggleReminderPopover() {
+  const open = el.reminderPopover.hidden;
+  el.reminderPopover.hidden = !open;
+  el.reminderButton.setAttribute("aria-expanded", String(open));
+}
+
+function closeReminderPopover() {
+  el.reminderPopover.hidden = true;
+  el.reminderButton.setAttribute("aria-expanded", "false");
+}
+
+function showReminderNoticeOnce() {
+  if (reminderNoticeShown) return;
+  reminderNoticeShown = true;
+  const count = allReminderItems().length;
+  if (count) showToast(`${count} bill reminder${count === 1 ? " needs" : "s need"} your attention.`);
+}
+
+function oneTimeBillsAgendaHTML(bills) {
+  return `<div class="bill-calendar-agenda"><div class="planned-agenda-heading"><strong>Bill reminders</strong><span>One-time bills do not affect balances until paid</span></div>${bills.map((bill) => { const status = billStatusInfo(bill); return `<div class="planned-row"><div class="planned-row-main"><span class="card-reminder-icon due">$</span><div class="planned-row-copy"><strong>${escapeHTML(bill.name)}</strong><span>${escapeHTML(accountById(bill.account_id)?.name || "No account")} · ${escapeHTML(categoryById(bill.category_id)?.name || "Uncategorized")}</span></div></div><div class="planned-row-side"><span class="bill-status ${status.key}">${escapeHTML(status.label)}</span><strong>${formatMoneyHTML(bill.amount)}</strong><button class="secondary-button" data-action="record-bill-payment" data-id="${bill.id}" type="button">Record payment</button></div></div>`; }).join("")}</div>`;
+}
+
 function moveCalendarMonth(offset) {
   calendarCursor = new Date(calendarCursor.getFullYear(), calendarCursor.getMonth() + offset, 1);
   const selected = new Date(`${selectedCalendarDate}T12:00:00`);
@@ -1858,9 +2199,10 @@ function renderCalendar() {
   const monthEntries = state.transactions.filter((transaction) => transaction.entry_date?.startsWith(monthKey) && transactionMatchesAccount(transaction, accountId));
   const monthPlanned = plannedOccurrencesBetween(monthStart, monthEnd, accountId);
   const monthCardEvents = creditCardCalendarEventsBetween(monthStart, monthEnd, accountId);
+  const monthBills = billsDueBetween(monthStart, monthEnd, accountId);
   const monthIncome = sumTransactions(monthEntries, "income");
   const monthExpenses = sumTransactions(monthEntries, "expense");
-  const activeDays = new Set([...monthEntries.map((transaction) => transaction.entry_date), ...monthPlanned.map((item) => item.date), ...monthCardEvents.map((item) => item.date)]).size;
+  const activeDays = new Set([...monthEntries.map((transaction) => transaction.entry_date), ...monthPlanned.map((item) => item.date), ...monthCardEvents.map((item) => item.date), ...monthBills.map((item) => item.due_date)]).size;
   const transferCount = monthEntries.filter((transaction) => transaction.type === "transfer").length;
 
   el.calendarMonthLabel.textContent = new Intl.DateTimeFormat("en-US", { month: "long", year: "numeric" }).format(calendarCursor);
@@ -1868,7 +2210,7 @@ function renderCalendar() {
     summaryCard("Income", monthIncome, `${monthEntries.filter((item) => item.type === "income").length} posted entries`, "positive"),
     summaryCard("Expenses", monthExpenses, `${monthEntries.filter((item) => item.type === "expense").length} posted entries`, monthExpenses ? "negative" : ""),
     summaryCard("Net cash flow", monthIncome - monthExpenses, "Posted income minus expenses", tone(monthIncome - monthExpenses)),
-    summaryCard("Upcoming", monthPlanned.length + monthCardEvents.length, `${monthPlanned.length} recurring · ${monthCardEvents.length} card reminder${monthCardEvents.length === 1 ? "" : "s"} · ${activeDays} active day${activeDays === 1 ? "" : "s"}`, "warning", false),
+    summaryCard("Upcoming", monthPlanned.length + monthCardEvents.length + monthBills.length, `${monthBills.length} bill${monthBills.length === 1 ? "" : "s"} · ${monthPlanned.length} recurring · ${monthCardEvents.length} card reminder${monthCardEvents.length === 1 ? "" : "s"} · ${activeDays} active day${activeDays === 1 ? "" : "s"}`, "warning", false),
   ].join("");
 
   const first = new Date(year, month, 1);
@@ -1880,6 +2222,7 @@ function renderCalendar() {
     const dayEntries = state.transactions.filter((transaction) => transaction.entry_date === iso && transactionMatchesAccount(transaction, accountId));
     const planned = plannedOccurrencesForDate(iso, accountId);
     const cardEvents = creditCardCalendarEventsForDate(iso, accountId);
+    const bills = billsDueBetween(iso, iso, accountId);
     const income = sumTransactions(dayEntries, "income");
     const expenses = sumTransactions(dayEntries, "expense");
     const transfers = dayEntries.filter((transaction) => transaction.type === "transfer").length;
@@ -1887,7 +2230,7 @@ function renderCalendar() {
     const plannedExpenses = planned.filter((item) => item.rule.type === "expense").reduce((sum, item) => sum + number(item.rule.amount), 0);
     const plannedTransfers = planned.filter((item) => item.rule.type === "transfer").length;
     const isCurrentMonth = date.getMonth() === month;
-    const hasActivity = dayEntries.length || planned.length || cardEvents.length;
+    const hasActivity = dayEntries.length || planned.length || cardEvents.length || bills.length;
     const classes = [
       "calendar-day",
       isCurrentMonth ? "" : "outside-month",
@@ -1895,7 +2238,7 @@ function renderCalendar() {
       iso === selectedCalendarDate ? "selected" : "",
       hasActivity ? "has-activity" : "",
     ].filter(Boolean).join(" ");
-    const aria = `${formatDate(iso)}. ${income ? `${formatMoneyText(income)} posted income. ` : ""}${expenses ? `${formatMoneyText(expenses)} posted expenses. ` : ""}${transfers ? `${transfers} posted transfers. ` : ""}${planned.length ? `${planned.length} planned recurring entries. ` : ""}${cardEvents.length ? `${cardEvents.length} credit-card reminder${cardEvents.length === 1 ? "" : "s"}.` : ""}`;
+    const aria = `${formatDate(iso)}. ${income ? `${formatMoneyText(income)} posted income. ` : ""}${expenses ? `${formatMoneyText(expenses)} posted expenses. ` : ""}${transfers ? `${transfers} posted transfers. ` : ""}${planned.length ? `${planned.length} planned recurring entries. ` : ""}${cardEvents.length ? `${cardEvents.length} credit-card reminder${cardEvents.length === 1 ? "" : "s"}. ` : ""}${bills.length ? `${bills.length} bill${bills.length === 1 ? "" : "s"} due.` : ""}`;
     cells.push(`<div class="${classes}">
       <button class="calendar-day-body" type="button" data-calendar-date="${iso}" aria-label="${escapeHTML(aria)}">
         <span class="calendar-day-number">${date.getDate()}</span>
@@ -1906,6 +2249,7 @@ function renderCalendar() {
           ${plannedIncome ? `<span class="calendar-planned-total income">Planned +${formatMoneyCompactHTML(plannedIncome)}</span>` : ""}
           ${plannedExpenses ? `<span class="calendar-planned-total expense">Planned −${formatMoneyCompactHTML(plannedExpenses)}</span>` : ""}
           ${plannedTransfers ? `<span class="calendar-planned-count">Planned ⇄ ${plannedTransfers}</span>` : ""}
+          ${bills.slice(0, 2).map((bill) => `<span class="calendar-bill-reminder ${bill.due_date < todayISO() ? "overdue" : ""}">Bill ${formatMoneyCompactHTML(bill.amount)}</span>`).join("")}
           ${cardEvents.slice(0, 2).map((item) => `<span class="calendar-card-reminder ${item.type === "payment-due" ? "due" : "close"}">${item.type === "payment-due" ? "Card due" : "Card closes"}</span>`).join("")}
           ${!hasActivity ? `<span class="calendar-no-activity">No entries</span>` : ""}
         </span>
@@ -1921,6 +2265,7 @@ function renderSelectedCalendarDay(accountId = "all") {
   const entries = sortedTransactions().filter((transaction) => transaction.entry_date === selectedCalendarDate && transactionMatchesAccount(transaction, accountId));
   const planned = plannedOccurrencesForDate(selectedCalendarDate, accountId);
   const cardEvents = creditCardCalendarEventsForDate(selectedCalendarDate, accountId);
+  const bills = billsDueBetween(selectedCalendarDate, selectedCalendarDate, accountId);
   const income = sumTransactions(entries, "income");
   const expenses = sumTransactions(entries, "expense");
   const transfers = entries.filter((transaction) => transaction.type === "transfer").length;
@@ -1929,14 +2274,15 @@ function renderSelectedCalendarDay(accountId = "all") {
     dayMetricHTML("Income", income, "positive"),
     dayMetricHTML("Expenses", expenses, expenses ? "negative" : ""),
     dayMetricHTML("Net cash flow", income - expenses, tone(income - expenses)),
-    dayMetricHTML("Reminders", planned.length + cardEvents.length, planned.length || cardEvents.length ? "warning" : "", false),
+    dayMetricHTML("Reminders", planned.length + cardEvents.length + bills.length, planned.length || cardEvents.length || bills.length ? "warning" : "", false),
   ].join("");
+  const billsHTML = bills.length ? oneTimeBillsAgendaHTML(bills) : "";
   const cardHTML = cardEvents.length ? creditCardCalendarAgendaHTML(cardEvents) : "";
   const plannedHTML = planned.length ? plannedAgendaHTML(planned) : "";
   const postedHTML = entries.length
     ? transactionListHTML(entries, true)
-    : emptyHTML("No posted entries on this day", planned.length ? "The recurring items above are planned and do not affect balances until posted." : "Use Add entry for this day to record an expense, income, or transfer.");
-  el.calendarDayTransactions.innerHTML = `${cardHTML}${plannedHTML}${postedHTML}`;
+    : emptyHTML("No posted entries on this day", planned.length || bills.length ? "The planned items above do not affect balances until posted or paid." : "Use Add entry for this day to record an expense, income, or transfer.");
+  el.calendarDayTransactions.innerHTML = `${billsHTML}${cardHTML}${plannedHTML}${postedHTML}`;
 }
 
 
@@ -2122,7 +2468,7 @@ function renderSettings() {
 
 function renderSelectors() {
   const accountOptions = state.accounts.map((account) => `<option value="${account.id}">${escapeHTML(account.name)} (${formatMoneyText(calculateAccountBalance(account.id))})</option>`).join("");
-  [el.entryAccount, el.transferFromAccount, el.transferToAccount, el.recurringAccount, el.recurringFromAccount, el.recurringToAccount].forEach((select) => {
+  [el.entryAccount, el.transferFromAccount, el.transferToAccount, el.recurringAccount, el.recurringFromAccount, el.recurringToAccount, el.billAccount].forEach((select) => {
     const previous = select.value;
     select.innerHTML = accountOptions || `<option value="">No accounts available</option>`;
     if ([...select.options].some((option) => option.value === previous)) select.value = previous;
@@ -2141,6 +2487,9 @@ function renderSelectors() {
   if ([...el.importDefaultAccount.options].some((option) => option.value === importAccountPrevious)) el.importDefaultAccount.value = importAccountPrevious;
   renderEntryCategories(el.entryType.value);
   renderRecurringCategories(el.recurringType.value);
+  const billCategoryPrevious = el.billCategory.value;
+  el.billCategory.innerHTML = state.categories.filter((category) => category.kind === "expense").sort((a, b) => a.name.localeCompare(b.name)).map((category) => `<option value="${category.id}">${escapeHTML(category.name)}</option>`).join("") || `<option value="">No expense categories</option>`;
+  if ([...el.billCategory.options].some((option) => option.value === billCategoryPrevious)) el.billCategory.value = billCategoryPrevious;
   const budgetPrevious = el.budgetCategory.value;
   el.budgetCategory.innerHTML = state.categories.filter((category) => category.kind === "expense").sort((a, b) => a.name.localeCompare(b.name)).map((category) => `<option value="${category.id}">${escapeHTML(category.name)}</option>`).join("") || `<option value="">No expense categories</option>`;
   if ([...el.budgetCategory.options].some((option) => option.value === budgetPrevious)) el.budgetCategory.value = budgetPrevious;
@@ -2279,7 +2628,8 @@ function setEntryType(type) {
   else setSplitMode(el.entrySplitEnabled.checked);
 }
 
-function openTransactionModal(id = null, presetDate = "") {
+function openTransactionModal(id = null, presetDate = "", billId = "") {
+  pendingBillPaymentId = billId || "";
   if (!state.accounts.length) return showToast("Add an account before recording an entry.", true);
   clearReceiptFormState();
   el.transactionForm.reset();
@@ -2291,7 +2641,7 @@ function openTransactionModal(id = null, presetDate = "") {
   el.receiptFileHelp.textContent = mode === "cloud"
     ? "Receipts are stored privately in your Supabase project and are available on your signed-in devices."
     : "Receipt uploads require Supabase cloud sync. Remarks are still saved in local preview.";
-  let type = "expense";
+  let type = presetType || "expense";
   if (id) {
     const transaction = state.transactions.find((item) => item.id === id);
     if (!transaction) return;
@@ -2381,6 +2731,7 @@ async function handleTransactionSubmit(event) {
         await removeReceiptFile(existing.receipt_path, false);
       }
       newlyUploadedPath = "";
+      pendingBillPaymentId = "";
       showToast(selectedReceiptFile ? "Entry and receipt updated." : "Entry updated.");
     } else {
       let inserted = await insertRow("transactions", base);
@@ -2393,6 +2744,8 @@ async function handleTransactionSubmit(event) {
       }
       state.transactions.push(inserted);
       await replaceTransactionSplits(inserted.id, splitRows);
+      if (pendingBillPaymentId) await completeBillWithTransaction(pendingBillPaymentId, inserted.id);
+      pendingBillPaymentId = "";
       newlyInsertedId = "";
       newlyUploadedPath = "";
       showToast(selectedReceiptFile ? "Entry and receipt added." : "Entry added.");
@@ -2407,6 +2760,7 @@ async function handleTransactionSubmit(event) {
       try { await deleteRow("transactions", newlyInsertedId); } catch (rollbackError) { console.warn("Could not roll back transaction", rollbackError); }
       state.transactionSplits = state.transactionSplits.filter((split) => split.transaction_id !== newlyInsertedId);
     }
+    pendingBillPaymentId = "";
     showFormError(el.transactionFormError, friendlyError(error));
   }
 }
@@ -3067,7 +3421,7 @@ async function handleCategorySubmit(event) {
   const duplicate = state.categories.some((category) => category.id !== id && category.kind === row.kind && category.name.toLowerCase() === row.name.toLowerCase());
   if (duplicate) return showFormError(el.categoryFormError, "That category already exists for this entry type.");
   if (id) {
-    const usedByWrongType = state.transactions.some((transaction) => transaction.category_id === id && transaction.type !== row.kind) || state.transactionSplits.some((split) => split.category_id === id && state.transactions.find((transaction) => transaction.id === split.transaction_id)?.type !== row.kind) || state.recurringEntries.some((rule) => rule.category_id === id && rule.type !== row.kind) || state.importRules.some((rule) => rule.category_id === id && rule.transaction_type !== row.kind);
+    const usedByWrongType = state.transactions.some((transaction) => transaction.category_id === id && transaction.type !== row.kind) || state.transactionSplits.some((split) => split.category_id === id && state.transactions.find((transaction) => transaction.id === split.transaction_id)?.type !== row.kind) || state.recurringEntries.some((rule) => rule.category_id === id && rule.type !== row.kind) || state.importRules.some((rule) => rule.category_id === id && rule.transaction_type !== row.kind) || state.bills.some((bill) => bill.category_id === id && row.kind !== "expense");
     if (usedByWrongType) return showFormError(el.categoryFormError, "The category type cannot change while entries use it.");
   }
   try {
@@ -3086,8 +3440,8 @@ async function handleCategorySubmit(event) {
 async function deleteAccount(id) {
   const account = state.accounts.find((item) => item.id === id);
   if (!account) return;
-  const inUse = state.transactions.some((transaction) => [transaction.account_id, transaction.from_account_id, transaction.to_account_id].includes(id)) || state.recurringEntries.some((rule) => [rule.account_id, rule.from_account_id, rule.to_account_id].includes(id)) || state.reconciliations.some((item) => item.account_id === id) || state.creditCardStatements.some((item) => item.account_id === id) || state.importRules.some((rule) => [rule.account_id, rule.from_account_id, rule.to_account_id].includes(id));
-  if (inUse) return showToast("Delete or move this account's transactions, recurring schedules, import rules, statements, and reconciliation history first.", true);
+  const inUse = state.transactions.some((transaction) => [transaction.account_id, transaction.from_account_id, transaction.to_account_id].includes(id)) || state.recurringEntries.some((rule) => [rule.account_id, rule.from_account_id, rule.to_account_id].includes(id)) || state.reconciliations.some((item) => item.account_id === id) || state.creditCardStatements.some((item) => item.account_id === id) || state.importRules.some((rule) => [rule.account_id, rule.from_account_id, rule.to_account_id].includes(id)) || state.bills.some((bill) => bill.account_id === id);
+  if (inUse) return showToast("Delete or move this account's transactions, bills, recurring schedules, import rules, statements, and reconciliation history first.", true);
   if (!confirm(`Delete ${account.name}?`)) return;
   try {
     await deleteRow("accounts", id);
@@ -3109,6 +3463,11 @@ async function deleteTransaction(id) {
     state.transactions = state.transactions.filter((item) => item.id !== id);
     state.transactionSplits = state.transactionSplits.filter((item) => item.transaction_id !== id);
     state.transactionClearings = state.transactionClearings.filter((item) => item.transaction_id !== id);
+    const linkedBills = state.bills.filter((bill) => bill.paid_transaction_id === id);
+    for (const bill of linkedBills) {
+      const updated = await updateRow("bills", bill.id, { status: "open", paid_at: null, paid_transaction_id: null });
+      state.bills = state.bills.map((item) => item.id === bill.id ? { ...item, ...updated } : item);
+    }
     const receiptRemoved = transaction?.receipt_path ? await removeReceiptFile(transaction.receipt_path, false) : true;
     persistLocal(); render();
     showToast(receiptRemoved ? "Entry deleted." : "Entry deleted, but its receipt file could not be cleaned up.", !receiptRemoved);
@@ -3127,8 +3486,8 @@ async function deleteBudget(id) {
 async function deleteCategory(id) {
   const category = state.categories.find((item) => item.id === id);
   if (!category) return;
-  const inUse = state.transactions.some((transaction) => transaction.category_id === id) || state.transactionSplits.some((split) => split.category_id === id) || state.budgets.some((budget) => budget.category_id === id) || state.recurringEntries.some((rule) => rule.category_id === id) || state.importRules.some((rule) => rule.category_id === id);
-  if (inUse) return showToast("Remove this category from transactions, budgets, recurring schedules, and import rules first.", true);
+  const inUse = state.transactions.some((transaction) => transaction.category_id === id) || state.transactionSplits.some((split) => split.category_id === id) || state.budgets.some((budget) => budget.category_id === id) || state.recurringEntries.some((rule) => rule.category_id === id) || state.importRules.some((rule) => rule.category_id === id) || state.bills.some((bill) => bill.category_id === id);
+  if (inUse) return showToast("Remove this category from transactions, bills, budgets, recurring schedules, and import rules first.", true);
   if (!confirm(`Delete ${category.name}?`)) return;
   try {
     await deleteRow("categories", id);
@@ -4068,13 +4427,13 @@ async function importJSON(event) {
 
 async function replaceCloudState(imported) {
   setSyncStatus("syncing", "Restoring backup");
-  for (const table of ["transaction_clearings", "reconciliations", "credit_card_statements", "transaction_splits", "transactions", "budgets", "recurring_entries", "import_rules", "accounts", "categories"]) {
+  for (const table of ["transaction_clearings", "reconciliations", "credit_card_statements", "transaction_splits", "transactions", "bills", "budgets", "recurring_entries", "import_rules", "accounts", "categories"]) {
     const { error } = await supabase.from(table).delete().eq("user_id", user.id);
     if (error) throw error;
   }
   const clean = sanitizeImportedState(imported);
   const withUser = (rows) => rows.map((row) => ({ ...row, user_id: user.id }));
-  for (const [table, rows] of [["categories", clean.categories], ["accounts", clean.accounts], ["import_rules", clean.importRules], ["recurring_entries", clean.recurringEntries], ["budgets", clean.budgets], ["transactions", clean.transactions], ["transaction_splits", clean.transactionSplits], ["credit_card_statements", clean.creditCardStatements], ["reconciliations", clean.reconciliations], ["transaction_clearings", clean.transactionClearings]]) {
+  for (const [table, rows] of [["categories", clean.categories], ["accounts", clean.accounts], ["import_rules", clean.importRules], ["recurring_entries", clean.recurringEntries], ["budgets", clean.budgets], ["transactions", clean.transactions], ["bills", clean.bills], ["transaction_splits", clean.transactionSplits], ["credit_card_statements", clean.creditCardStatements], ["reconciliations", clean.reconciliations], ["transaction_clearings", clean.transactionClearings]]) {
     if (!rows.length) continue;
     const { error } = await supabase.from(table).insert(withUser(rows));
     if (error) throw error;
@@ -4091,13 +4450,14 @@ function sanitizeImportedState(imported) {
   };
   const clean = normalizeState(imported);
   return {
-    version: 7,
+    version: 8,
     accounts: clean.accounts.map(strip),
     categories: clean.categories.map(strip),
     transactions: clean.transactions.map(strip),
     transactionSplits: clean.transactionSplits.map(strip),
     budgets: clean.budgets.map(strip),
     recurringEntries: clean.recurringEntries.map(strip),
+    bills: clean.bills.map(strip),
     reconciliations: clean.reconciliations.map(strip),
     transactionClearings: clean.transactionClearings.map(strip),
     creditCardStatements: clean.creditCardStatements.map(strip),
@@ -4110,7 +4470,7 @@ async function resetApplication() {
   try {
     if (mode === "cloud") {
       setSyncStatus("syncing", "Resetting data");
-      for (const table of ["transaction_clearings", "reconciliations", "credit_card_statements", "transaction_splits", "transactions", "budgets", "recurring_entries", "import_rules", "accounts", "categories"]) {
+      for (const table of ["transaction_clearings", "reconciliations", "credit_card_statements", "transaction_splits", "transactions", "bills", "budgets", "recurring_entries", "import_rules", "accounts", "categories"]) {
         const { error } = await supabase.from(table).delete().eq("user_id", user.id);
         if (error) throw error;
       }
@@ -4159,6 +4519,8 @@ function friendlyError(error) {
   if (message.includes("credit_card_statements_user_id_account_id_statement_date_key") || (message.includes("duplicate key") && message.includes("credit_card_statements"))) return "A statement already exists for this card and closing date.";
   if (message.includes("import_rules") && (message.includes("does not exist") || message.includes("schema cache"))) return "Import rules are not ready. Run supabase/add-import-rules.sql in the Supabase SQL Editor.";
   if (message.includes("duplicate key")) return "A record with the same name or category already exists.";
+  if (message.includes("bills") && (message.includes("does not exist") || message.includes("schema cache"))) return "Bills and reminders are not ready. Run supabase/add-bills-and-reminders.sql in the Supabase SQL Editor.";
+  if (message.includes("reminder_days_before") && (message.includes("does not exist") || message.includes("schema cache") || message.includes("column"))) return "Bill reminder settings are not ready. Run supabase/add-bills-and-reminders.sql in the Supabase SQL Editor.";
   if (message.includes("recurring_entries") && (message.includes("does not exist") || message.includes("schema cache"))) return "Recurring schedules are not ready. Run supabase/add-recurring-entries.sql in the Supabase SQL Editor.";
   if ((message.includes("recurring_entry_id") || message.includes("scheduled_date")) && message.includes("column")) return "Recurring transaction columns are not ready. Run supabase/add-recurring-entries.sql in the Supabase SQL Editor.";
   if (message.includes("violates foreign key")) return "This item is still used by another record.";

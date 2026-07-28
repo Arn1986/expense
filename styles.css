@@ -841,3 +841,128 @@ a.secondary-button { display: inline-flex; align-items: center; justify-content:
   .split-row { grid-template-columns: 1fr auto; }
   .split-row .field:first-child { grid-column: 1 / -1; }
 }
+
+/* Bills and in-app reminders */
+.topbar { position: relative; }
+.topbar-actions { display: flex; align-items: center; gap: 10px; }
+.reminder-button {
+  position: relative;
+  width: 42px;
+  height: 42px;
+  display: grid;
+  place-items: center;
+  border: 1px solid var(--slate-200);
+  border-radius: 13px;
+  background: var(--white);
+  cursor: pointer;
+  font-size: 1rem;
+}
+.reminder-button:hover, .reminder-button.has-reminders { border-color: #f59e0b; background: #fffbeb; }
+.reminder-badge {
+  position: absolute;
+  top: -6px;
+  right: -6px;
+  min-width: 20px;
+  height: 20px;
+  padding: 0 5px;
+  display: grid;
+  place-items: center;
+  border: 2px solid var(--white);
+  border-radius: 999px;
+  color: var(--white);
+  background: #dc2626;
+  font-size: .65rem;
+  font-weight: 900;
+}
+.reminder-popover {
+  position: absolute;
+  z-index: 60;
+  top: calc(100% - 4px);
+  right: 24px;
+  width: min(420px, calc(100vw - 32px));
+  padding: 16px;
+  border: 1px solid var(--slate-200);
+  border-radius: 18px;
+  background: var(--white);
+  box-shadow: 0 24px 60px rgba(15, 23, 42, .18);
+}
+.reminder-popover-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; margin-bottom: 12px; }
+.reminder-popover-heading h2 { margin: 2px 0 0; font-size: 1.05rem; }
+.reminder-list { display: grid; gap: 8px; margin-bottom: 12px; }
+.reminder-item { display: grid; grid-template-columns: 32px minmax(0, 1fr) auto; gap: 10px; align-items: center; padding: 10px; border: 1px solid var(--slate-200); border-radius: 12px; background: var(--slate-50); }
+.reminder-item > div { min-width: 0; display: grid; gap: 2px; }
+.reminder-item strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: .82rem; }
+.reminder-item span { color: var(--slate-500); font-size: .7rem; }
+.reminder-item-icon { width: 30px; height: 30px; display: grid; place-items: center; border-radius: 10px; color: #b45309; background: #fef3c7; font-weight: 900; }
+.reminder-item-icon.overdue { color: var(--red-700); background: var(--red-100); }
+.reminder-item-icon.due-today { color: #9a3412; background: #ffedd5; }
+.reminder-more { margin: 0 0 12px; color: var(--slate-500); font-size: .76rem; text-align: center; }
+
+.dashboard-bills-panel { margin-top: 18px; }
+.dashboard-bill-list { display: grid; gap: 8px; }
+.dashboard-bill-row { display: grid; grid-template-columns: 105px minmax(0, 1fr) auto auto; gap: 12px; align-items: center; padding: 11px 0; border-bottom: 1px solid var(--slate-200); }
+.dashboard-bill-row:last-child { border-bottom: 0; }
+.dashboard-bill-row > div { min-width: 0; display: flex; align-items: center; flex-wrap: wrap; gap: 7px; }
+.dashboard-bill-row > div > strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.dashboard-bill-date { color: var(--slate-500); font-size: .75rem; }
+
+.bill-filters { grid-template-columns: repeat(2, minmax(180px, 260px)); }
+.bill-list { display: grid; gap: 10px; }
+.bill-row {
+  display: grid;
+  grid-template-columns: 58px minmax(0, 1fr) auto auto;
+  gap: 14px;
+  align-items: center;
+  padding: 13px;
+  border: 1px solid var(--slate-200);
+  border-radius: 15px;
+  background: var(--white);
+}
+.bill-row.overdue { border-color: #fecaca; background: #fffafa; }
+.bill-row.paid { opacity: .72; }
+.bill-row.paused { opacity: .62; }
+.bill-date-block { width: 52px; min-height: 54px; display: grid; place-items: center; align-content: center; border-radius: 13px; color: var(--blue-600); background: var(--blue-100); }
+.bill-date-block span { font-size: .62rem; font-weight: 900; text-transform: uppercase; letter-spacing: .06em; }
+.bill-date-block strong { font-size: 1.2rem; line-height: 1.1; }
+.bill-main { min-width: 0; display: grid; gap: 4px; }
+.bill-main > span, .bill-main > small { color: var(--slate-500); font-size: .75rem; }
+.bill-main > small { overflow-wrap: anywhere; }
+.bill-title-line { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; }
+.bill-title-line > strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.bill-status { display: inline-flex; align-items: center; width: fit-content; padding: 3px 7px; border-radius: 999px; color: var(--slate-600); background: var(--slate-100); font-size: .62rem; font-weight: 900; text-transform: uppercase; letter-spacing: .03em; }
+.bill-status.overdue { color: var(--red-700); background: var(--red-100); }
+.bill-status.due-today, .bill-status.due-soon { color: #b45309; background: #fef3c7; }
+.bill-status.paid { color: var(--green-700); background: var(--green-100); }
+.bill-status.snoozed { color: #6d28d9; background: #ede9fe; }
+.bill-status.upcoming { color: var(--blue-600); background: var(--blue-100); }
+.bill-amount { white-space: nowrap; }
+.bill-actions { display: flex; align-items: center; justify-content: flex-end; flex-wrap: wrap; gap: 7px; }
+.bill-actions .primary-button, .bill-actions .secondary-button { min-height: 34px; padding: 7px 10px; font-size: .72rem; }
+.recurring-bill-row { background: var(--slate-50); }
+
+.calendar-bill-reminder { padding: 2px 5px; border: 1px solid #fde68a; border-radius: 6px; color: #92400e; background: #fffbeb; font-size: .58rem; font-weight: 900; white-space: nowrap; }
+.calendar-bill-reminder.overdue { border-color: #fecaca; color: var(--red-700); background: #fff7f7; }
+.bill-calendar-agenda { margin-bottom: 18px; display: grid; gap: 10px; }
+
+@media (max-width: 900px) {
+  .bill-row { grid-template-columns: 58px minmax(0, 1fr) auto; }
+  .bill-actions { grid-column: 1 / -1; justify-content: flex-end; }
+  .dashboard-bill-row { grid-template-columns: 90px minmax(0, 1fr) auto; }
+  .dashboard-bill-row .text-button { grid-column: 2 / -1; justify-self: end; }
+}
+@media (max-width: 620px) {
+  .topbar-actions { gap: 7px; }
+  .reminder-button { width: 38px; height: 38px; }
+  .reminder-popover { right: 8px; top: calc(100% + 2px); }
+  .reminder-item { grid-template-columns: 32px minmax(0, 1fr); }
+  .reminder-item .text-button { grid-column: 2; justify-self: start; }
+  .bill-filters { grid-template-columns: 1fr; }
+  .bill-row { grid-template-columns: 48px minmax(0, 1fr); }
+  .bill-date-block { width: 46px; min-height: 50px; }
+  .bill-amount { grid-column: 2; justify-self: start; }
+  .bill-actions { grid-column: 1 / -1; display: grid; grid-template-columns: 1fr 1fr auto auto; }
+  .bill-actions .primary-button, .bill-actions .secondary-button { width: 100%; }
+  .dashboard-bill-row { grid-template-columns: 1fr auto; }
+  .dashboard-bill-date { grid-column: 1 / -1; }
+  .dashboard-bill-row .text-button { grid-column: 1 / -1; }
+}

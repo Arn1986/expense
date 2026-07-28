@@ -8,7 +8,7 @@
   <title>Ledgerly — Personal Finance</title>
   <link rel="manifest" href="manifest.webmanifest" />
   <link rel="icon" type="image/png" href="assets/dirham-symbol.png" />
-  <link rel="stylesheet" href="styles.css?v=10" />
+  <link rel="stylesheet" href="styles.css?v=11" />
 </head>
 <body>
   <section class="auth-screen" id="authScreen">
@@ -74,6 +74,7 @@
         <button class="nav-item" data-view="reconcile"><span>✓</span> Reconcile</button>
         <button class="nav-item" data-view="calendar"><span>▦</span> Calendar</button>
         <button class="nav-item" data-view="recurring"><span>↻</span> Recurring</button>
+        <button class="nav-item" data-view="bills"><span>◷</span> Bills</button>
         <button class="nav-item" data-view="budgets"><span>◎</span> Budgets</button>
         <button class="nav-item" data-view="reports"><span>⌁</span> Reports</button>
         <button class="nav-item" data-view="categories"><span>◇</span> Categories</button>
@@ -94,7 +95,17 @@
           <p class="eyebrow" id="todayLabel"></p>
           <h1 id="pageTitle">Dashboard</h1>
         </div>
-        <button class="primary-button" id="openTransactionButton" type="button">+ Add entry</button>
+        <div class="topbar-actions">
+          <button class="reminder-button" id="reminderButton" type="button" aria-label="Open reminders" aria-expanded="false">
+            <span aria-hidden="true">🔔</span><span class="reminder-badge" id="reminderBadge" hidden>0</span>
+          </button>
+          <button class="primary-button" id="openTransactionButton" type="button">+ Add entry</button>
+        </div>
+        <div class="reminder-popover" id="reminderPopover" hidden>
+          <div class="reminder-popover-heading"><div><p class="eyebrow">In-app reminders</p><h2>Needs attention</h2></div><button class="icon-button" id="closeReminderPopover" type="button" aria-label="Close reminders">×</button></div>
+          <div id="reminderPopoverList"></div>
+          <button class="secondary-button wide-button" data-go-to="bills" type="button">View all bills</button>
+        </div>
       </header>
 
       <div class="local-banner" id="localBanner" hidden>
@@ -128,6 +139,14 @@
             <button class="text-button" data-go-to="creditcards">Manage cards</button>
           </div>
           <div id="dashboardCreditCards"></div>
+        </section>
+
+        <section class="panel dashboard-bills-panel" id="dashboardBillsPanel">
+          <div class="panel-heading">
+            <div><p class="eyebrow">Coming up</p><h2>Bills and reminders</h2></div>
+            <button class="text-button" data-go-to="bills">View bills</button>
+          </div>
+          <div id="dashboardBills"></div>
         </section>
 
         <div class="content-grid two-columns">
@@ -280,6 +299,32 @@
         </section>
       </section>
 
+
+      <section class="view" id="billsView">
+        <div class="section-toolbar">
+          <div>
+            <p class="section-copy">Track one-time bills and upcoming recurring expenses. Ledgerly shows reminders inside the app when a due date enters its reminder window.</p>
+            <p class="section-note">One-time bills do not affect balances until you record a payment. Repeating bills continue to use the Recurring schedules page.</p>
+          </div>
+          <div class="button-row">
+            <button class="secondary-button" id="openRecurringBillButton" type="button">↻ Add recurring bill</button>
+            <button class="primary-button" id="openBillButton" type="button">+ Add one-time bill</button>
+          </div>
+        </div>
+        <div class="summary-grid" id="billSummary"></div>
+        <section class="panel">
+          <div class="filters bill-filters">
+            <label><span>Status</span><select id="billStatusFilter"><option value="open">Open bills</option><option value="all">All bills</option><option value="paid">Paid</option><option value="overdue">Overdue</option></select></label>
+            <label><span>Due within</span><select id="billRangeFilter"><option value="all">Any date</option><option value="7">7 days</option><option value="30" selected>30 days</option><option value="90">90 days</option></select></label>
+          </div>
+          <div id="billsList"></div>
+        </section>
+        <section class="panel">
+          <div class="panel-heading"><div><p class="eyebrow">Repeating expenses</p><h2>Recurring bill reminders</h2></div><button class="text-button" data-go-to="recurring">Manage schedules</button></div>
+          <div id="recurringBillsList"></div>
+        </section>
+      </section>
+
       <section class="view" id="reconcileView">
         <div class="section-toolbar">
           <div>
@@ -376,7 +421,7 @@
           </section>
           <section class="panel">
             <div class="panel-heading"><div><p class="eyebrow">Exports</p><h2>Download your data</h2></div></div>
-            <p class="muted">JSON preserves accounts, categories, budgets, recurring schedules, reconciliations, and transactions. CSV creates a spreadsheet-friendly transaction list.</p>
+            <p class="muted">JSON preserves accounts, categories, budgets, bills, recurring schedules, reconciliations, and transactions. CSV creates a spreadsheet-friendly transaction list.</p>
             <div class="button-row"><button class="secondary-button" id="exportButton">Export JSON backup</button><button class="secondary-button" id="exportCsvButton">Export transactions CSV</button></div>
           </section>
         </div>
@@ -473,6 +518,7 @@
               <label class="field"><span>Start date</span><input id="recurringStartDate" type="date" required /></label>
               <label class="field"><span>Ends</span><select id="recurringEndMode"><option value="never">No end date</option><option value="date">On a selected date</option></select></label>
               <label class="field" id="recurringEndDateField" hidden><span>End date</span><input id="recurringEndDate" type="date" /></label>
+              <label class="field recurring-reminder-field"><span>Remind me before</span><select id="recurringReminderDays"><option value="0">On the due date</option><option value="1">1 day before</option><option value="3" selected>3 days before</option><option value="7">7 days before</option><option value="14">14 days before</option><option value="30">30 days before</option></select></label>
             </div>
           </div>
 
@@ -481,6 +527,27 @@
         <p class="field-help">Edits change future planned occurrences. Transactions already posted from this schedule remain unchanged.</p>
         <p class="form-error" id="recurringFormError" role="alert"></p>
         <div class="modal-actions"><button class="secondary-button" type="button" data-close-modal="recurringModal">Cancel</button><button class="primary-button" type="submit">Save schedule</button></div>
+      </form>
+    </section>
+  </div>
+
+
+  <div class="modal-backdrop" id="billModal" hidden>
+    <section class="modal small-modal" role="dialog" aria-modal="true" aria-labelledby="billModalTitle">
+      <div class="modal-header"><div><p class="eyebrow">Bill reminder</p><h2 id="billModalTitle">Add one-time bill</h2></div><button class="icon-button" data-close-modal="billModal" aria-label="Close">×</button></div>
+      <form id="billForm">
+        <input type="hidden" id="billId" />
+        <div class="form-grid">
+          <label class="field full-width"><span>Bill name</span><input id="billName" type="text" maxlength="100" placeholder="e.g. Car insurance renewal" required /></label>
+          <label class="field"><span>Amount</span><div class="money-input"><span class="aed-symbol" aria-hidden="true"></span><input id="billAmount" type="number" min="0.01" step="0.01" inputmode="decimal" placeholder="0.00" required /></div></label>
+          <label class="field"><span>Due date</span><input id="billDueDate" type="date" required /></label>
+          <label class="field"><span>Pay from account</span><select id="billAccount"></select></label>
+          <label class="field"><span>Expense category</span><select id="billCategory"></select></label>
+          <label class="field"><span>Remind me before</span><select id="billReminderDays"><option value="0">On the due date</option><option value="1">1 day before</option><option value="3" selected>3 days before</option><option value="7">7 days before</option><option value="14">14 days before</option><option value="30">30 days before</option></select></label>
+          <label class="field full-width"><span>Notes <span class="optional-label">Optional</span></span><textarea id="billNotes" maxlength="1000" rows="3" placeholder="Reference number, payment method, or anything you need to remember"></textarea></label>
+        </div>
+        <p class="form-error" id="billFormError" role="alert"></p>
+        <div class="modal-actions"><button class="secondary-button" type="button" data-close-modal="billModal">Cancel</button><button class="primary-button" type="submit">Save bill</button></div>
       </form>
     </section>
   </div>
@@ -677,6 +744,6 @@
   </div>
 
   <div class="toast" id="toast" role="status" aria-live="polite"></div>
-  <script type="module" src="app.js?v=10"></script>
+  <script type="module" src="app.js?v=11"></script>
 </body>
 </html>
