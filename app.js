@@ -2641,7 +2641,7 @@ function openTransactionModal(id = null, presetDate = "", billId = "") {
   el.receiptFileHelp.textContent = mode === "cloud"
     ? "Receipts are stored privately in your Supabase project and are available on your signed-in devices."
     : "Receipt uploads require Supabase cloud sync. Remarks are still saved in local preview.";
-  let type = presetType || "expense";
+  let type = "expense";
   if (id) {
     const transaction = state.transactions.find((item) => item.id === id);
     if (!transaction) return;
