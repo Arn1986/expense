@@ -743,3 +743,33 @@ a.secondary-button { display: inline-flex; align-items: center; justify-content:
 @media (max-width: 620px) { .credit-card-limit-section { grid-template-columns: 1fr 1fr; } .credit-card-metric:nth-child(3) { grid-column: 1 / -1; } .credit-card-cycle-grid { grid-template-columns: 1fr; } .credit-card-statement-figures { align-items: flex-start; flex-direction: column; } .credit-card-actions { display: grid; grid-template-columns: 1fr 1fr; } .credit-card-actions .text-button { grid-column: 1 / -1; } .credit-card-statement-row { grid-template-columns: minmax(0, 1fr) auto; } .credit-card-statement-row > div:nth-child(2), .credit-card-statement-row > div:nth-child(3), .credit-card-statement-row > div:nth-child(4), .credit-card-statement-row > div:nth-child(5), .credit-card-statement-row > div:nth-child(6) { display: none; } .card-reminder-row { grid-template-columns: 1fr; } .card-reminder-row .planned-row-side { justify-content: flex-start; flex-wrap: wrap; } }
 
 @media (max-width: 620px) { .card-appearance-editor { grid-template-columns: 1fr; } .card-appearance-preview { width: 100%; max-width: 360px; } .credit-card-last-four { right: 18px; } }
+
+
+/* Import rules and automatic categorization */
+.import-rule-help-panel { margin-top: 1rem; }
+.import-rule-example-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: .85rem; }
+.import-rule-example-grid > div { display: flex; flex-direction: column; gap: .25rem; padding: 1rem; border: 1px solid var(--border); border-radius: 16px; background: var(--surface-soft); }
+.import-rule-example-grid span { color: var(--muted); font-size: .88rem; }
+.import-rule-list { display: grid; gap: .7rem; }
+.import-rule-row { display: grid; grid-template-columns: 48px minmax(0, 1fr) auto; align-items: center; gap: .9rem; padding: .9rem 0; border-bottom: 1px solid var(--border); }
+.import-rule-row:last-child { border-bottom: 0; }
+.import-rule-row.paused { opacity: .62; }
+.import-rule-priority { width: 42px; height: 42px; border-radius: 13px; display: grid; place-items: center; background: var(--surface-soft); border: 1px solid var(--border); font-weight: 800; color: var(--muted); }
+.import-rule-copy { min-width: 0; display: flex; flex-direction: column; gap: .23rem; }
+.import-rule-copy > span, .import-rule-copy > small { color: var(--muted); overflow-wrap: anywhere; }
+.import-rule-title-line { display: flex; align-items: center; flex-wrap: wrap; gap: .45rem; }
+.rule-state { display: inline-flex; align-items: center; border-radius: 999px; padding: .16rem .48rem; background: var(--surface-soft); color: var(--muted); font-size: .72rem; font-weight: 800; text-transform: uppercase; letter-spacing: .04em; }
+.rule-state.active { background: rgba(22, 163, 74, .12); color: #15803d; }
+.rule-enabled-field { align-self: end; min-height: 44px; }
+.rule-test-result { margin-top: 1rem; min-height: 90px; padding: 1rem; border: 1px solid var(--border); border-radius: 16px; background: var(--surface-soft); display: flex; flex-direction: column; gap: .3rem; }
+.rule-test-result span, .rule-test-result small { color: var(--muted); }
+.import-count.rule { background: rgba(124, 58, 237, .12); color: #6d28d9; }
+.matched-rule-chip { display: inline-flex; align-items: center; max-width: 180px; padding: .25rem .5rem; border-radius: 999px; background: rgba(124, 58, 237, .12); color: #6d28d9; font-size: .75rem; font-weight: 800; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.compact-rule-button { white-space: nowrap; font-size: .78rem; }
+.import-rule-preview-table { min-width: 1120px; }
+
+@media (max-width: 760px) {
+  .import-rule-example-grid { grid-template-columns: 1fr; }
+  .import-rule-row { grid-template-columns: 42px minmax(0, 1fr); }
+  .import-rule-row .row-actions { grid-column: 1 / -1; justify-content: flex-end; }
+}

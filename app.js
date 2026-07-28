@@ -65,6 +65,7 @@ let calendarCursor = new Date(new Date().getFullYear(), new Date().getMonth(), 1
 let selectedCalendarDate = todayISO();
 let postingRecurringEntries = false;
 let reconciliationBusy = false;
+let importRuleReturnToImport = false;
 
 const el = Object.fromEntries([...document.querySelectorAll("[id]")].map((node) => [node.id, node]));
 
@@ -153,6 +154,11 @@ function bindEvents() {
 
   el.openTransactionButton.addEventListener("click", () => openTransactionModal());
   el.openTransactionImportButton.addEventListener("click", openTransactionImportModal);
+  el.openImportRuleButton.addEventListener("click", () => openImportRuleModal());
+  el.testImportRulesButton.addEventListener("click", openImportRuleTestModal);
+  el.importRuleTransactionType.addEventListener("change", updateImportRuleRouteFields);
+  el.importRuleForm.addEventListener("submit", handleImportRuleSubmit);
+  el.importRuleTestForm.addEventListener("submit", handleImportRuleTest);
   el.openRecurringButton.addEventListener("click", () => openRecurringModal());
   [el.reconcileAccount, el.reconcileStatementDate, el.reconcileStatementBalance].forEach((input) => input.addEventListener("input", renderReconciliation));
   el.reconcileShowReconciled.addEventListener("change", renderReconciliation);
@@ -212,6 +218,8 @@ function bindEvents() {
   el.importInput.addEventListener("change", importJSON);
   el.transactionImportInput.addEventListener("change", handleTransactionImportFile);
   el.importDefaultAccount.addEventListener("change", validateTransactionImport);
+  el.importBlankTypeMode.addEventListener("change", validateTransactionImport);
+  el.importApplyRules.addEventListener("change", validateTransactionImport);
   el.importCreateCategories.addEventListener("change", validateTransactionImport);
   el.importSkipDuplicates.addEventListener("change", validateTransactionImport);
   el.importTransactionsButton.addEventListener("click", importValidatedTransactions);
@@ -236,6 +244,10 @@ function bindEvents() {
       "delete-budget": () => deleteBudget(id),
       "edit-category": () => openCategoryModal(id),
       "delete-category": () => deleteCategory(id),
+      "edit-import-rule": () => openImportRuleModal(id),
+      "toggle-import-rule": () => toggleImportRule(id),
+      "delete-import-rule": () => deleteImportRule(id),
+      "create-rule-from-import": () => openImportRuleFromPreview(Number(actionTarget.dataset.index)),
       "edit-recurring": () => openRecurringModal(id),
       "toggle-recurring": () => toggleRecurringEntry(id),
       "post-recurring": () => postRecurringOccurrenceById(id, actionTarget.dataset.date),
@@ -343,7 +355,7 @@ function setAuthBusy(busy) {
 function showAuthError(message) { el.authError.textContent = message; }
 
 async function loadCloudState() {
-  const [accountsResult, categoriesResult, transactionsResult, budgetsResult, recurringResult, reconciliationsResult, clearingsResult, cardStatementsResult] = await Promise.all([
+  const [accountsResult, categoriesResult, transactionsResult, budgetsResult, recurringResult, reconciliationsResult, clearingsResult, cardStatementsResult, importRulesResult] = await Promise.all([
     supabase.from("accounts").select("*").order("created_at", { ascending: true }),
     supabase.from("categories").select("*").order("kind").order("name"),
     supabase.from("transactions").select("*").order("entry_date", { ascending: false }).order("created_at", { ascending: false }),
@@ -352,12 +364,13 @@ async function loadCloudState() {
     supabase.from("reconciliations").select("*").order("statement_date", { ascending: false }).order("completed_at", { ascending: false }),
     supabase.from("transaction_clearings").select("*").order("created_at", { ascending: true }),
     supabase.from("credit_card_statements").select("*").order("statement_date", { ascending: false }),
+    supabase.from("import_rules").select("*").order("priority", { ascending: true }).order("created_at", { ascending: true }),
   ]);
-  [accountsResult, categoriesResult, transactionsResult, budgetsResult, recurringResult, reconciliationsResult, clearingsResult, cardStatementsResult].forEach((result) => {
+  [accountsResult, categoriesResult, transactionsResult, budgetsResult, recurringResult, reconciliationsResult, clearingsResult, cardStatementsResult, importRulesResult].forEach((result) => {
     if (result.error) throw result.error;
   });
   state = {
-    version: 5,
+    version: 6,
     accounts: accountsResult.data || [],
     categories: categoriesResult.data || [],
     transactions: transactionsResult.data || [],
@@ -366,6 +379,7 @@ async function loadCloudState() {
     reconciliations: reconciliationsResult.data || [],
     transactionClearings: clearingsResult.data || [],
     creditCardStatements: cardStatementsResult.data || [],
+    importRules: importRulesResult.data || [],
   };
 }
 
@@ -377,12 +391,12 @@ async function seedDefaultCategories() {
 }
 
 function emptyState() {
-  return { version: 5, accounts: [], categories: [], transactions: [], budgets: [], recurringEntries: [], reconciliations: [], transactionClearings: [], creditCardStatements: [] };
+  return { version: 6, accounts: [], categories: [], transactions: [], budgets: [], recurringEntries: [], reconciliations: [], transactionClearings: [], creditCardStatements: [], importRules: [] };
 }
 
 function normalizeState(value) {
   return {
-    version: 5,
+    version: 6,
     accounts: Array.isArray(value?.accounts) ? value.accounts : [],
     categories: Array.isArray(value?.categories) ? value.categories : [],
     transactions: Array.isArray(value?.transactions) ? value.transactions : [],
@@ -391,12 +405,13 @@ function normalizeState(value) {
     reconciliations: Array.isArray(value?.reconciliations) ? value.reconciliations : [],
     transactionClearings: Array.isArray(value?.transactionClearings) ? value.transactionClearings : Array.isArray(value?.transaction_clearings) ? value.transaction_clearings : [],
     creditCardStatements: Array.isArray(value?.creditCardStatements) ? value.creditCardStatements : Array.isArray(value?.credit_card_statements) ? value.credit_card_statements : [],
+    importRules: Array.isArray(value?.importRules) ? value.importRules : Array.isArray(value?.import_rules) ? value.import_rules : [],
   };
 }
 
 function defaultLocalState() {
   return {
-    version: 5,
+    version: 6,
     accounts: [
       localRow({ name: "Current Account", type: "current", opening_balance: 0, color: ACCOUNT_COLORS.current, include_in_net_worth: true }),
       localRow({ name: "Savings", type: "savings", opening_balance: 0, color: ACCOUNT_COLORS.savings, include_in_net_worth: true }),
@@ -409,6 +424,7 @@ function defaultLocalState() {
     reconciliations: [],
     transactionClearings: [],
     creditCardStatements: [],
+    importRules: [],
   };
 }
 
@@ -479,7 +495,7 @@ function migrateLegacyState(legacy) {
       to_account_id: transaction.toAccountId || transaction.to_account_id || null,
     });
   });
-  return { version: 5, accounts, categories, transactions, budgets: [], recurringEntries: [], reconciliations: [], transactionClearings: [], creditCardStatements: [] };
+  return { version: 6, accounts, categories, transactions, budgets: [], recurringEntries: [], reconciliations: [], transactionClearings: [], creditCardStatements: [], importRules: [] };
 }
 
 function persistLocal() {
@@ -528,10 +544,11 @@ function switchView(view) {
   activeView = view;
   document.querySelectorAll(".view").forEach((section) => section.classList.toggle("active", section.id === `${view}View`));
   document.querySelectorAll(".nav-item").forEach((button) => button.classList.toggle("active", button.dataset.view === view));
-  const titles = { dashboard: "Dashboard", accounts: "Accounts", creditcards: "Credit cards", transactions: "Transactions", reconcile: "Reconcile", calendar: "Calendar", recurring: "Recurring", budgets: "Budgets", reports: "Reports", categories: "Categories", settings: "Data & settings" };
+  const titles = { dashboard: "Dashboard", accounts: "Accounts", creditcards: "Credit cards", transactions: "Transactions", rules: "Import rules", reconcile: "Reconcile", calendar: "Calendar", recurring: "Recurring", budgets: "Budgets", reports: "Reports", categories: "Categories", settings: "Data & settings" };
   el.pageTitle.textContent = titles[view] || "Ledgerly";
   el.sidebar.classList.remove("open");
   if (view === "reports") renderReports();
+  if (view === "rules") renderImportRules();
   if (view === "creditcards") renderCreditCards();
   if (view === "reconcile") renderReconciliation();
   if (view === "calendar") renderCalendar();
@@ -544,6 +561,7 @@ function render() {
   renderAccounts();
   renderCreditCards();
   renderTransactions();
+  renderImportRules();
   renderReconciliation();
   renderCalendar();
   renderRecurringEntries();
@@ -2886,7 +2904,7 @@ async function handleCategorySubmit(event) {
   const duplicate = state.categories.some((category) => category.id !== id && category.kind === row.kind && category.name.toLowerCase() === row.name.toLowerCase());
   if (duplicate) return showFormError(el.categoryFormError, "That category already exists for this entry type.");
   if (id) {
-    const usedByWrongType = state.transactions.some((transaction) => transaction.category_id === id && transaction.type !== row.kind) || state.recurringEntries.some((rule) => rule.category_id === id && rule.type !== row.kind);
+    const usedByWrongType = state.transactions.some((transaction) => transaction.category_id === id && transaction.type !== row.kind) || state.recurringEntries.some((rule) => rule.category_id === id && rule.type !== row.kind) || state.importRules.some((rule) => rule.category_id === id && rule.transaction_type !== row.kind);
     if (usedByWrongType) return showFormError(el.categoryFormError, "The category type cannot change while entries use it.");
   }
   try {
@@ -2905,8 +2923,8 @@ async function handleCategorySubmit(event) {
 async function deleteAccount(id) {
   const account = state.accounts.find((item) => item.id === id);
   if (!account) return;
-  const inUse = state.transactions.some((transaction) => [transaction.account_id, transaction.from_account_id, transaction.to_account_id].includes(id)) || state.recurringEntries.some((rule) => [rule.account_id, rule.from_account_id, rule.to_account_id].includes(id)) || state.reconciliations.some((item) => item.account_id === id) || state.creditCardStatements.some((item) => item.account_id === id);
-  if (inUse) return showToast("Delete or move this account's transactions, recurring schedules, statements, and reconciliation history first.", true);
+  const inUse = state.transactions.some((transaction) => [transaction.account_id, transaction.from_account_id, transaction.to_account_id].includes(id)) || state.recurringEntries.some((rule) => [rule.account_id, rule.from_account_id, rule.to_account_id].includes(id)) || state.reconciliations.some((item) => item.account_id === id) || state.creditCardStatements.some((item) => item.account_id === id) || state.importRules.some((rule) => [rule.account_id, rule.from_account_id, rule.to_account_id].includes(id));
+  if (inUse) return showToast("Delete or move this account's transactions, recurring schedules, import rules, statements, and reconciliation history first.", true);
   if (!confirm(`Delete ${account.name}?`)) return;
   try {
     await deleteRow("accounts", id);
@@ -2945,8 +2963,8 @@ async function deleteBudget(id) {
 async function deleteCategory(id) {
   const category = state.categories.find((item) => item.id === id);
   if (!category) return;
-  const inUse = state.transactions.some((transaction) => transaction.category_id === id) || state.budgets.some((budget) => budget.category_id === id) || state.recurringEntries.some((rule) => rule.category_id === id);
-  if (inUse) return showToast("Remove this category from transactions, budgets, and recurring schedules first.", true);
+  const inUse = state.transactions.some((transaction) => transaction.category_id === id) || state.budgets.some((budget) => budget.category_id === id) || state.recurringEntries.some((rule) => rule.category_id === id) || state.importRules.some((rule) => rule.category_id === id);
+  if (inUse) return showToast("Remove this category from transactions, budgets, recurring schedules, and import rules first.", true);
   if (!confirm(`Delete ${category.name}?`)) return;
   try {
     await deleteRow("categories", id);
@@ -3108,6 +3126,257 @@ function transactionAccountText(transaction) {
 }
 
 
+
+function sortedImportRules() {
+  return [...state.importRules].sort((a, b) => number(a.priority) - number(b.priority) || String(a.created_at).localeCompare(String(b.created_at)));
+}
+
+function renderImportRules() {
+  const rules = sortedImportRules();
+  const active = rules.filter((rule) => rule.enabled !== false);
+  const counts = { expense: 0, income: 0, transfer: 0 };
+  active.forEach((rule) => { if (counts[rule.transaction_type] !== undefined) counts[rule.transaction_type] += 1; });
+  el.importRuleSummary.innerHTML = [
+    summaryCard("Active rules", active.length, `${rules.length - active.length} paused`, active.length ? "positive" : "", false, ""),
+    summaryCard("Expense rules", counts.expense, "Merchant spending", "", false, ""),
+    summaryCard("Income rules", counts.income, "Salary and deposits", "", false, ""),
+    summaryCard("Transfer rules", counts.transfer, "Payments and movements", "", false, ""),
+  ].join("");
+  if (!rules.length) {
+    el.importRulesList.innerHTML = emptyHTML("No import rules yet", "Create a rule for merchants, salary descriptions, card payments, or recurring bank text.");
+    return;
+  }
+  el.importRulesList.innerHTML = `<div class="import-rule-list">${rules.map((rule) => {
+    const enabled = rule.enabled !== false;
+    const matchLabel = `${importRuleFieldLabel(rule.match_field)} ${importRuleMatchLabel(rule.match_type)} “${rule.match_value}”`;
+    const route = importRuleRouteText(rule);
+    return `<article class="import-rule-row ${enabled ? "" : "paused"}">
+      <div class="import-rule-priority" title="Priority">${number(rule.priority)}</div>
+      <div class="import-rule-copy"><div class="import-rule-title-line"><strong>${escapeHTML(rule.name)}</strong><span class="transaction-type ${escapeHTML(rule.transaction_type)}">${escapeHTML(capitalize(rule.transaction_type))}</span>${enabled ? `<span class="rule-state active">Active</span>` : `<span class="rule-state">Paused</span>`}</div><span>${escapeHTML(matchLabel)}</span><small>${escapeHTML(route)}</small></div>
+      <div class="row-actions"><button class="row-action wide" data-action="toggle-import-rule" data-id="${rule.id}" type="button">${enabled ? "Pause" : "Enable"}</button><button class="row-action" data-action="edit-import-rule" data-id="${rule.id}" aria-label="Edit rule">✎</button><button class="row-action danger" data-action="delete-import-rule" data-id="${rule.id}" aria-label="Delete rule">×</button></div>
+    </article>`;
+  }).join("")}</div>`;
+}
+
+function importRuleFieldLabel(value) {
+  return ({ description: "Description", remarks: "Remarks", description_remarks: "Description + remarks" })[value] || "Description";
+}
+
+function importRuleMatchLabel(value) {
+  return ({ contains: "contains", starts_with: "starts with", ends_with: "ends with", equals: "equals" })[value] || "contains";
+}
+
+function importRuleRouteText(rule) {
+  if (rule.transaction_type === "transfer") return `${accountById(rule.from_account_id)?.name || "Unknown account"} → ${accountById(rule.to_account_id)?.name || "Unknown account"}`;
+  return `${categoryById(rule.category_id)?.name || "Unknown category"} · ${accountById(rule.account_id)?.name || "Unknown account"}`;
+}
+
+function openImportRuleModal(id = null, preset = null) {
+  if (!state.accounts.length) return showToast("Add an account before creating an import rule.", true);
+  el.importRuleForm.reset();
+  el.importRuleId.value = "";
+  el.importRulePriority.value = "100";
+  el.importRuleEnabled.checked = true;
+  el.importRuleFormError.textContent = "";
+  const existing = id ? state.importRules.find((rule) => rule.id === id) : null;
+  const source = existing || preset;
+  const type = source?.transaction_type || "expense";
+  el.importRuleModalTitle.textContent = existing ? "Edit import rule" : "Add import rule";
+  el.importRuleId.value = existing?.id || "";
+  el.importRuleName.value = source?.name || "";
+  el.importRulePriority.value = source?.priority || 100;
+  el.importRuleEnabled.checked = source?.enabled !== false;
+  el.importRuleMatchField.value = source?.match_field || "description";
+  el.importRuleMatchType.value = source?.match_type || "contains";
+  el.importRuleMatchValue.value = source?.match_value || "";
+  el.importRuleTransactionType.value = type;
+  renderImportRuleRouteOptions(type, source);
+  updateImportRuleRouteFields();
+  openModal(el.importRuleModal);
+  window.setTimeout(() => el.importRuleName.focus(), 0);
+}
+
+function renderImportRuleRouteOptions(type, source = null) {
+  const accountOptions = state.accounts.map((account) => `<option value="${account.id}">${escapeHTML(account.name)}</option>`).join("");
+  [el.importRuleAccount, el.importRuleFromAccount, el.importRuleToAccount].forEach((select) => { select.innerHTML = accountOptions || `<option value="">No accounts available</option>`; });
+  const categories = state.categories.filter((category) => category.kind === type).sort((a, b) => a.name.localeCompare(b.name));
+  el.importRuleCategory.innerHTML = categories.map((category) => `<option value="${category.id}">${escapeHTML(category.name)}</option>`).join("") || `<option value="">No ${escapeHTML(type)} categories</option>`;
+  if (source?.category_id && [...el.importRuleCategory.options].some((option) => option.value === source.category_id)) el.importRuleCategory.value = source.category_id;
+  if (source?.account_id && [...el.importRuleAccount.options].some((option) => option.value === source.account_id)) el.importRuleAccount.value = source.account_id;
+  if (source?.from_account_id && [...el.importRuleFromAccount.options].some((option) => option.value === source.from_account_id)) el.importRuleFromAccount.value = source.from_account_id;
+  if (source?.to_account_id && [...el.importRuleToAccount.options].some((option) => option.value === source.to_account_id)) el.importRuleToAccount.value = source.to_account_id;
+}
+
+function updateImportRuleRouteFields() {
+  const type = el.importRuleTransactionType.value;
+  document.querySelectorAll(".rule-expense-income-field").forEach((field) => field.hidden = type === "transfer");
+  document.querySelectorAll(".rule-transfer-field").forEach((field) => field.hidden = type !== "transfer");
+  const currentCategory = el.importRuleCategory.value;
+  const categories = state.categories.filter((category) => category.kind === type).sort((a, b) => a.name.localeCompare(b.name));
+  el.importRuleCategory.innerHTML = categories.map((category) => `<option value="${category.id}">${escapeHTML(category.name)}</option>`).join("") || `<option value="">No ${escapeHTML(type)} categories</option>`;
+  if ([...el.importRuleCategory.options].some((option) => option.value === currentCategory)) el.importRuleCategory.value = currentCategory;
+}
+
+async function handleImportRuleSubmit(event) {
+  event.preventDefault();
+  el.importRuleFormError.textContent = "";
+  const id = el.importRuleId.value;
+  const type = el.importRuleTransactionType.value;
+  const row = {
+    name: el.importRuleName.value.trim(),
+    enabled: el.importRuleEnabled.checked,
+    priority: Math.trunc(number(el.importRulePriority.value)),
+    match_field: el.importRuleMatchField.value,
+    match_type: el.importRuleMatchType.value,
+    match_value: el.importRuleMatchValue.value.trim(),
+    transaction_type: type,
+    category_id: type === "transfer" ? null : el.importRuleCategory.value || null,
+    account_id: type === "transfer" ? null : el.importRuleAccount.value || null,
+    from_account_id: type === "transfer" ? el.importRuleFromAccount.value || null : null,
+    to_account_id: type === "transfer" ? el.importRuleToAccount.value || null : null,
+  };
+  if (!row.name) return showFormError(el.importRuleFormError, "Enter a rule name.");
+  if (!(row.priority >= 1 && row.priority <= 9999)) return showFormError(el.importRuleFormError, "Priority must be between 1 and 9,999.");
+  if (!row.match_value) return showFormError(el.importRuleFormError, "Enter text to match.");
+  if (type === "transfer" && (!row.from_account_id || !row.to_account_id || row.from_account_id === row.to_account_id)) return showFormError(el.importRuleFormError, "Choose two different transfer accounts.");
+  if (type !== "transfer" && (!row.category_id || !row.account_id)) return showFormError(el.importRuleFormError, "Choose a category and account.");
+  try {
+    if (mode === "cloud") {
+      setSyncStatus("syncing", "Saving import rule");
+      const query = id ? supabase.from("import_rules").update(row).eq("id", id).eq("user_id", user.id) : supabase.from("import_rules").insert({ ...row, user_id: user.id });
+      const { data, error } = await query.select().single();
+      if (error) throw error;
+      if (id) state.importRules = state.importRules.map((rule) => rule.id === id ? data : rule);
+      else state.importRules.push(data);
+      setSyncStatus("cloud", "Cloud synchronized");
+    } else {
+      if (id) state.importRules = state.importRules.map((rule) => rule.id === id ? { ...rule, ...row, updated_at: new Date().toISOString() } : rule);
+      else state.importRules.push(localRow(row));
+      persistLocal();
+    }
+    closeModal(el.importRuleModal);
+    renderImportRules();
+    if (transactionImportSourceRows.length) validateTransactionImport();
+    showToast(id ? "Import rule updated." : "Import rule created.");
+  } catch (error) { showFormError(el.importRuleFormError, friendlyError(error)); }
+}
+
+async function toggleImportRule(id) {
+  const rule = state.importRules.find((item) => item.id === id);
+  if (!rule) return;
+  const enabled = rule.enabled === false;
+  try {
+    if (mode === "cloud") {
+      const { data, error } = await supabase.from("import_rules").update({ enabled }).eq("id", id).eq("user_id", user.id).select().single();
+      if (error) throw error;
+      state.importRules = state.importRules.map((item) => item.id === id ? data : item);
+    } else {
+      rule.enabled = enabled; rule.updated_at = new Date().toISOString(); persistLocal();
+    }
+    renderImportRules();
+    if (transactionImportSourceRows.length) validateTransactionImport();
+    showToast(enabled ? "Rule enabled." : "Rule paused.");
+  } catch (error) { showToast(friendlyError(error), true); }
+}
+
+async function deleteImportRule(id) {
+  const rule = state.importRules.find((item) => item.id === id);
+  if (!rule || !confirm(`Delete the import rule “${rule.name}”?`)) return;
+  try {
+    if (mode === "cloud") {
+      const { error } = await supabase.from("import_rules").delete().eq("id", id).eq("user_id", user.id);
+      if (error) throw error;
+    }
+    state.importRules = state.importRules.filter((item) => item.id !== id);
+    persistLocal();
+    renderImportRules();
+    if (transactionImportSourceRows.length) validateTransactionImport();
+    showToast("Import rule deleted.");
+  } catch (error) { showToast(friendlyError(error), true); }
+}
+
+function openImportRuleTestModal() {
+  el.importRuleTestForm.reset();
+  el.importRuleTestResult.innerHTML = "<span>Enter text to see which enabled rule wins.</span>";
+  openModal(el.importRuleTestModal);
+  window.setTimeout(() => el.importRuleTestText.focus(), 0);
+}
+
+function handleImportRuleTest(event) {
+  event.preventDefault();
+  const text = el.importRuleTestText.value.trim();
+  const rule = findMatchingImportRule({ description: text, remarks: "", type: "" });
+  el.importRuleTestResult.innerHTML = rule ? `<strong>${escapeHTML(rule.name)}</strong><span>${escapeHTML(capitalize(rule.transaction_type))} · ${escapeHTML(importRuleRouteText(rule))}</span><small>Priority ${number(rule.priority)} · ${escapeHTML(importRuleFieldLabel(rule.match_field))} ${escapeHTML(importRuleMatchLabel(rule.match_type))} “${escapeHTML(rule.match_value)}”</small>` : `<strong>No rule matched</strong><span>This row would need values from the file or import fallback options.</span>`;
+}
+
+function openImportRuleFromPreview(index) {
+  const row = transactionImportValidation[index];
+  if (!row) return;
+  const normalized = row.normalized;
+  const description = normalized.description || String(row.source.description || "").trim();
+  const matchValue = suggestedImportRuleMatch(description);
+  const type = normalized.type || "expense";
+  importRuleReturnToImport = true;
+  openImportRuleModal(null, {
+    name: matchValue ? `${matchValue} → ${capitalize(type)}` : `Imported ${capitalize(type)} rule`,
+    priority: 100,
+    enabled: true,
+    match_field: "description",
+    match_type: "contains",
+    match_value: matchValue,
+    transaction_type: type,
+    category_id: state.categories.find((category) => category.kind === type && normalizeLookup(category.name) === normalizeLookup(normalized.categoryName))?.id || null,
+    account_id: state.accounts.find((account) => normalizeLookup(account.name) === normalizeLookup(normalized.accountName))?.id || null,
+    from_account_id: state.accounts.find((account) => normalizeLookup(account.name) === normalizeLookup(normalized.fromAccountName))?.id || null,
+    to_account_id: state.accounts.find((account) => normalizeLookup(account.name) === normalizeLookup(normalized.toAccountName))?.id || null,
+  });
+}
+
+function suggestedImportRuleMatch(description) {
+  const cleaned = String(description || "").trim().replace(/\s+/g, " ");
+  if (!cleaned) return "";
+  const withoutReference = cleaned.replace(/\b\d{4,}\b/g, "").replace(/\s+/g, " ").trim();
+  return (withoutReference || cleaned).slice(0, 80);
+}
+
+function findMatchingImportRule(source) {
+  const sourceType = normalizeImportType(source.type);
+  return sortedImportRules().find((rule) => {
+    if (rule.enabled === false) return false;
+    if (sourceType && sourceType !== rule.transaction_type) return false;
+    const description = String(source.description ?? "");
+    const remarks = String(source.remarks ?? "");
+    const haystack = rule.match_field === "remarks" ? remarks : rule.match_field === "description_remarks" ? `${description} ${remarks}` : description;
+    return importRuleTextMatches(haystack, rule.match_value, rule.match_type);
+  }) || null;
+}
+
+function importRuleTextMatches(haystack, needle, method) {
+  const left = normalizeLookup(haystack);
+  const right = normalizeLookup(needle);
+  if (!left || !right) return false;
+  if (method === "equals") return left === right;
+  if (method === "starts_with") return left.startsWith(right);
+  if (method === "ends_with") return left.endsWith(right);
+  return left.includes(right);
+}
+
+function applyImportRule(source, normalized) {
+  if (!el.importApplyRules.checked) return null;
+  const rule = findMatchingImportRule(source);
+  if (!rule) return null;
+  if (!normalized.type) normalized.type = rule.transaction_type;
+  if (normalized.type !== rule.transaction_type) return null;
+  if (rule.transaction_type === "transfer") {
+    if (!normalized.fromAccountName) normalized.fromAccountName = accountById(rule.from_account_id)?.name || "";
+    if (!normalized.toAccountName) normalized.toAccountName = accountById(rule.to_account_id)?.name || "";
+  } else {
+    if (!normalized.categoryName) normalized.categoryName = categoryById(rule.category_id)?.name || "";
+    if (!normalized.accountName) normalized.accountName = accountById(rule.account_id)?.name || "";
+  }
+  return rule;
+}
+
 function openTransactionImportModal() {
   if (!state.accounts.length) return showToast("Add an account before importing transactions.", true);
   transactionImportSourceRows = [];
@@ -3115,6 +3384,8 @@ function openTransactionImportModal() {
   transactionImportFileName = "";
   el.transactionImportInput.value = "";
   el.importDefaultAccount.value = "";
+  el.importBlankTypeMode.value = "require";
+  el.importApplyRules.checked = true;
   el.importCreateCategories.checked = true;
   el.importSkipDuplicates.checked = true;
   el.transactionImportError.textContent = "";
@@ -3166,7 +3437,7 @@ async function readTransactionImportFile(file) {
   headers.forEach((key, index) => {
     if (key && indexByKey[key] === undefined) indexByKey[key] = index;
   });
-  for (const required of ["date", "type", "amount"]) {
+  for (const required of ["date", "amount"]) {
     if (indexByKey[required] === undefined) throw new Error(`Missing required column: ${capitalize(required)}.`);
   }
   return matrix.slice(firstRowIndex + 1).map((row, offset) => ({
@@ -3211,52 +3482,63 @@ function validateTransactionImport() {
   const categoryMap = new Map(state.categories.map((category) => [`${category.kind}:${normalizeLookup(category.name)}`, category]));
   const createCategories = el.importCreateCategories.checked;
   const skipDuplicates = el.importSkipDuplicates.checked;
+  const blankTypeMode = el.importBlankTypeMode.value;
   const knownFingerprints = new Set(state.transactions.map(transactionFingerprintFromState));
   const fileFingerprints = new Set();
 
   transactionImportValidation = transactionImportSourceRows.map((source) => {
     const errors = [];
-    const type = normalizeImportType(source.type);
     const entryDate = parseImportDate(source.date);
-    const amount = parseImportAmount(source.amount);
+    const signedAmount = parseImportSignedAmount(source.amount);
+    const amount = Math.round(Math.abs(signedAmount) * 100) / 100;
     const description = String(source.description ?? "").trim().replace(/\s+/g, " ");
     const remarks = String(source.remarks ?? "").trim();
     const currency = String(source.currency ?? "").trim().toUpperCase();
+    const normalized = {
+      type: normalizeImportType(source.type),
+      amount,
+      entry_date: entryDate,
+      description,
+      remarks,
+      categoryName: String(source.category ?? "").trim(),
+      accountName: String(source.account ?? "").trim(),
+      fromAccountName: String(source.fromAccount ?? "").trim(),
+      toAccountName: String(source.toAccount ?? "").trim(),
+      createCategory: false,
+      matchedRuleId: null,
+      matchedRuleName: "",
+    };
+
+    const matchedRule = applyImportRule(source, normalized);
+    if (matchedRule) {
+      normalized.matchedRuleId = matchedRule.id;
+      normalized.matchedRuleName = matchedRule.name;
+    }
+    if (!normalized.type) {
+      if (blankTypeMode === "expense" || blankTypeMode === "income") normalized.type = blankTypeMode;
+      else if (blankTypeMode === "signed" && signedAmount !== 0) normalized.type = signedAmount < 0 ? "expense" : "income";
+    }
+
     if (!entryDate) errors.push("Invalid date. Use YYYY-MM-DD.");
-    if (!type) errors.push("Type must be Expense, Income, or Transfer.");
+    if (!normalized.type) errors.push("Type is blank and no rule or fallback supplied it.");
     if (!(amount > 0)) errors.push("Amount must be greater than zero.");
     if (description.length > 120) errors.push("Description is longer than 120 characters.");
     if (remarks.length > 2000) errors.push("Remarks are longer than 2,000 characters.");
     if (currency && currency !== CURRENCY) errors.push(`Currency must be ${CURRENCY} or blank.`);
 
-    const normalized = {
-      type,
-      amount,
-      entry_date: entryDate,
-      description,
-      remarks,
-      categoryName: "",
-      accountName: "",
-      fromAccountName: "",
-      toAccountName: "",
-      createCategory: false,
-    };
-
-    if (type === "expense" || type === "income") {
-      normalized.accountName = String(source.account ?? "").trim() || fallbackAccount?.name || "";
-      normalized.categoryName = String(source.category ?? "").trim();
+    if (normalized.type === "expense" || normalized.type === "income") {
+      normalized.accountName = normalized.accountName || fallbackAccount?.name || "";
       const account = accountMap.get(normalizeLookup(normalized.accountName));
       if (!normalized.accountName) errors.push("Account is required.");
       else if (!account) errors.push(`Account “${normalized.accountName}” does not exist.`);
-      const categoryKey = `${type}:${normalizeLookup(normalized.categoryName)}`;
+      const categoryKey = `${normalized.type}:${normalizeLookup(normalized.categoryName)}`;
       const category = categoryMap.get(categoryKey);
       if (!normalized.categoryName) errors.push("Category is required.");
       else if (normalized.categoryName.length > 50) errors.push("Category is longer than 50 characters.");
-      else if (!category && !createCategories) errors.push(`${capitalize(type)} category “${normalized.categoryName}” does not exist.`);
+      else if (!category && !createCategories) errors.push(`${capitalize(normalized.type)} category “${normalized.categoryName}” does not exist.`);
       else if (!category) normalized.createCategory = true;
-    } else if (type === "transfer") {
-      normalized.fromAccountName = String(source.fromAccount ?? "").trim() || fallbackAccount?.name || "";
-      normalized.toAccountName = String(source.toAccount ?? "").trim();
+    } else if (normalized.type === "transfer") {
+      normalized.fromAccountName = normalized.fromAccountName || fallbackAccount?.name || "";
       const fromAccount = accountMap.get(normalizeLookup(normalized.fromAccountName));
       const toAccount = accountMap.get(normalizeLookup(normalized.toAccountName));
       if (!normalized.fromAccountName) errors.push("From Account is required.");
@@ -3284,25 +3566,28 @@ function renderTransactionImportPreview() {
   const validCount = transactionImportValidation.filter((row) => row.status === "valid").length;
   const duplicateCount = transactionImportValidation.filter((row) => row.status === "duplicate").length;
   const errorCount = transactionImportValidation.filter((row) => row.status === "error").length;
+  const matchedCount = transactionImportValidation.filter((row) => row.normalized.matchedRuleId).length;
   el.transactionImportStatus.innerHTML = `
     <div><strong>${escapeHTML(transactionImportFileName || "Selected file")}</strong><span>${transactionImportValidation.length} data row${transactionImportValidation.length === 1 ? "" : "s"}</span></div>
-    <div class="import-counts"><span class="import-count valid">${validCount} ready</span><span class="import-count duplicate">${duplicateCount} duplicate</span><span class="import-count error">${errorCount} error${errorCount === 1 ? "" : "s"}</span></div>`;
+    <div class="import-counts"><span class="import-count valid">${validCount} ready</span><span class="import-count rule">${matchedCount} rule-matched</span><span class="import-count duplicate">${duplicateCount} duplicate</span><span class="import-count error">${errorCount} error${errorCount === 1 ? "" : "s"}</span></div>`;
   const previewRows = transactionImportValidation.slice(0, 100);
   el.transactionImportPreview.innerHTML = previewRows.length ? `
     <div class="import-preview-scroll">
-      <table class="import-preview-table">
-        <thead><tr><th>Row</th><th>Status</th><th>Date</th><th>Type</th><th>Description</th><th>Category / route</th><th>Amount</th></tr></thead>
-        <tbody>${previewRows.map((row) => {
+      <table class="import-preview-table import-rule-preview-table">
+        <thead><tr><th>Row</th><th>Status</th><th>Date</th><th>Type</th><th>Description</th><th>Category / route</th><th>Amount</th><th>Rule</th></tr></thead>
+        <tbody>${previewRows.map((row, index) => {
           const route = row.normalized.type === "transfer"
             ? `${row.normalized.fromAccountName || "—"} → ${row.normalized.toAccountName || "—"}`
             : `${row.normalized.categoryName || "—"} · ${row.normalized.accountName || "—"}`;
           const detail = row.errors.length ? row.errors.join(" ") : row.status === "duplicate" ? "Already in Ledgerly or repeated in this file." : row.normalized.createCategory ? "Ready · new category will be created." : "Ready to import.";
-          return `<tr class="import-row-${row.status}"><td>${row.sourceRow}</td><td><span class="import-row-status ${row.status}">${capitalize(row.status)}</span><small>${escapeHTML(detail)}</small></td><td>${escapeHTML(row.normalized.entry_date || String(row.source.date ?? ""))}</td><td>${escapeHTML(capitalize(row.normalized.type || String(row.source.type ?? "")))}</td><td>${escapeHTML(row.normalized.description || "—")}</td><td>${escapeHTML(route)}</td><td>${row.normalized.amount > 0 ? formatMoneyHTML(row.normalized.amount) : escapeHTML(String(row.source.amount ?? ""))}</td></tr>`;
+          const canCreateRule = Boolean(row.normalized.description && row.normalized.type && row.normalized.type !== "transfer" ? row.normalized.categoryName && row.normalized.accountName : row.normalized.type === "transfer" && row.normalized.fromAccountName && row.normalized.toAccountName);
+          const ruleCell = row.normalized.matchedRuleName ? `<span class="matched-rule-chip">⚡ ${escapeHTML(row.normalized.matchedRuleName)}</span>` : canCreateRule ? `<button class="text-button compact-rule-button" data-action="create-rule-from-import" data-index="${index}" type="button">+ Save rule</button>` : "—";
+          return `<tr class="import-row-${row.status}"><td>${row.sourceRow}</td><td><span class="import-row-status ${row.status}">${capitalize(row.status)}</span><small>${escapeHTML(detail)}</small></td><td>${escapeHTML(row.normalized.entry_date || String(row.source.date ?? ""))}</td><td>${escapeHTML(capitalize(row.normalized.type || String(row.source.type ?? "")))}</td><td>${escapeHTML(row.normalized.description || "—")}</td><td>${escapeHTML(route)}</td><td>${row.normalized.amount > 0 ? formatMoneyHTML(row.normalized.amount) : escapeHTML(String(row.source.amount ?? ""))}</td><td>${ruleCell}</td></tr>`;
         }).join("")}</tbody>
       </table>
     </div>
     ${transactionImportValidation.length > 100 ? `<p class="field-help">Showing the first 100 of ${transactionImportValidation.length} rows.</p>` : ""}` : emptyHTML("No data rows", "Add transactions below the header row in your file.");
-  el.transactionImportError.textContent = errorCount ? "Correct the highlighted rows in the source file, then choose the file again." : "";
+  el.transactionImportError.textContent = errorCount ? "Correct the highlighted rows in the source file, adjust fallback options, or add a matching rule." : "";
   el.importTransactionsButton.disabled = errorCount > 0 || validCount === 0;
   el.importTransactionsButton.textContent = validCount ? `Import ${validCount} transaction${validCount === 1 ? "" : "s"}` : "Import transactions";
 }
@@ -3431,6 +3716,17 @@ function parseImportAmount(value) {
   return Math.round(Math.abs(parenthesized ? -parsed : parsed) * 100) / 100;
 }
 
+function parseImportSignedAmount(value) {
+  if (typeof value === "number") return Number.isFinite(value) ? Math.round(value * 100) / 100 : 0;
+  let raw = String(value ?? "").trim();
+  if (!raw) return 0;
+  const parenthesized = /^\(.*\)$/.test(raw);
+  raw = raw.replace(/[()]/g, "").replace(/,/g, "").replace(/[^0-9.+-]/g, "");
+  const parsed = Number(raw);
+  if (!Number.isFinite(parsed)) return 0;
+  return Math.round((parenthesized ? -Math.abs(parsed) : parsed) * 100) / 100;
+}
+
 function normalizeLookup(value) {
   return String(value ?? "").trim().replace(/\s+/g, " ").toLowerCase();
 }
@@ -3526,13 +3822,13 @@ async function importJSON(event) {
 
 async function replaceCloudState(imported) {
   setSyncStatus("syncing", "Restoring backup");
-  for (const table of ["transaction_clearings", "reconciliations", "credit_card_statements", "transactions", "budgets", "recurring_entries", "accounts", "categories"]) {
+  for (const table of ["transaction_clearings", "reconciliations", "credit_card_statements", "transactions", "budgets", "recurring_entries", "import_rules", "accounts", "categories"]) {
     const { error } = await supabase.from(table).delete().eq("user_id", user.id);
     if (error) throw error;
   }
   const clean = sanitizeImportedState(imported);
   const withUser = (rows) => rows.map((row) => ({ ...row, user_id: user.id }));
-  for (const [table, rows] of [["categories", clean.categories], ["accounts", clean.accounts], ["recurring_entries", clean.recurringEntries], ["budgets", clean.budgets], ["transactions", clean.transactions], ["credit_card_statements", clean.creditCardStatements], ["reconciliations", clean.reconciliations], ["transaction_clearings", clean.transactionClearings]]) {
+  for (const [table, rows] of [["categories", clean.categories], ["accounts", clean.accounts], ["import_rules", clean.importRules], ["recurring_entries", clean.recurringEntries], ["budgets", clean.budgets], ["transactions", clean.transactions], ["credit_card_statements", clean.creditCardStatements], ["reconciliations", clean.reconciliations], ["transaction_clearings", clean.transactionClearings]]) {
     if (!rows.length) continue;
     const { error } = await supabase.from(table).insert(withUser(rows));
     if (error) throw error;
@@ -3549,7 +3845,7 @@ function sanitizeImportedState(imported) {
   };
   const clean = normalizeState(imported);
   return {
-    version: 5,
+    version: 6,
     accounts: clean.accounts.map(strip),
     categories: clean.categories.map(strip),
     transactions: clean.transactions.map(strip),
@@ -3558,6 +3854,7 @@ function sanitizeImportedState(imported) {
     reconciliations: clean.reconciliations.map(strip),
     transactionClearings: clean.transactionClearings.map(strip),
     creditCardStatements: clean.creditCardStatements.map(strip),
+    importRules: clean.importRules.map(strip),
   };
 }
 
@@ -3566,7 +3863,7 @@ async function resetApplication() {
   try {
     if (mode === "cloud") {
       setSyncStatus("syncing", "Resetting data");
-      for (const table of ["transaction_clearings", "reconciliations", "credit_card_statements", "transactions", "budgets", "recurring_entries", "accounts", "categories"]) {
+      for (const table of ["transaction_clearings", "reconciliations", "credit_card_statements", "transactions", "budgets", "recurring_entries", "import_rules", "accounts", "categories"]) {
         const { error } = await supabase.from(table).delete().eq("user_id", user.id);
         if (error) throw error;
       }
@@ -3613,6 +3910,7 @@ function friendlyError(error) {
   if (message.toLowerCase().includes("card artwork") && message.toLowerCase().includes("bucket not found")) return "Card artwork storage is not ready. Run supabase/add-credit-card-appearance.sql in the Supabase SQL Editor.";
   if (message.toLowerCase().includes("card artwork") && message.toLowerCase().includes("row-level security")) return "Supabase blocked the card artwork. Run the card-artwork storage policies in supabase/add-credit-card-appearance.sql.";
   if (message.includes("credit_card_statements_user_id_account_id_statement_date_key") || (message.includes("duplicate key") && message.includes("credit_card_statements"))) return "A statement already exists for this card and closing date.";
+  if (message.includes("import_rules") && (message.includes("does not exist") || message.includes("schema cache"))) return "Import rules are not ready. Run supabase/add-import-rules.sql in the Supabase SQL Editor.";
   if (message.includes("duplicate key")) return "A record with the same name or category already exists.";
   if (message.includes("recurring_entries") && (message.includes("does not exist") || message.includes("schema cache"))) return "Recurring schedules are not ready. Run supabase/add-recurring-entries.sql in the Supabase SQL Editor.";
   if ((message.includes("recurring_entry_id") || message.includes("scheduled_date")) && message.includes("column")) return "Recurring transaction columns are not ready. Run supabase/add-recurring-entries.sql in the Supabase SQL Editor.";
