@@ -8,7 +8,7 @@
   <title>Ledgerly — Personal Finance</title>
   <link rel="manifest" href="manifest.webmanifest" />
   <link rel="icon" type="image/png" href="assets/dirham-symbol.png" />
-  <link rel="stylesheet" href="styles.css?v=13" />
+  <link rel="stylesheet" href="styles.css?v=14" />
 </head>
 <body>
   <section class="auth-screen" id="authScreen">
@@ -447,6 +447,16 @@
           <section class="panel">
             <div class="panel-heading"><div><p class="eyebrow">Synchronization</p><h2>Cloud status</h2></div></div>
             <div class="settings-status" id="settingsStatus"></div>
+          </section>
+          <section class="panel">
+            <div class="panel-heading"><div><p class="eyebrow">Access control</p><h2>Public registration</h2></div></div>
+            <div class="settings-status" id="registrationStatus"></div>
+            <p class="muted">For real protection, disable <strong>Allow new users to sign up</strong> in Supabase Authentication. The config flag only hides the Create account control in Ledgerly.</p>
+          </section>
+          <section class="panel">
+            <div class="panel-heading"><div><p class="eyebrow">Automatic protection</p><h2>Daily database backup</h2></div></div>
+            <p class="muted">The included GitHub Action creates a daily Supabase logical database dump and pushes it to a separate private backup repository. Check its latest run under GitHub Actions.</p>
+            <p class="muted"><strong>Private backup repository required.</strong></p>
           </section>
           <section class="panel">
             <div class="panel-heading"><div><p class="eyebrow">Exports</p><h2>Download your data</h2></div></div>

@@ -1,4 +1,11 @@
-import { SUPABASE_URL, SUPABASE_PUBLISHABLE_KEY } from "./config.js";
+import * as ledgerlyConfig from "./config.js";
+
+const SUPABASE_URL = ledgerlyConfig.SUPABASE_URL || "";
+const SUPABASE_PUBLISHABLE_KEY = ledgerlyConfig.SUPABASE_PUBLISHABLE_KEY || "";
+// Defaults to open registration so existing config.js files remain compatible.
+// Add `export const ALLOW_PUBLIC_SIGNUP = false;` to config.js after disabling
+// sign-ups in the Supabase dashboard.
+const ALLOW_PUBLIC_SIGNUP = ledgerlyConfig.ALLOW_PUBLIC_SIGNUP !== false;
 
 const STORAGE_KEY = "ledgerly-data-v2-local";
 const LEGACY_STORAGE_KEY = "ledgerly-data-v1";
@@ -110,6 +117,7 @@ async function initialize() {
   el.reconcileStatementDate.value = todayISO();
   el.billDueDate.value = todayISO();
   el.exchangeRateDate.value = todayISO();
+  configureRegistrationUI();
   bindEvents();
 
   if (!configuredForCloud) {
@@ -339,6 +347,11 @@ function bindEvents() {
 async function handleAuthSubmit(event) {
   event.preventDefault();
   showAuthError("");
+  if (authMode === "signup" && !ALLOW_PUBLIC_SIGNUP) {
+    showAuthError("New account registration is closed. Existing users can still sign in.");
+    setAuthMode("signin");
+    return;
+  }
   const email = el.authEmail.value.trim();
   const password = el.authPassword.value;
   setAuthBusy(true);
@@ -403,7 +416,19 @@ function showAuthScreen() {
   el.appShell.hidden = true;
   el.authScreen.hidden = false;
   el.authPassword.value = "";
+  if (!ALLOW_PUBLIC_SIGNUP) setAuthMode("signin");
   showAuthError("");
+}
+
+function configureRegistrationUI() {
+  const signupTab = document.querySelector('[data-auth-mode="signup"]');
+  if (!signupTab) return;
+  signupTab.hidden = !ALLOW_PUBLIC_SIGNUP;
+  signupTab.disabled = !ALLOW_PUBLIC_SIGNUP;
+  if (!ALLOW_PUBLIC_SIGNUP) {
+    authMode = "signin";
+    el.authFootnote.textContent = "Registration is closed. Existing users can sign in.";
+  }
 }
 
 function showAppScreen() {
@@ -415,6 +440,11 @@ function showAppScreen() {
 }
 
 function setAuthMode(nextMode) {
+  if (nextMode === "signup" && !ALLOW_PUBLIC_SIGNUP) {
+    authMode = "signin";
+    showAuthError("New account registration is closed.");
+    return;
+  }
   authMode = nextMode;
   document.querySelectorAll("[data-auth-mode]").forEach((button) => {
     button.classList.toggle("active", button.dataset.authMode === nextMode);
@@ -2978,6 +3008,9 @@ async function deleteExchangeRate(id) {
 function renderSettings() {
   const cloud = mode === "cloud";
   el.settingsStatus.innerHTML = `<span class="status-dot"></span><div><strong>${cloud ? "Supabase cloud sync active" : "Local preview active"}</strong><span>${cloud ? `Signed in as ${escapeHTML(user?.email || "")}. Changes are saved to your Supabase database.` : "Data is currently saved only in this browser's localStorage and will not appear on another device."}</span></div>`;
+  if (el.registrationStatus) {
+    el.registrationStatus.innerHTML = `<span class="status-dot"></span><div><strong>${ALLOW_PUBLIC_SIGNUP ? "Registration button enabled" : "Registration button hidden"}</strong><span>${ALLOW_PUBLIC_SIGNUP ? "The app currently shows Create account. Disable sign-ups in Supabase and set ALLOW_PUBLIC_SIGNUP to false before making the app private." : "Ledgerly only shows sign-in. Supabase must also have Allow new users to sign up disabled for server-side protection."}</span></div>`;
+  }
 }
 
 function renderSelectors() {
@@ -5498,6 +5531,7 @@ function showToast(message, isError = false) {
 function friendlyError(error) {
   const message = String(error?.message || error || "Something went wrong.");
   if (message.includes("Failed to fetch")) return "Could not reach Supabase. Check your connection and project configuration.";
+  if (message.toLowerCase().includes("signups not allowed") || message.toLowerCase().includes("signup is disabled")) return "New account registration is closed. Existing users can still sign in.";
   if ((message.includes("exchange_rates") || message.includes("currency_code") || message.includes("destination_amount") || message.includes("base_amount")) && (message.includes("does not exist") || message.includes("schema cache") || message.includes("column"))) return "Multi-currency support is not ready. Run supabase/add-financial-health-multicurrency.sql in the Supabase SQL Editor.";
   if (message.includes("user_preferences") && (message.includes("does not exist") || message.includes("schema cache"))) return "Dashboard customization is not ready. Run supabase/add-receipt-ocr-dashboard-customization.sql in the Supabase SQL Editor.";
   if ((message.includes("reconciliations") || message.includes("transaction_clearings")) && (message.includes("does not exist") || message.includes("schema cache"))) return "Account reconciliation is not ready. Run supabase/add-account-reconciliation.sql in the Supabase SQL Editor.";
