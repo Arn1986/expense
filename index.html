@@ -192,7 +192,7 @@
 
       <section class="view" id="accountsView">
         <div class="section-toolbar">
-          <p class="section-copy">Add current, savings, cash, investment, credit-card, or custom accounts. Credit-card debt should be entered as a negative starting balance.</p>
+          <p class="section-copy">Select an account to view its complete activity and running balance. Reorder cards with the arrow controls or drag handle. Credit-card debt should be entered as a negative starting balance.</p>
           <button class="secondary-button" id="openAccountButton" type="button">+ Add account</button>
         </div>
         <div class="account-grid" id="accountsGrid"></div>
@@ -640,6 +640,26 @@
     </section>
   </div>
 
+
+  <div class="modal-backdrop" id="accountDetailModal" hidden>
+    <section class="modal account-detail-modal" role="dialog" aria-modal="true" aria-labelledby="accountDetailTitle">
+      <div class="modal-header">
+        <div><p class="eyebrow">Account activity</p><h2 id="accountDetailTitle">Account</h2></div>
+        <button class="icon-button" data-close-modal="accountDetailModal" aria-label="Close">×</button>
+      </div>
+      <div class="account-detail-hero" id="accountDetailVisual"></div>
+      <div class="summary-grid account-detail-summary" id="accountDetailSummary"></div>
+      <div class="account-detail-toolbar">
+        <div><strong>Transaction history</strong><span id="accountDetailTransactionCount"></span></div>
+        <div class="button-row compact-button-row">
+          <button class="secondary-button" id="accountDetailEditButton" type="button">Edit account</button>
+          <button class="primary-button" id="accountDetailAddEntryButton" type="button">+ Add entry</button>
+        </div>
+      </div>
+      <div id="accountDetailTransactions"></div>
+    </section>
+  </div>
+
   <div class="modal-backdrop" id="accountModal" hidden>
     <section class="modal small-modal" role="dialog" aria-modal="true" aria-labelledby="accountModalTitle">
       <div class="modal-header"><div><p class="eyebrow">Account</p><h2 id="accountModalTitle">Add account</h2></div><button class="icon-button" data-close-modal="accountModal" aria-label="Close">×</button></div>
@@ -651,7 +671,7 @@
           <label class="field"><span>Currency</span><select id="accountCurrency"></select></label>
           <label class="field"><span>Starting balance</span><div class="money-input"><span class="currency-input-prefix" id="accountOpeningCurrency" aria-hidden="true">AED</span><input id="accountOpeningBalance" type="number" step="0.01" inputmode="decimal" value="0" required /></div></label>
           <label class="field full-width" id="accountExchangeRateField" hidden><span id="accountExchangeRateLabel">Current exchange rate</span><div class="rate-input"><span>1 AED =</span><input id="accountExchangeRate" type="number" min="0.00000001" step="0.00000001" inputmode="decimal" placeholder="e.g. 15.50" /><strong id="accountExchangeRateCurrency">PHP</strong></div><small>Used to value this account in AED. You can add dated rates later in Data &amp; settings.</small></label>
-          <label class="field"><span>Account / card color</span><input id="accountColor" type="color" value="#2563eb" /></label>
+          <label class="field"><span>Primary color</span><input id="accountColor" type="color" value="#2563eb" /></label>
           <label class="check-field"><input id="accountIncludeNetWorth" type="checkbox" checked /><span>Include in net worth</span></label>
           <div class="credit-card-account-fields full-width" id="creditCardAccountFields" hidden>
             <div class="credit-card-account-heading"><strong>Credit-card settings</strong><span>Used for utilization, statement reminders, and due-date planning.</span></div>
@@ -661,14 +681,19 @@
               <label class="field"><span>Credit limit</span><div class="money-input"><span class="currency-input-prefix" id="accountCreditLimitCurrency" aria-hidden="true">AED</span><input id="accountCreditLimit" type="number" min="0.01" step="0.01" inputmode="decimal" placeholder="e.g. 25000" /></div></label>
               <label class="field"><span>Statement closes on day</span><input id="accountStatementClosingDay" type="number" min="1" max="31" inputmode="numeric" placeholder="e.g. 18" /></label>
               <label class="field"><span>Payment is due on day</span><input id="accountPaymentDueDay" type="number" min="1" max="31" inputmode="numeric" placeholder="e.g. 8" /></label>
+            </div>
+          </div>
+          <div class="account-appearance-fields full-width" id="accountAppearanceFields">
+            <div class="credit-card-account-heading"><strong>Account card appearance</strong><span>Choose a gradient for any account, or add optional private artwork.</span></div>
+            <div class="form-grid">
               <label class="field"><span>Accent color</span><input id="accountCardAccentColor" type="color" value="#0f172a" /></label>
-              <label class="field full-width"><span>Card artwork <small>(optional)</small></span><input id="accountCardArtwork" type="file" accept="image/jpeg,image/png,image/webp,image/heic,image/heif" /></label>
+              <label class="field"><span>Artwork <small>(optional)</small></span><input id="accountCardArtwork" type="file" accept="image/jpeg,image/png,image/webp,image/heic,image/heif" /></label>
               <div class="card-appearance-editor full-width">
-                <div class="card-appearance-preview" id="accountCardPreview" aria-label="Credit-card appearance preview"></div>
+                <div class="card-appearance-preview" id="accountCardPreview" aria-label="Account card appearance preview"></div>
                 <div class="card-artwork-controls">
                   <button class="secondary-button" id="viewCardArtworkButton" type="button" hidden>View artwork</button>
                   <button class="secondary-button danger-button" id="removeCardArtworkButton" type="button" hidden>Remove artwork</button>
-                  <span id="cardArtworkHelp">Use colors for a clean digital card, or upload a cropped artwork image with all sensitive card details hidden.</span>
+                  <span id="cardArtworkHelp">Use a two-color gradient or upload decorative artwork. Never upload statements, passwords, full card numbers, security codes, or other sensitive details.</span>
                 </div>
               </div>
             </div>

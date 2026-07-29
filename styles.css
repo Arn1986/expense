@@ -126,7 +126,7 @@ button:disabled { cursor: not-allowed; opacity: 0.55; }
 .account-details span { margin-top: 3px; color: var(--slate-500); font-size: .75rem; text-transform: capitalize; }
 .account-balance { font-weight: 900; }
 .account-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 20px; }
-.account-card { --account-color: #2563eb; position: relative; overflow: hidden; min-height: 205px; padding: 22px; display: flex; flex-direction: column; color: var(--white); border-radius: var(--radius-lg); background: linear-gradient(145deg, color-mix(in srgb, var(--account-color), black 30%), var(--account-color)); box-shadow: 0 20px 40px color-mix(in srgb, var(--account-color), transparent 78%); }
+.account-card { --account-color: #2563eb; position: relative; overflow: hidden; min-height: 205px; padding: 22px; display: flex; flex-direction: column; color: var(--white); border-radius: var(--radius-lg); background: linear-gradient(145deg, var(--account-color), var(--account-accent-color, #0f172a)); box-shadow: 0 20px 40px color-mix(in srgb, var(--account-color), transparent 78%); }
 .account-card::after { content: ""; position: absolute; width: 180px; height: 180px; right: -80px; bottom: -105px; border: 30px solid rgba(255,255,255,.08); border-radius: 50%; }
 .account-card-top { z-index: 1; display: flex; align-items: center; justify-content: space-between; gap: 10px; }
 .account-card-type { padding: 6px 9px; border-radius: 999px; font-size: .66rem; font-weight: 900; letter-spacing: .08em; text-transform: uppercase; background: rgba(255,255,255,.16); }
@@ -1187,3 +1187,85 @@ a.secondary-button { display: inline-flex; align-items: center; justify-content:
   .health-metric-grid, .dashboard-health-compact > div:last-child { grid-template-columns: 1fr; }
   .exchange-rate-row { align-items: flex-start; }
 }
+
+/* Account activity, running balances, artwork, and ordering */
+.account-row-button { width: 100%; color: inherit; text-align: left; cursor: pointer; }
+.account-row-button:hover { border-color: var(--blue-300); background: var(--blue-50); }
+.account-card {
+  --account-accent-color: #0f172a;
+  isolation: isolate;
+  cursor: pointer;
+  background: linear-gradient(145deg, var(--account-color), var(--account-accent-color));
+  transition: transform .18s ease, box-shadow .18s ease, opacity .18s ease;
+}
+.account-card:hover { transform: translateY(-3px); box-shadow: 0 24px 46px color-mix(in srgb, var(--account-color), transparent 70%); }
+.account-card:focus-visible { outline: 4px solid color-mix(in srgb, var(--account-color), white 45%); outline-offset: 3px; }
+.account-card > *:not(.account-card-artwork):not(.account-card-artwork-shade) { position: relative; z-index: 2; }
+.account-card-artwork { position: absolute; z-index: 0; inset: 0; width: 100%; height: 100%; object-fit: cover; }
+.account-card-artwork-shade { position: absolute; z-index: 1; inset: 0; pointer-events: none; background: linear-gradient(145deg, rgba(2,6,23,.12), rgba(2,6,23,.52)); }
+.account-card:not(.has-artwork) .account-card-artwork-shade { background: linear-gradient(145deg, rgba(255,255,255,.04), rgba(2,6,23,.12)); }
+.account-card::after { z-index: 1; }
+.account-card-symbol { width: 42px; height: 42px; margin-top: 18px; display: grid; place-items: center; border: 1px solid rgba(255,255,255,.22); border-radius: 14px; background: rgba(255,255,255,.14); font-size: 1.15rem; font-weight: 900; }
+.account-menu-button:disabled { opacity: .35; cursor: not-allowed; }
+.account-drag-handle { cursor: grab; touch-action: none; }
+.account-drag-handle:active { cursor: grabbing; }
+.account-card.dragging { opacity: .48; transform: scale(.98); }
+.account-card.drag-target { outline: 3px dashed rgba(255,255,255,.78); outline-offset: -7px; }
+.account-reconcile-button.primary-on-card { background: rgba(255,255,255,.26); }
+.account-appearance-fields { padding: 15px; border: 1px solid var(--slate-200); border-radius: var(--radius-md); background: var(--slate-50); }
+.account-preview-brand { display: flex; align-items: center; gap: 8px; }
+.account-preview-brand > span { width: 34px; height: 34px; display: grid; place-items: center; border: 1px solid rgba(255,255,255,.24); border-radius: 11px; background: rgba(255,255,255,.14); }
+.account-preview-brand b { font-size: .76rem; letter-spacing: .04em; text-transform: uppercase; }
+
+.account-detail-modal { width: min(980px, 100%); }
+.account-detail-hero { --account-color: #2563eb; --account-accent-color: #0f172a; position: relative; isolation: isolate; min-height: 190px; margin-bottom: 18px; padding: 24px; overflow: hidden; display: flex; align-items: flex-end; justify-content: space-between; gap: 24px; color: white; border-radius: 22px; background: linear-gradient(145deg, var(--account-color), var(--account-accent-color)); }
+.account-detail-hero > *:not(.account-detail-artwork):not(.account-card-artwork-shade) { position: relative; z-index: 2; }
+.account-detail-artwork { position: absolute; z-index: 0; inset: 0; width: 100%; height: 100%; object-fit: cover; }
+.account-detail-visual-copy { min-width: 0; display: flex; align-items: center; gap: 14px; }
+.account-detail-visual-copy > div { min-width: 0; }
+.account-detail-visual-copy span, .account-detail-visual-copy strong { display: block; }
+.account-detail-visual-copy > div > span { margin-bottom: 5px; color: rgba(255,255,255,.76); font-size: .75rem; font-weight: 800; text-transform: capitalize; }
+.account-detail-visual-copy > div > strong { overflow: hidden; font-size: 1.25rem; text-overflow: ellipsis; white-space: nowrap; }
+.account-detail-icon { width: 52px; height: 52px; display: grid; place-items: center; border: 1px solid rgba(255,255,255,.28); border-radius: 17px; background: rgba(255,255,255,.16); font-size: 1.3rem; }
+.account-detail-current { flex: 0 0 auto; text-align: right; }
+.account-detail-current > span, .account-detail-current > strong, .account-detail-current > small { display: block; }
+.account-detail-current > span { color: rgba(255,255,255,.72); font-size: .72rem; font-weight: 800; }
+.account-detail-current > strong { margin-top: 5px; font-size: clamp(1.55rem, 4vw, 2.35rem); letter-spacing: -.045em; }
+.account-detail-current > small { margin-top: 5px; color: rgba(255,255,255,.72); }
+.account-detail-summary { margin-bottom: 20px; }
+.account-detail-toolbar { margin: 4px 0 8px; display: flex; align-items: center; justify-content: space-between; gap: 16px; }
+.account-detail-toolbar > div:first-child strong, .account-detail-toolbar > div:first-child span { display: block; }
+.account-detail-toolbar > div:first-child span { margin-top: 3px; color: var(--slate-500); font-size: .75rem; }
+.compact-button-row { margin-top: 0; }
+.account-activity-month { margin-top: 18px; }
+.account-activity-month > h3 { margin: 0 0 8px; color: var(--slate-500); font-size: .86rem; font-weight: 800; }
+.account-activity-list { overflow: hidden; border: 1px solid var(--slate-200); border-radius: 16px; }
+.account-activity-row { display: grid; grid-template-columns: minmax(0, 1fr) minmax(145px, auto) auto; gap: 14px; align-items: center; padding: 14px; background: var(--white); }
+.account-activity-row + .account-activity-row { border-top: 1px solid var(--slate-100); }
+.account-activity-copy { min-width: 0; }
+.account-activity-copy strong, .account-activity-copy span, .account-activity-copy small { display: block; }
+.account-activity-copy strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.account-activity-copy span { margin-top: 4px; color: var(--slate-500); font-size: .76rem; }
+.account-activity-copy small { margin-top: 5px; color: var(--slate-500); line-height: 1.4; }
+.account-activity-amount { text-align: right; }
+.account-activity-amount strong, .account-activity-amount span { display: block; }
+.account-activity-amount > span { margin-top: 4px; color: var(--slate-400); font-size: .76rem; font-weight: 800; }
+.running-balance { color: var(--slate-400) !important; font-size: .68rem !important; font-weight: 800 !important; line-height: 1.25; }
+
+@media (max-width: 680px) {
+  .account-card-actions { gap: 4px; }
+  .account-menu-button { width: 30px; height: 30px; }
+  .account-drag-handle { display: none; }
+  .account-detail-hero { min-height: 215px; align-items: flex-start; flex-direction: column; }
+  .account-detail-current { width: 100%; text-align: left; }
+  .account-detail-toolbar { align-items: stretch; flex-direction: column; }
+  .account-detail-toolbar .button-row { display: grid; grid-template-columns: 1fr 1fr; }
+  .account-activity-row { grid-template-columns: minmax(0, 1fr) auto; gap: 10px; }
+  .account-activity-row > .row-actions { grid-column: 2; grid-row: 2; }
+  .account-activity-amount { grid-column: 2; grid-row: 1; }
+  .transaction-row .amount { display: block; grid-column: 2; grid-row: 1; align-self: start; min-width: 105px; }
+  .transaction-row .row-actions { grid-column: 2; grid-row: 2; }
+  .transaction-row .transaction-main { grid-row: 1 / span 2; }
+}
+.account-card { min-height: 270px; }
+.account-card .account-base-equivalent { position: relative; z-index: 2; margin: 7px 0 0; color: rgba(255,255,255,.76); font-size: .72rem; }

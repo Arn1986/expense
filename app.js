@@ -102,6 +102,8 @@ let reminderNoticeShown = false;
 let receiptOcrBusy = false;
 let receiptOcrResult = null;
 let dashboardPreferenceDraft = [];
+let selectedAccountDetailId = "";
+let accountDragInProgress = false;
 
 const el = Object.fromEntries([...document.querySelectorAll("[id]")].map((node) => [node.id, node]));
 
@@ -235,6 +237,18 @@ function bindEvents() {
   el.calendarGrid.addEventListener("click", handleCalendarClick);
   el.calendarGrid.addEventListener("keydown", handleCalendarKeydown);
   el.openAccountButton.addEventListener("click", () => openAccountModal());
+  el.accountDetailAddEntryButton.addEventListener("click", openEntryForSelectedAccount);
+  el.accountDetailEditButton.addEventListener("click", editSelectedAccount);
+  el.accountsGrid.addEventListener("dragstart", handleAccountDragStart);
+  el.accountsGrid.addEventListener("dragover", handleAccountDragOver);
+  el.accountsGrid.addEventListener("drop", handleAccountDrop);
+  el.accountsGrid.addEventListener("dragend", handleAccountDragEnd);
+  el.accountsGrid.addEventListener("keydown", (event) => {
+    const card = event.target.closest(".account-card[data-id]");
+    if (!card || !["Enter", " "].includes(event.key) || event.target.closest("button")) return;
+    event.preventDefault();
+    openAccountDetail(card.dataset.id);
+  });
   el.openCreditCardStatementButton.addEventListener("click", () => openCreditCardStatementModal());
   el.openBudgetButton.addEventListener("click", () => openBudgetModal());
   el.openCategoryButton.addEventListener("click", () => openCategoryModal());
@@ -306,6 +320,10 @@ function bindEvents() {
     if (!actionTarget) return;
     const { action, id } = actionTarget.dataset;
     const actions = {
+      "open-account-details": () => { if (!accountDragInProgress) openAccountDetail(id); },
+      "move-account-up": () => moveAccount(id, -1),
+      "move-account-down": () => moveAccount(id, 1),
+      "ignore": () => {},
       "edit-account": () => openAccountModal(id),
       "delete-account": () => deleteAccount(id),
       "edit-credit-card-settings": () => openAccountModal(id),
@@ -313,7 +331,7 @@ function bindEvents() {
       "edit-credit-card-statement": () => openCreditCardStatementModal(id),
       "delete-credit-card-statement": () => deleteCreditCardStatement(id),
       "record-credit-card-payment": () => openCreditCardPayment(id),
-      "edit-transaction": () => openTransactionModal(id),
+      "edit-transaction": () => { if (!el.accountDetailModal.hidden) closeModal(el.accountDetailModal); openTransactionModal(id); },
       "open-receipt": () => openTransactionReceipt(id),
       "delete-transaction": () => deleteTransaction(id),
       "edit-budget": () => openBudgetModal(id),
@@ -463,7 +481,7 @@ function showAuthError(message) { el.authError.textContent = message; }
 
 async function loadCloudState() {
   const [accountsResult, categoriesResult, transactionsResult, transactionSplitsResult, budgetsResult, recurringResult, billsResult, reconciliationsResult, clearingsResult, cardStatementsResult, importRulesResult, exchangeRatesResult, preferencesResult] = await Promise.all([
-    supabase.from("accounts").select("*").order("created_at", { ascending: true }),
+    supabase.from("accounts").select("*").order("sort_order", { ascending: true, nullsFirst: false }).order("created_at", { ascending: true }),
     supabase.from("categories").select("*").order("kind").order("name"),
     supabase.from("transactions").select("*").order("entry_date", { ascending: false }).order("created_at", { ascending: false }),
     supabase.from("transaction_splits").select("*").order("created_at", { ascending: true }),
@@ -480,8 +498,8 @@ async function loadCloudState() {
   [accountsResult, categoriesResult, transactionsResult, transactionSplitsResult, budgetsResult, recurringResult, billsResult, reconciliationsResult, clearingsResult, cardStatementsResult, importRulesResult, exchangeRatesResult, preferencesResult].forEach((result) => {
     if (result.error) throw result.error;
   });
-  state = {
-    version: 10,
+  state = normalizeState({
+    version: 11,
     accounts: accountsResult.data || [],
     categories: categoriesResult.data || [],
     transactions: transactionsResult.data || [],
@@ -495,7 +513,7 @@ async function loadCloudState() {
     importRules: importRulesResult.data || [],
     exchangeRates: exchangeRatesResult.data || [],
     preferences: normalizePreferences(preferencesResult.data),
-  };
+  });
 }
 
 async function seedDefaultCategories() {
@@ -506,13 +524,13 @@ async function seedDefaultCategories() {
 }
 
 function emptyState() {
-  return { version: 10, accounts: [], categories: [], transactions: [], transactionSplits: [], budgets: [], recurringEntries: [], bills: [], reconciliations: [], transactionClearings: [], creditCardStatements: [], importRules: [], exchangeRates: [], preferences: defaultPreferences() };
+  return { version: 11, accounts: [], categories: [], transactions: [], transactionSplits: [], budgets: [], recurringEntries: [], bills: [], reconciliations: [], transactionClearings: [], creditCardStatements: [], importRules: [], exchangeRates: [], preferences: defaultPreferences() };
 }
 
 function normalizeState(value) {
   return {
-    version: 10,
-    accounts: Array.isArray(value?.accounts) ? value.accounts.map((account) => ({ ...account, currency_code: normalizeCurrencyCode(account.currency_code || BASE_CURRENCY) })) : [],
+    version: 11,
+    accounts: normalizeAccountOrder(Array.isArray(value?.accounts) ? value.accounts.map((account) => ({ ...account, currency_code: normalizeCurrencyCode(account.currency_code || BASE_CURRENCY) })) : []),
     categories: Array.isArray(value?.categories) ? value.categories : [],
     transactions: Array.isArray(value?.transactions) ? value.transactions.map((transaction) => ({
       ...transaction,
@@ -533,6 +551,25 @@ function normalizeState(value) {
     exchangeRates: Array.isArray(value?.exchangeRates) ? value.exchangeRates : Array.isArray(value?.exchange_rates) ? value.exchange_rates : [],
     preferences: normalizePreferences(value?.preferences || value?.user_preferences),
   };
+}
+
+function normalizeAccountOrder(accounts) {
+  return [...accounts]
+    .sort((a, b) => {
+      const aOrder = Number.isFinite(Number(a.sort_order)) ? Number(a.sort_order) : Number.MAX_SAFE_INTEGER;
+      const bOrder = Number.isFinite(Number(b.sort_order)) ? Number(b.sort_order) : Number.MAX_SAFE_INTEGER;
+      return aOrder - bOrder || String(a.created_at || "").localeCompare(String(b.created_at || "")) || String(a.id || "").localeCompare(String(b.id || ""));
+    })
+    .map((account, index) => ({ ...account, sort_order: Number.isFinite(Number(account.sort_order)) ? Number(account.sort_order) : index }));
+}
+
+function orderedAccounts() {
+  state.accounts = normalizeAccountOrder(state.accounts);
+  return state.accounts;
+}
+
+function nextAccountSortOrder() {
+  return state.accounts.reduce((max, account) => Math.max(max, Number.isFinite(Number(account.sort_order)) ? Number(account.sort_order) : -1), -1) + 1;
 }
 
 function defaultDashboardWidgets() {
@@ -564,11 +601,11 @@ function dashboardWidgets() {
 
 function defaultLocalState() {
   return {
-    version: 10,
+    version: 11,
     accounts: [
-      localRow({ name: "Current Account", type: "current", opening_balance: 0, currency_code: BASE_CURRENCY, color: ACCOUNT_COLORS.current, include_in_net_worth: true }),
-      localRow({ name: "Savings", type: "savings", opening_balance: 0, currency_code: BASE_CURRENCY, color: ACCOUNT_COLORS.savings, include_in_net_worth: true }),
-      localRow({ name: "Cash", type: "cash", opening_balance: 0, currency_code: BASE_CURRENCY, color: ACCOUNT_COLORS.cash, include_in_net_worth: true }),
+      localRow({ name: "Current Account", type: "current", opening_balance: 0, currency_code: BASE_CURRENCY, color: ACCOUNT_COLORS.current, card_accent_color: "#0f172a", sort_order: 0, include_in_net_worth: true }),
+      localRow({ name: "Savings", type: "savings", opening_balance: 0, currency_code: BASE_CURRENCY, color: ACCOUNT_COLORS.savings, card_accent_color: "#064e3b", sort_order: 1, include_in_net_worth: true }),
+      localRow({ name: "Cash", type: "cash", opening_balance: 0, currency_code: BASE_CURRENCY, color: ACCOUNT_COLORS.cash, card_accent_color: "#78350f", sort_order: 2, include_in_net_worth: true }),
     ],
     categories: defaultCategoryRows().map(localRow),
     transactions: [],
@@ -652,7 +689,7 @@ function migrateLegacyState(legacy) {
       to_account_id: transaction.toAccountId || transaction.to_account_id || null,
     });
   });
-  return { version: 10, accounts: accounts.map((account) => ({ ...account, currency_code: BASE_CURRENCY })), categories, transactions: transactions.map((transaction) => ({ ...transaction, destination_amount: transaction.type === "transfer" ? transaction.amount : null, exchange_rate: transaction.type === "transfer" ? 1 : null, base_amount: transaction.type === "transfer" ? null : transaction.amount, base_currency_code: BASE_CURRENCY, exchange_rate_to_base: 1 })), transactionSplits: [], budgets: [], recurringEntries: [], bills: [], reconciliations: [], transactionClearings: [], creditCardStatements: [], importRules: [], exchangeRates: [], preferences: defaultPreferences() };
+  return { version: 11, accounts: accounts.map((account, index) => ({ ...account, currency_code: BASE_CURRENCY, sort_order: index, card_accent_color: account.card_accent_color || "#0f172a" })), categories, transactions: transactions.map((transaction) => ({ ...transaction, destination_amount: transaction.type === "transfer" ? transaction.amount : null, exchange_rate: transaction.type === "transfer" ? 1 : null, base_amount: transaction.type === "transfer" ? null : transaction.amount, base_currency_code: BASE_CURRENCY, exchange_rate_to_base: 1 })), transactionSplits: [], budgets: [], recurringEntries: [], bills: [], reconciliations: [], transactionClearings: [], creditCardStatements: [], importRules: [], exchangeRates: [], preferences: defaultPreferences() };
 }
 
 function persistLocal() {
@@ -735,6 +772,7 @@ function render() {
   renderFinancialHealth();
   renderSettings();
   renderExchangeRates();
+  if (el.accountDetailModal && !el.accountDetailModal.hidden) renderAccountDetail();
 }
 
 function applyDashboardPreferences() {
@@ -944,42 +982,138 @@ function renderSummary() {
   el.summaryCashFlow.innerHTML = summaryCard("Net cash flow", cashFlow, "Income minus expenses", tone(cashFlow));
 }
 
+function accountVisualStyle(account) {
+  return `--account-color:${safeColor(account?.color)};--account-accent-color:${safeColor(account?.card_accent_color || "#0f172a")};--card-accent-color:${safeColor(account?.card_accent_color || "#0f172a")}`;
+}
+
+function accountArtworkHTML(account, className = "account-card-artwork") {
+  return account?.card_artwork_path
+    ? `<img class="${className}" data-card-artwork-path="${escapeHTML(account.card_artwork_path)}" alt="" hidden />`
+    : "";
+}
+
+function accountTypeIcon(account) {
+  return { current: "▰", savings: "◇", credit: "▤", cash: "▥", investment: "↗", other: "●" }[account?.type] || "●";
+}
+
 function renderAccounts() {
-  if (!state.accounts.length) {
+  const accounts = orderedAccounts();
+  if (!accounts.length) {
     const empty = emptyHTML("No accounts yet", "Add a current, savings, credit-card, cash, investment, or custom account.");
     el.dashboardAccounts.innerHTML = empty;
     el.accountsGrid.innerHTML = empty;
     return;
   }
-  el.dashboardAccounts.innerHTML = state.accounts.slice(0, 6).map(accountRowHTML).join("");
-  el.accountsGrid.innerHTML = state.accounts.map((account) => {
+  el.dashboardAccounts.innerHTML = accounts.slice(0, 6).map(accountRowHTML).join("");
+  el.accountsGrid.innerHTML = accounts.map((account, index) => {
     const balance = calculateAccountBalance(account.id);
+    const artwork = accountArtworkHTML(account);
     return `
-      <article class="account-card" style="--account-color:${safeColor(account.color)}">
+      <article class="account-card${artwork ? " has-artwork" : ""}" style="${accountVisualStyle(account)}" data-action="open-account-details" data-id="${account.id}" role="button" tabindex="0" aria-label="View ${escapeHTML(account.name)} activity">
+        ${artwork}<span class="account-card-artwork-shade" aria-hidden="true"></span>
         <div class="account-card-top">
           <span class="account-card-type">${escapeHTML(account.type)}</span>
           <div class="account-card-actions">
+            <button class="account-menu-button account-drag-handle" data-action="ignore" data-account-drag-id="${account.id}" draggable="true" aria-label="Drag to reorder ${escapeHTML(account.name)}" title="Drag to reorder">⠿</button>
+            <button class="account-menu-button" data-action="move-account-up" data-id="${account.id}" aria-label="Move ${escapeHTML(account.name)} earlier" ${index === 0 ? "disabled" : ""}>↑</button>
+            <button class="account-menu-button" data-action="move-account-down" data-id="${account.id}" aria-label="Move ${escapeHTML(account.name)} later" ${index === accounts.length - 1 ? "disabled" : ""}>↓</button>
             <button class="account-menu-button" data-action="edit-account" data-id="${account.id}" aria-label="Edit ${escapeHTML(account.name)}">✎</button>
             <button class="account-menu-button" data-action="delete-account" data-id="${account.id}" aria-label="Delete ${escapeHTML(account.name)}">×</button>
           </div>
         </div>
+        <div class="account-card-symbol" aria-hidden="true">${accountTypeIcon(account)}</div>
         <h3>${escapeHTML(account.name)}</h3>
         <p class="large-balance">${formatCurrencyHTML(balance, accountCurrency(account))}</p>
         <p class="opening-balance">Starting balance: ${formatCurrencyHTML(number(account.opening_balance), accountCurrency(account))}${account.include_in_net_worth === false ? " · excluded from net worth" : ""}</p>
         ${accountCurrency(account) !== BASE_CURRENCY ? `<p class="account-base-equivalent">${accountBalanceInBase(account) == null ? `Add a ${accountCurrency(account)} exchange rate` : `AED equivalent: ${formatMoneyHTML(accountBalanceInBase(account))}`}</p>` : ""}
         ${account.type === "credit" ? `<p class="account-credit-meta">${number(account.credit_limit) > 0 ? `${creditCardUtilization(account).toFixed(1)}% of ${formatCurrencyHTML(account.credit_limit, accountCurrency(account))} limit` : "Credit limit not configured"}</p>` : ""}
-        <div class="account-card-footer-actions"><button class="account-reconcile-button" data-action="open-reconcile-account" data-id="${account.id}" type="button">✓ Reconcile</button>${account.type === "credit" ? `<button class="account-reconcile-button" data-action="add-credit-card-statement" data-id="${account.id}" type="button">▤ Statement</button>` : ""}</div>
+        <div class="account-card-footer-actions"><button class="account-reconcile-button primary-on-card" data-action="open-account-details" data-id="${account.id}" type="button">Activity</button><button class="account-reconcile-button" data-action="open-reconcile-account" data-id="${account.id}" type="button">✓ Reconcile</button>${account.type === "credit" ? `<button class="account-reconcile-button" data-action="add-credit-card-statement" data-id="${account.id}" type="button">▤ Statement</button>` : ""}</div>
       </article>`;
   }).join("");
 }
 
 function accountRowHTML(account) {
   const balance = calculateAccountBalance(account.id);
-  return `<div class="account-row">
-    <span class="account-icon" style="--account-color:${safeColor(account.color)}">${escapeHTML(account.name.slice(0, 1).toUpperCase())}</span>
-    <div class="account-details"><strong>${escapeHTML(account.name)}</strong><span>${escapeHTML(account.type)}</span></div>
+  return `<button class="account-row account-row-button" data-action="open-account-details" data-id="${account.id}" type="button">
+    <span class="account-icon" style="--account-color:${safeColor(account.color)}">${accountTypeIcon(account)}</span>
+    <span class="account-details"><strong>${escapeHTML(account.name)}</strong><span>${escapeHTML(account.type)}</span></span>
     <span class="account-balance ${tone(balance)}">${formatCurrencyHTML(balance, accountCurrency(account))}</span>
-  </div>`;
+  </button>`;
+}
+
+
+async function persistAccountOrder(accounts) {
+  const normalized = accounts.map((account, index) => ({ ...account, sort_order: index }));
+  const changed = normalized.filter((account, index) => Number(state.accounts.find((item) => item.id === account.id)?.sort_order) !== index);
+  state.accounts = normalized;
+  persistLocal();
+  render();
+  if (mode !== "cloud" || !changed.length) return;
+  setSyncStatus("syncing", "Saving account order");
+  try {
+    const results = await Promise.all(changed.map((account) => supabase.from("accounts").update({ sort_order: account.sort_order }).eq("id", account.id).select().single()));
+    const failed = results.find((result) => result.error);
+    if (failed?.error) throw failed.error;
+    results.forEach((result) => {
+      if (!result.data) return;
+      state.accounts = state.accounts.map((account) => account.id === result.data.id ? { ...account, ...result.data } : account);
+    });
+    setSyncStatus("cloud", "Cloud synchronized");
+  } catch (error) {
+    setSyncStatus("error", "Account order not synchronized");
+    showToast(`The order changed on this device but could not synchronize: ${friendlyError(error)}`, true);
+  }
+}
+
+async function moveAccount(accountId, direction) {
+  const accounts = [...orderedAccounts()];
+  const current = accounts.findIndex((account) => account.id === accountId);
+  const target = current + direction;
+  if (current < 0 || target < 0 || target >= accounts.length) return;
+  [accounts[current], accounts[target]] = [accounts[target], accounts[current]];
+  await persistAccountOrder(accounts);
+}
+
+function handleAccountDragStart(event) {
+  const handle = event.target.closest("[data-account-drag-id]");
+  if (!handle) {
+    event.preventDefault();
+    return;
+  }
+  accountDragInProgress = true;
+  event.dataTransfer.effectAllowed = "move";
+  event.dataTransfer.setData("text/plain", handle.dataset.accountDragId);
+  handle.closest(".account-card")?.classList.add("dragging");
+}
+
+function handleAccountDragOver(event) {
+  if (!accountDragInProgress) return;
+  const card = event.target.closest(".account-card[data-id]");
+  if (!card) return;
+  event.preventDefault();
+  event.dataTransfer.dropEffect = "move";
+  el.accountsGrid.querySelectorAll(".account-card.drag-target").forEach((item) => item.classList.remove("drag-target"));
+  card.classList.add("drag-target");
+}
+
+async function handleAccountDrop(event) {
+  const targetCard = event.target.closest(".account-card[data-id]");
+  const sourceId = event.dataTransfer?.getData("text/plain");
+  if (!targetCard || !sourceId || targetCard.dataset.id === sourceId) return handleAccountDragEnd();
+  event.preventDefault();
+  const accounts = [...orderedAccounts()];
+  const fromIndex = accounts.findIndex((account) => account.id === sourceId);
+  const targetIndex = accounts.findIndex((account) => account.id === targetCard.dataset.id);
+  if (fromIndex < 0 || targetIndex < 0) return handleAccountDragEnd();
+  const [moved] = accounts.splice(fromIndex, 1);
+  accounts.splice(targetIndex, 0, moved);
+  handleAccountDragEnd();
+  await persistAccountOrder(accounts);
+}
+
+function handleAccountDragEnd() {
+  el.accountsGrid?.querySelectorAll(".account-card.dragging, .account-card.drag-target").forEach((item) => item.classList.remove("dragging", "drag-target"));
+  window.setTimeout(() => { accountDragInProgress = false; }, 50);
 }
 
 
@@ -1289,7 +1423,43 @@ function renderAllTransactions() {
   el.allTransactions.innerHTML = items.length ? transactionListHTML(items, true) : emptyHTML("No matching entries", "Try changing the filters or add a new entry.");
 }
 
+function chronologicalTransactions() {
+  return [...state.transactions].sort((a, b) => String(a.entry_date || "").localeCompare(String(b.entry_date || "")) || String(a.created_at || "").localeCompare(String(b.created_at || "")) || String(a.id || "").localeCompare(String(b.id || "")));
+}
+
+function buildRunningBalanceIndex() {
+  const balances = new Map();
+  const index = new Map();
+  orderedAccounts().forEach((account) => {
+    balances.set(account.id, number(account.opening_balance));
+    index.set(account.id, new Map());
+  });
+  chronologicalTransactions().forEach((transaction) => {
+    [...new Set(affectedAccountIds(transaction))].forEach((accountId) => {
+      if (!balances.has(accountId)) return;
+      const next = balances.get(accountId) + transactionEffectForAccount(transaction, accountId);
+      balances.set(accountId, next);
+      index.get(accountId).set(transaction.id, next);
+    });
+  });
+  return index;
+}
+
+function transactionRunningBalanceHTML(transaction, runningIndex) {
+  if (transaction.type === "transfer") {
+    const fromAccount = accountById(transaction.from_account_id);
+    const toAccount = accountById(transaction.to_account_id);
+    const fromBalance = runningIndex.get(transaction.from_account_id)?.get(transaction.id);
+    const toBalance = runningIndex.get(transaction.to_account_id)?.get(transaction.id);
+    return `<small class="running-balance">From balance ${formatCurrencyText(fromBalance, accountCurrency(fromAccount))}</small><small class="running-balance">To balance ${formatCurrencyText(toBalance, accountCurrency(toAccount))}</small>`;
+  }
+  const account = accountById(transaction.account_id);
+  const balance = runningIndex.get(transaction.account_id)?.get(transaction.id);
+  return `<small class="running-balance">Balance ${formatCurrencyText(balance, accountCurrency(account))}</small>`;
+}
+
 function transactionListHTML(items, showActions) {
+  const runningIndex = buildRunningBalanceIndex();
   return `<div class="transaction-list">${items.map((transaction) => {
     const category = categoryById(transaction.category_id);
     const splitCount = splitsForTransaction(transaction.id).length;
@@ -1307,11 +1477,110 @@ function transactionListHTML(items, showActions) {
       </div>
       <div class="transaction-meta account-column">${escapeHTML(transactionAccountText(transaction))}</div>
       <div class="transaction-meta">${formatDate(transaction.entry_date)}</div>
-      <div class="amount ${transaction.type}">${sign}${formatCurrencyHTML(number(transaction.amount), transactionCurrency(transaction))}${transaction.type === "transfer" && accountCurrency(transaction.from_account_id) !== accountCurrency(transaction.to_account_id) ? `<small>→ ${formatCurrencyText(transferDestinationAmount(transaction), accountCurrency(transaction.to_account_id))}</small>` : ""}</div>
+      <div class="amount ${transaction.type}">${sign}${formatCurrencyHTML(number(transaction.amount), transactionCurrency(transaction))}${transaction.type === "transfer" && accountCurrency(transaction.from_account_id) !== accountCurrency(transaction.to_account_id) ? `<small>→ ${formatCurrencyText(transferDestinationAmount(transaction), accountCurrency(transaction.to_account_id))}</small>` : ""}${transactionRunningBalanceHTML(transaction, runningIndex)}</div>
       <div class="row-actions">${receiptAction}${showActions ? `<button class="row-action" data-action="edit-transaction" data-id="${transaction.id}" aria-label="Edit entry">✎</button><button class="row-action danger" data-action="delete-transaction" data-id="${transaction.id}" aria-label="Delete entry">×</button>` : ""}</div>
     </div>`;
   }).join("")}</div>`;
 }
+
+function accountTransactions(accountId) {
+  return sortedTransactions().filter((transaction) => affectedAccountIds(transaction).includes(accountId));
+}
+
+function accountDetailMetric(label, value, account, detail = "", className = "") {
+  return `<article class="summary-card"><p class="card-label">${escapeHTML(label)}</p><p class="card-value ${className}">${formatCurrencyHTML(value, accountCurrency(account))}</p><p class="card-detail">${escapeHTML(detail)}</p></article>`;
+}
+
+function accountActivityMonthLabel(monthKey) {
+  if (!/^\d{4}-\d{2}$/.test(monthKey)) return monthKey;
+  return new Intl.DateTimeFormat("en-US", { month: "long", year: "numeric" }).format(new Date(`${monthKey}-01T12:00:00`));
+}
+
+function accountActivityRowHTML(transaction, account, runningIndex) {
+  const effect = transactionEffectForAccount(transaction, account.id);
+  const balance = runningIndex.get(account.id)?.get(transaction.id);
+  const category = transactionCategorySummary(transaction);
+  const counterpart = transaction.type === "transfer"
+    ? account.id === transaction.from_account_id
+      ? `Transfer to ${accountById(transaction.to_account_id)?.name || "Unknown account"}`
+      : `Transfer from ${accountById(transaction.from_account_id)?.name || "Unknown account"}`
+    : category;
+  const title = transaction.description || (transaction.type === "transfer" ? counterpart : category || capitalize(transaction.type));
+  const remarks = String(transaction.remarks || "").trim();
+  const displayAmount = Math.abs(effect);
+  const toneClass = effect < 0 ? "expense" : effect > 0 ? "income" : "transfer";
+  const sign = effect < 0 ? "−" : effect > 0 ? "+" : "";
+  const receiptAction = transaction.receipt_path ? `<button class="row-action" data-action="open-receipt" data-id="${transaction.id}" aria-label="Open receipt">▧</button>` : "";
+  return `<div class="account-activity-row">
+    <div class="transaction-main">
+      <span class="transaction-icon ${toneClass}">${effect < 0 ? "↓" : effect > 0 ? "↑" : "⇄"}</span>
+      <div class="account-activity-copy"><strong>${escapeHTML(title)}</strong><span>${escapeHTML(counterpart)} · ${formatDate(transaction.entry_date)}</span>${remarks ? `<small>${escapeHTML(remarks)}</small>` : ""}</div>
+    </div>
+    <div class="account-activity-amount ${toneClass}"><strong>${sign}${formatCurrencyHTML(displayAmount, accountCurrency(account))}</strong><span>${formatCurrencyHTML(balance, accountCurrency(account))}</span></div>
+    <div class="row-actions">${receiptAction}<button class="row-action" data-action="edit-transaction" data-id="${transaction.id}" aria-label="Edit entry">✎</button></div>
+  </div>`;
+}
+
+function renderAccountDetail() {
+  const account = accountById(selectedAccountDetailId);
+  if (!account || !el.accountDetailModal || el.accountDetailModal.hidden) return;
+  const transactions = accountTransactions(account.id);
+  const runningIndex = buildRunningBalanceIndex();
+  const balance = calculateAccountBalance(account.id);
+  const income = transactions.reduce((sum, transaction) => sum + Math.max(0, transactionEffectForAccount(transaction, account.id)), 0);
+  const outflow = transactions.reduce((sum, transaction) => sum + Math.max(0, -transactionEffectForAccount(transaction, account.id)), 0);
+  const netMovement = balance - number(account.opening_balance);
+  const artwork = accountArtworkHTML(account, "account-detail-artwork");
+  el.accountDetailTitle.textContent = account.name;
+  el.accountDetailVisual.style.cssText = accountVisualStyle(account);
+  el.accountDetailVisual.classList.toggle("has-artwork", Boolean(artwork));
+  el.accountDetailVisual.innerHTML = `${artwork}<span class="account-card-artwork-shade" aria-hidden="true"></span><div class="account-detail-visual-copy"><span class="account-detail-icon">${accountTypeIcon(account)}</span><div><span>${escapeHTML(account.type)} · ${escapeHTML(accountCurrency(account))}</span><strong>${escapeHTML(account.name)}</strong></div></div><div class="account-detail-current"><span>Current balance</span><strong>${formatCurrencyHTML(balance, accountCurrency(account))}</strong>${accountCurrency(account) !== BASE_CURRENCY && accountBalanceInBase(account) != null ? `<small>${formatMoneyHTML(accountBalanceInBase(account))} AED equivalent</small>` : ""}</div>`;
+  el.accountDetailSummary.innerHTML = [
+    accountDetailMetric("Starting balance", number(account.opening_balance), account, "Before recorded activity", tone(number(account.opening_balance))),
+    accountDetailMetric("Money in", income, account, "Income and incoming transfers", "positive"),
+    accountDetailMetric("Money out", outflow, account, "Expenses and outgoing transfers", outflow ? "negative" : ""),
+    accountDetailMetric("Net movement", netMovement, account, "Current minus starting balance", tone(netMovement)),
+  ].join("");
+  el.accountDetailTransactionCount.textContent = `${transactions.length} transaction${transactions.length === 1 ? "" : "s"}`;
+  if (!transactions.length) {
+    el.accountDetailTransactions.innerHTML = emptyHTML("No activity yet", "Add an expense, income, or transfer for this account.");
+  } else {
+    const groups = new Map();
+    transactions.forEach((transaction) => {
+      const month = String(transaction.entry_date || "").slice(0, 7);
+      if (!groups.has(month)) groups.set(month, []);
+      groups.get(month).push(transaction);
+    });
+    el.accountDetailTransactions.innerHTML = [...groups.entries()].map(([month, rows]) => `<section class="account-activity-month"><h3>${escapeHTML(accountActivityMonthLabel(month))}</h3><div class="account-activity-list">${rows.map((transaction) => accountActivityRowHTML(transaction, account, runningIndex)).join("")}</div></section>`).join("");
+  }
+  void hydrateCreditCardArtwork();
+}
+
+function openAccountDetail(accountId) {
+  if (!accountById(accountId)) return;
+  selectedAccountDetailId = accountId;
+  openModal(el.accountDetailModal);
+  renderAccountDetail();
+}
+
+function openEntryForSelectedAccount() {
+  const account = accountById(selectedAccountDetailId);
+  if (!account) return;
+  closeModal(el.accountDetailModal);
+  openTransactionModal();
+  el.entryAccount.value = account.id;
+  el.transferFromAccount.value = account.id;
+  updateTransactionCurrencyFields("account");
+}
+
+function editSelectedAccount() {
+  const accountId = selectedAccountDetailId;
+  if (!accountId) return;
+  closeModal(el.accountDetailModal);
+  openAccountModal(accountId);
+}
+
+
 
 function openReconciliationForAccount(accountId) {
   if (!state.accounts.some((account) => account.id === accountId)) return;
@@ -3014,23 +3283,24 @@ function renderSettings() {
 }
 
 function renderSelectors() {
-  const accountOptions = state.accounts.map((account) => `<option value="${account.id}">${escapeHTML(account.name)} (${escapeHTML(formatCurrencyText(calculateAccountBalance(account.id), accountCurrency(account)))})</option>`).join("");
+  const accounts = orderedAccounts();
+  const accountOptions = accounts.map((account) => `<option value="${account.id}">${escapeHTML(account.name)} (${escapeHTML(formatCurrencyText(calculateAccountBalance(account.id), accountCurrency(account)))})</option>`).join("");
   [el.entryAccount, el.transferFromAccount, el.transferToAccount, el.recurringAccount, el.recurringFromAccount, el.recurringToAccount, el.billAccount].forEach((select) => {
     const previous = select.value;
     select.innerHTML = accountOptions || `<option value="">No accounts available</option>`;
     if ([...select.options].some((option) => option.value === previous)) select.value = previous;
   });
   const filterPrevious = el.transactionAccountFilter.value;
-  el.transactionAccountFilter.innerHTML = `<option value="all">All accounts</option>${state.accounts.map((account) => `<option value="${account.id}">${escapeHTML(account.name)}</option>`).join("")}`;
+  el.transactionAccountFilter.innerHTML = `<option value="all">All accounts</option>${accounts.map((account) => `<option value="${account.id}">${escapeHTML(account.name)}</option>`).join("")}`;
   if ([...el.transactionAccountFilter.options].some((option) => option.value === filterPrevious)) el.transactionAccountFilter.value = filterPrevious;
   const calendarAccountPrevious = el.calendarAccountFilter.value;
-  el.calendarAccountFilter.innerHTML = `<option value="all">All accounts</option>${state.accounts.map((account) => `<option value="${account.id}">${escapeHTML(account.name)}</option>`).join("")}`;
+  el.calendarAccountFilter.innerHTML = `<option value="all">All accounts</option>${accounts.map((account) => `<option value="${account.id}">${escapeHTML(account.name)}</option>`).join("")}`;
   if ([...el.calendarAccountFilter.options].some((option) => option.value === calendarAccountPrevious)) el.calendarAccountFilter.value = calendarAccountPrevious;
   const reconcileAccountPrevious = el.reconcileAccount.value;
-  el.reconcileAccount.innerHTML = state.accounts.map((account) => `<option value="${account.id}">${escapeHTML(account.name)} (${escapeHTML(formatCurrencyText(calculateAccountBalance(account.id), accountCurrency(account)))})</option>`).join("") || `<option value="">No accounts available</option>`;
+  el.reconcileAccount.innerHTML = accounts.map((account) => `<option value="${account.id}">${escapeHTML(account.name)} (${escapeHTML(formatCurrencyText(calculateAccountBalance(account.id), accountCurrency(account)))})</option>`).join("") || `<option value="">No accounts available</option>`;
   if ([...el.reconcileAccount.options].some((option) => option.value === reconcileAccountPrevious)) el.reconcileAccount.value = reconcileAccountPrevious;
   const importAccountPrevious = el.importDefaultAccount.value;
-  el.importDefaultAccount.innerHTML = `<option value="">Use account names from file</option>${state.accounts.map((account) => `<option value="${account.id}">${escapeHTML(account.name)}</option>`).join("")}`;
+  el.importDefaultAccount.innerHTML = `<option value="">Use account names from file</option>${accounts.map((account) => `<option value="${account.id}">${escapeHTML(account.name)}</option>`).join("")}`;
   if ([...el.importDefaultAccount.options].some((option) => option.value === importAccountPrevious)) el.importDefaultAccount.value = importAccountPrevious;
   renderEntryCategories(el.entryType.value);
   renderRecurringCategories(el.recurringType.value);
@@ -3967,22 +4237,26 @@ function updateAccountCurrencyFields() {
     const current = exchangeRateFor(currency, todayISO());
     if (current) el.accountExchangeRate.value = trimDecimal(current, 8);
   }
+  updateAccountCardPreview();
 }
 
 function updateCreditCardAccountFields() {
   const isCreditCard = el.accountType.value === "credit";
   el.creditCardAccountFields.hidden = !isCreditCard;
-  [el.accountCardNetwork, el.accountCardLastFour, el.accountCardAccentColor, el.accountCardArtwork, el.accountCreditLimit, el.accountStatementClosingDay, el.accountPaymentDueDay].forEach((input) => {
+  [el.accountCardNetwork, el.accountCardLastFour, el.accountCreditLimit, el.accountStatementClosingDay, el.accountPaymentDueDay].forEach((input) => {
     input.disabled = !isCreditCard;
   });
-  el.accountCardArtwork.disabled = !isCreditCard || mode !== "cloud";
-  if (isCreditCard && mode !== "cloud") el.cardArtworkHelp.textContent = "Card colors and network work locally. Artwork upload requires Supabase cloud sync.";
+  el.accountCardAccentColor.disabled = false;
+  el.accountCardArtwork.disabled = mode !== "cloud";
+  if (mode !== "cloud") el.cardArtworkHelp.textContent = "Gradient colors work locally. Artwork upload requires Supabase cloud sync.";
   updateAccountCardPreview();
 }
 
 function accountCardPreviewObject() {
   return {
-    name: el.accountName.value.trim() || "Credit card",
+    name: el.accountName.value.trim() || "Account",
+    type: el.accountType.value || "other",
+    currency_code: normalizeCurrencyCode(el.accountCurrency.value || BASE_CURRENCY),
     color: safeColor(el.accountColor.value),
     card_accent_color: safeColor(el.accountCardAccentColor.value || "#0f172a"),
     card_network: normalizeCardNetwork(el.accountCardNetwork.value),
@@ -3994,18 +4268,25 @@ function updateAccountCardPreview() {
   if (!el.accountCardPreview) return;
   const account = accountCardPreviewObject();
   const previewUrl = removeExistingCardArtwork ? "" : cardArtworkPreviewObjectUrl || existingCardArtworkPreviewUrl;
-  const lastFour = account.card_last_four ? `•••• ${account.card_last_four}` : cardNetworkLabel(account.card_network);
-  el.accountCardPreview.style.cssText = creditCardVisualStyle(account);
+  const isCreditCard = account.type === "credit";
+  const bottomLabel = isCreditCard
+    ? account.card_last_four ? `•••• ${account.card_last_four}` : cardNetworkLabel(account.card_network)
+    : `${capitalize(account.type)} · ${account.currency_code}`;
+  const brand = isCreditCard
+    ? `<div class="credit-card-brand-row"><span class="credit-card-chip"></span>${creditCardBrandHTML(account)}</div>`
+    : `<div class="account-preview-brand"><span>${accountTypeIcon(account)}</span><b>${escapeHTML(capitalize(account.type))}</b></div>`;
+  el.accountCardPreview.style.cssText = accountVisualStyle(account);
   el.accountCardPreview.classList.toggle("has-artwork", Boolean(previewUrl));
-  el.accountCardPreview.innerHTML = `${previewUrl ? `<img src="${escapeHTML(previewUrl)}" alt="Selected card artwork preview" />` : ""}<span class="credit-card-artwork-shade" aria-hidden="true"></span><div class="credit-card-brand-row"><span class="credit-card-chip"></span>${creditCardBrandHTML(account)}</div><strong>${escapeHTML(account.name)}</strong><span>${escapeHTML(lastFour)}</span>`;
+  el.accountCardPreview.innerHTML = `${previewUrl ? `<img src="${escapeHTML(previewUrl)}" alt="Selected account artwork preview" />` : ""}<span class="credit-card-artwork-shade" aria-hidden="true"></span>${brand}<strong>${escapeHTML(account.name)}</strong><span>${escapeHTML(bottomLabel)}</span>`;
   const hasArtwork = Boolean(selectedCardArtworkFile || (!removeExistingCardArtwork && state.accounts.find((item) => item.id === el.accountId.value)?.card_artwork_path));
   el.viewCardArtworkButton.hidden = !hasArtwork;
   el.removeCardArtworkButton.hidden = !hasArtwork;
   if (selectedCardArtworkFile) el.cardArtworkHelp.textContent = `${selectedCardArtworkFile.name} · ${formatFileSize(selectedCardArtworkFile.size)} · uploads privately when saved.`;
   else if (removeExistingCardArtwork) el.cardArtworkHelp.textContent = "The existing artwork will be removed when you save.";
-  else if (hasArtwork) el.cardArtworkHelp.textContent = "Artwork is stored privately in Supabase Storage. Use only a cropped image with sensitive details hidden.";
-  else if (mode === "cloud") el.cardArtworkHelp.textContent = "Use colors for a clean digital card, or upload a cropped artwork image with all sensitive card details hidden.";
+  else if (hasArtwork) el.cardArtworkHelp.textContent = "Artwork is stored privately in Supabase Storage. Avoid statements, passwords, full card details, QR codes, and other sensitive information.";
+  else if (mode === "cloud") el.cardArtworkHelp.textContent = "Use a two-color gradient or upload decorative artwork. Never upload sensitive account or card information.";
 }
+
 
 async function loadExistingCardArtworkPreview(account) {
   if (mode !== "cloud" || !account.card_artwork_path) return;
@@ -4020,8 +4301,8 @@ async function loadExistingCardArtworkPreview(account) {
 function validateCardArtworkFile(file) {
   if (!file) throw new Error("Choose an image file.");
   const type = String(file.type || "").toLowerCase();
-  if (!ALLOWED_CARD_ARTWORK_TYPES.has(type)) throw new Error("Card artwork must be JPEG, PNG, WebP, HEIC, or HEIF.");
-  if (file.size > MAX_CARD_ARTWORK_BYTES) throw new Error("Card artwork must be 5 MB or smaller.");
+  if (!ALLOWED_CARD_ARTWORK_TYPES.has(type)) throw new Error("Account artwork must be JPEG, PNG, WebP, HEIC, or HEIF.");
+  if (file.size > MAX_CARD_ARTWORK_BYTES) throw new Error("Account artwork must be 5 MB or smaller.");
 }
 
 function handleCardArtworkSelection(event) {
@@ -4029,7 +4310,7 @@ function handleCardArtworkSelection(event) {
   if (!file) return;
   try {
     validateCardArtworkFile(file);
-    if (mode !== "cloud") throw new Error("Card artwork uploads require Supabase cloud sync.");
+    if (mode !== "cloud") throw new Error("Account artwork uploads require Supabase cloud sync.");
     selectedCardArtworkFile = file;
     removeExistingCardArtwork = false;
     if (cardArtworkPreviewObjectUrl) URL.revokeObjectURL(cardArtworkPreviewObjectUrl);
@@ -4079,7 +4360,7 @@ async function createCardArtworkSignedUrl(path, expiresIn = 120) {
 
 async function uploadCardArtwork(accountId, file) {
   validateCardArtworkFile(file);
-  if (mode !== "cloud") throw new Error("Card artwork uploads require Supabase cloud sync.");
+  if (mode !== "cloud") throw new Error("Account artwork uploads require Supabase cloud sync.");
   setSyncStatus("syncing", "Uploading card artwork");
   const safeName = sanitizeCardArtworkFilename(file.name);
   const path = `${user.id}/${accountId}/${crypto.randomUUID()}-${safeName}`;
@@ -4144,7 +4425,8 @@ async function handleAccountSubmit(event) {
     payment_due_day: isCreditCard ? dueDay : null,
     card_network: isCreditCard ? normalizeCardNetwork(el.accountCardNetwork.value) : null,
     card_last_four: isCreditCard && lastFour ? lastFour : null,
-    card_accent_color: isCreditCard ? safeColor(el.accountCardAccentColor.value || "#0f172a") : null,
+    card_accent_color: safeColor(el.accountCardAccentColor.value || "#0f172a"),
+    sort_order: existing ? Number(existing.sort_order) : nextAccountSortOrder(),
   };
   if (!row.name) return showFormError(el.accountFormError, "Enter an account name.");
   if (existing && accountCurrency(existing) !== row.currency_code) {
@@ -4161,7 +4443,7 @@ async function handleAccountSubmit(event) {
   if (isCreditCard && creditLimitRaw && !(creditLimit > 0)) return showFormError(el.accountFormError, "Credit limit must be greater than zero.");
   if (closingDay !== null && (closingDay < 1 || closingDay > 31)) return showFormError(el.accountFormError, "Statement closing day must be between 1 and 31.");
   if (dueDay !== null && (dueDay < 1 || dueDay > 31)) return showFormError(el.accountFormError, "Payment due day must be between 1 and 31.");
-  if (selectedCardArtworkFile && mode !== "cloud") return showFormError(el.accountFormError, "Card artwork uploads require Supabase cloud sync.");
+  if (selectedCardArtworkFile && mode !== "cloud") return showFormError(el.accountFormError, "Account artwork uploads require Supabase cloud sync.");
   if (id && !isCreditCard && state.creditCardStatements.some((statement) => statement.account_id === id)) {
     return showFormError(el.accountFormError, "Delete this account's credit-card statements before changing it to another account type.");
   }
@@ -4172,22 +4454,22 @@ async function handleAccountSubmit(event) {
   try {
     if (id) {
       let artworkChanges = {};
-      if (isCreditCard && selectedCardArtworkFile) {
+      if (selectedCardArtworkFile) {
         artworkChanges = await uploadCardArtwork(id, selectedCardArtworkFile);
         newlyUploadedPath = artworkChanges.card_artwork_path;
-      } else if (!isCreditCard || removeExistingCardArtwork) {
+      } else if (removeExistingCardArtwork) {
         artworkChanges = { card_artwork_path: null, card_artwork_name: null, card_artwork_mime_type: null, card_artwork_size: null };
       }
       const updated = await updateRow("accounts", id, { ...row, ...artworkChanges });
       state.accounts = state.accounts.map((item) => item.id === id ? { ...item, ...updated } : item);
-      if ((selectedCardArtworkFile || removeExistingCardArtwork || !isCreditCard) && existing?.card_artwork_path && existing.card_artwork_path !== updated.card_artwork_path) {
+      if ((selectedCardArtworkFile || removeExistingCardArtwork) && existing?.card_artwork_path && existing.card_artwork_path !== updated.card_artwork_path) {
         await removeCardArtworkFile(existing.card_artwork_path, false);
       }
-      showToast(selectedCardArtworkFile ? "Account and card artwork updated." : "Account updated.");
+      showToast(selectedCardArtworkFile ? "Account and artwork updated." : "Account updated.");
     } else {
       let inserted = await insertRow("accounts", row);
       newlyInsertedId = inserted.id;
-      if (isCreditCard && selectedCardArtworkFile) {
+      if (selectedCardArtworkFile) {
         const artworkChanges = await uploadCardArtwork(inserted.id, selectedCardArtworkFile);
         newlyUploadedPath = artworkChanges.card_artwork_path;
         const updated = await updateRow("accounts", inserted.id, artworkChanges);
@@ -4195,7 +4477,7 @@ async function handleAccountSubmit(event) {
       }
       state.accounts.push(inserted);
       newlyInsertedId = "";
-      showToast(selectedCardArtworkFile ? "Account and card artwork added." : "Account added.");
+      showToast(selectedCardArtworkFile ? "Account and artwork added." : "Account added.");
     }
     if (row.currency_code !== BASE_CURRENCY && accountRate > 0) await upsertExchangeRate(row.currency_code, todayISO(), accountRate, "Updated from account settings");
     persistLocal(); closeModal(el.accountModal); resetCardArtworkFormState(); render();
@@ -5469,7 +5751,7 @@ function sanitizeImportedState(imported) {
   };
   const clean = normalizeState(imported);
   return {
-    version: 10,
+    version: 11,
     accounts: clean.accounts.map(strip),
     categories: clean.categories.map(strip),
     transactions: clean.transactions.map(strip),
