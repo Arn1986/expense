@@ -115,7 +115,7 @@
 
       <section class="view active" id="dashboardView">
         <div class="section-toolbar dashboard-toolbar">
-          <p class="section-copy">Choose the information that matters most and arrange the dashboard in your preferred order.</p>
+          <div><p class="section-copy">Choose the information that matters most and arrange the dashboard in your preferred order.</p><p class="data-freshness" id="dashboardDataStatus" aria-live="polite"></p></div>
           <button class="secondary-button" id="openDashboardCustomizationButton" type="button">⚙ Customize dashboard</button>
         </div>
 
@@ -232,6 +232,11 @@
             <label><span>Month</span><input id="transactionMonthFilter" type="month" /></label>
           </div>
           <div id="allTransactions"></div>
+          <div class="transaction-pagination" id="transactionPagination" hidden>
+            <span id="transactionPageInfo">0 transactions</span>
+            <label class="page-size-label"><span>Rows</span><select id="transactionPageSize"><option value="25">25</option><option value="50" selected>50</option><option value="100">100</option><option value="200">200</option></select></label>
+            <div class="pagination-buttons"><button class="secondary-button compact-button" id="transactionPreviousPage" data-transaction-page="1" type="button">← Previous</button><button class="secondary-button compact-button" id="transactionNextPage" data-transaction-page="2" type="button">Next →</button></div>
+          </div>
         </section>
       </section>
 
@@ -414,6 +419,7 @@
       </section>
 
       <section class="view" id="reportsView">
+        <div class="report-loading" id="reportLoading" role="status" aria-live="polite" hidden><span class="loading-spinner" aria-hidden="true"></span><span>Calculating report…</span></div>
         <section class="panel report-controls-panel">
           <div class="filters report-filters">
             <label><span>Report period</span><select id="reportPeriod"><option value="monthly">Monthly</option><option value="yearly">Yearly</option></select></label>

@@ -1269,3 +1269,162 @@ a.secondary-button { display: inline-flex; align-items: center; justify-content:
 }
 .account-card { min-height: 270px; }
 .account-card .account-base-equivalent { position: relative; z-index: 2; margin: 7px 0 0; color: rgba(255,255,255,.76); font-size: .72rem; }
+
+/* Performance update: pagination, lazy receipts, and loading feedback */
+.data-freshness {
+  min-height: 1.1rem;
+  margin: 0.35rem 0 0;
+  color: var(--muted, #64748b);
+  font-size: 0.78rem;
+}
+
+.data-freshness.busy::before {
+  content: "";
+  display: inline-block;
+  width: 0.55rem;
+  height: 0.55rem;
+  margin-right: 0.4rem;
+  border: 2px solid currentColor;
+  border-right-color: transparent;
+  border-radius: 999px;
+  vertical-align: -0.05rem;
+  animation: ledgerly-spin 0.8s linear infinite;
+}
+
+.transaction-pagination {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  padding: 1rem 0 0;
+  border-top: 1px solid var(--border, #e2e8f0);
+  color: var(--muted, #64748b);
+  font-size: 0.86rem;
+}
+
+.transaction-pagination[hidden] { display: none; }
+
+.page-size-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.45rem;
+  margin-left: auto;
+}
+
+.page-size-label select {
+  min-width: 4.5rem;
+  padding: 0.45rem 1.8rem 0.45rem 0.65rem;
+}
+
+.pagination-buttons {
+  display: inline-flex;
+  gap: 0.5rem;
+}
+
+.compact-button {
+  min-height: 2.25rem;
+  padding: 0.45rem 0.75rem;
+}
+
+.content-loading-block,
+.report-loading {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.8rem;
+  min-height: 8rem;
+  color: var(--muted, #64748b);
+}
+
+.content-loading-block div {
+  display: grid;
+  gap: 0.18rem;
+}
+
+.content-loading-block strong { color: var(--text, #0f172a); }
+.content-loading-block small { font-size: 0.78rem; }
+
+.loading-spinner {
+  width: 1.35rem;
+  height: 1.35rem;
+  flex: 0 0 auto;
+  border: 3px solid rgba(100, 116, 139, 0.25);
+  border-top-color: currentColor;
+  border-radius: 999px;
+  animation: ledgerly-spin 0.8s linear infinite;
+}
+
+.report-loading {
+  position: sticky;
+  top: 0.75rem;
+  z-index: 5;
+  min-height: auto;
+  width: max-content;
+  margin: 0 0 0.8rem auto;
+  padding: 0.7rem 1rem;
+  border: 1px solid var(--border, #e2e8f0);
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.96);
+  box-shadow: 0 8px 24px rgba(15, 23, 42, 0.1);
+  font-size: 0.82rem;
+}
+
+.report-loading[hidden] { display: none; }
+.content-is-loading > :not(.report-loading) { opacity: 0.66; transition: opacity 0.15s ease; }
+
+.performance-error {
+  display: grid;
+  justify-items: start;
+  gap: 0.45rem;
+  padding: 1rem;
+}
+
+.receipt-thumbnail-button {
+  position: relative;
+  width: 2.6rem;
+  height: 2.6rem;
+  flex: 0 0 2.6rem;
+  overflow: hidden;
+  padding: 0;
+  border: 1px solid var(--border, #e2e8f0);
+  border-radius: 0.75rem;
+  background: #f8fafc;
+  cursor: pointer;
+}
+
+.receipt-thumbnail,
+.receipt-thumbnail-placeholder {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+}
+
+.receipt-thumbnail {
+  object-fit: cover;
+}
+
+.receipt-thumbnail-placeholder {
+  display: grid;
+  place-items: center;
+  color: #64748b;
+  font-size: 1rem;
+}
+
+.receipt-thumbnail-placeholder[hidden] { display: none; }
+
+@keyframes ledgerly-spin {
+  to { transform: rotate(360deg); }
+}
+
+@media (max-width: 720px) {
+  .transaction-pagination {
+    align-items: stretch;
+    flex-wrap: wrap;
+  }
+
+  .page-size-label { margin-left: 0; }
+  .pagination-buttons { width: 100%; }
+  .pagination-buttons button { flex: 1; }
+  .report-loading { margin-right: 0; }
+}

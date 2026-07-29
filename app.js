@@ -22,6 +22,13 @@ const RECEIPT_BUCKET = "receipts";
 const CARD_ARTWORK_BUCKET = "card-artwork";
 const MAX_RECEIPT_BYTES = 8 * 1024 * 1024;
 const MAX_CARD_ARTWORK_BYTES = 5 * 1024 * 1024;
+const MAX_RECEIPT_SOURCE_BYTES = 20 * 1024 * 1024;
+const MAX_CARD_ARTWORK_SOURCE_BYTES = 15 * 1024 * 1024;
+const INITIAL_TRANSACTION_BATCH_SIZE = 250;
+const TRANSACTION_HYDRATION_PAGE_SIZE = 500;
+const DEFAULT_TRANSACTION_PAGE_SIZE = 50;
+const DASHBOARD_SUMMARY_CACHE_TTL = 15 * 60 * 1000;
+const RECEIPT_THUMBNAIL_SECONDS = 600;
 const TESSERACT_ESM_URL = "https://cdn.jsdelivr.net/npm/tesseract.js@7.0.0/dist/tesseract.esm.min.js";
 const OCR_IMAGE_TYPES = new Set(["image/jpeg", "image/png", "image/webp"]);
 const DASHBOARD_WIDGETS = [
@@ -104,6 +111,16 @@ let receiptOcrResult = null;
 let dashboardPreferenceDraft = [];
 let selectedAccountDetailId = "";
 let accountDragInProgress = false;
+let transactionHistoryFullyLoaded = mode === "local";
+let transactionHistoryTotal = 0;
+let transactionHistoryHydrationPromise = null;
+let transactionHydrationToken = 0;
+let transactionSearchTimer = null;
+let reportRenderTimer = null;
+let transactionPageState = { page: 1, pageSize: DEFAULT_TRANSACTION_PAGE_SIZE, total: 0, items: [], loading: false, error: "", requestToken: 0 };
+let dashboardServerSummary = null;
+let receiptThumbnailObserver = null;
+const receiptThumbnailUrlCache = new Map();
 
 const el = Object.fromEntries([...document.querySelectorAll("[id]")].map((node) => [node.id, node]));
 
@@ -298,9 +315,15 @@ function bindEvents() {
   el.categoryForm.addEventListener("submit", handleCategorySubmit);
   el.recurringForm.addEventListener("submit", handleRecurringSubmit);
 
-  [el.transactionSearch, el.transactionTypeFilter, el.transactionAccountFilter, el.transactionMonthFilter]
-    .forEach((input) => input.addEventListener("input", renderAllTransactions));
-  [el.reportPeriod, el.reportMonth].forEach((input) => input.addEventListener("input", renderReports));
+  el.transactionSearch.addEventListener("input", scheduleTransactionPageLoad);
+  [el.transactionTypeFilter, el.transactionAccountFilter, el.transactionMonthFilter]
+    .forEach((input) => input.addEventListener("change", () => loadTransactionPage(1)));
+  el.transactionPagination?.addEventListener("click", handleTransactionPaginationClick);
+  el.transactionPageSize?.addEventListener("change", () => {
+    transactionPageState.pageSize = Math.max(10, Math.min(200, Number(el.transactionPageSize.value) || DEFAULT_TRANSACTION_PAGE_SIZE));
+    loadTransactionPage(1);
+  });
+  [el.reportPeriod, el.reportMonth].forEach((input) => input.addEventListener("input", scheduleReportRender));
   [el.recurringStatusFilter, el.recurringTypeFilter].forEach((input) => input.addEventListener("input", renderRecurringEntries));
 
   el.exportButton.addEventListener("click", exportJSON);
@@ -357,6 +380,7 @@ function bindEvents() {
       "undo-reconciliation": () => undoReconciliation(id),
       "edit-exchange-rate": () => openExchangeRateModal(id),
       "delete-exchange-rate": () => deleteExchangeRate(id),
+      "retry-transaction-page": () => loadTransactionPage(transactionPageState.page),
     };
     if (actions[action]) await actions[action]();
   });
@@ -397,15 +421,34 @@ async function handleAuthSubmit(event) {
 async function enterCloudApp(authUser) {
   mode = "cloud";
   user = authUser;
+  dashboardServerSummary = readDashboardSummaryCache();
   showAppScreen();
   setSyncStatus("syncing", "Loading cloud data");
   try {
     await loadCloudState();
     if (!state.categories.length) await seedDefaultCategories();
-    await postDueRecurringEntries();
-    setSyncStatus("cloud", "Cloud synchronized");
     render();
     showReminderNoticeOnce();
+    void loadTransactionPage(1);
+    if (transactionHistoryFullyLoaded) {
+      await postDueRecurringEntries();
+      setSyncStatus("cloud", "Cloud synchronized");
+      await refreshDashboardSummary(false);
+      render();
+    } else {
+      setSyncStatus("syncing", `Loading history ${state.transactions.length}/${transactionHistoryTotal}`);
+      transactionHistoryHydrationPromise = hydrateRemainingTransactions();
+      void transactionHistoryHydrationPromise.then(async () => {
+        await postDueRecurringEntries();
+        await refreshDashboardSummary(false);
+        setSyncStatus("cloud", "Cloud synchronized");
+        render();
+        showReminderNoticeOnce();
+      }).catch((error) => {
+        setSyncStatus("local", "History sync incomplete");
+        showToast(`Older transaction history could not finish loading: ${friendlyError(error)}`, true);
+      });
+    }
   } catch (error) {
     setSyncStatus("local", "Sync error");
     showToast(friendlyError(error), true);
@@ -416,6 +459,8 @@ function enterLocalApp() {
   mode = "local";
   user = { id: "local-user", email: "Local preview" };
   state = loadLocalState();
+  transactionHistoryTotal = state.transactions.length;
+  transactionHistoryFullyLoaded = true;
   showAppScreen();
   setSyncStatus("local", "Local browser only");
   postDueRecurringEntries().finally(() => { render(); showReminderNoticeOnce(); });
@@ -480,10 +525,10 @@ function setAuthBusy(busy) {
 function showAuthError(message) { el.authError.textContent = message; }
 
 async function loadCloudState() {
-  const [accountsResult, categoriesResult, transactionsResult, transactionSplitsResult, budgetsResult, recurringResult, billsResult, reconciliationsResult, clearingsResult, cardStatementsResult, importRulesResult, exchangeRatesResult, preferencesResult] = await Promise.all([
+  const [accountsResult, categoriesResult, transactionsResult, transactionSplitsResult, budgetsResult, recurringResult, billsResult, reconciliationsResult, clearingsResult, cardStatementsResult, importRulesResult, exchangeRatesResult, preferencesResult, dashboardSummaryResult] = await Promise.all([
     supabase.from("accounts").select("*").order("sort_order", { ascending: true, nullsFirst: false }).order("created_at", { ascending: true }),
     supabase.from("categories").select("*").order("kind").order("name"),
-    supabase.from("transactions").select("*").order("entry_date", { ascending: false }).order("created_at", { ascending: false }),
+    supabase.from("transactions").select("*", { count: "exact" }).order("entry_date", { ascending: false }).order("created_at", { ascending: false }).order("id", { ascending: false }).limit(INITIAL_TRANSACTION_BATCH_SIZE),
     supabase.from("transaction_splits").select("*").order("created_at", { ascending: true }),
     supabase.from("budgets").select("*").order("created_at", { ascending: true }),
     supabase.from("recurring_entries").select("*").order("created_at", { ascending: true }),
@@ -494,8 +539,9 @@ async function loadCloudState() {
     supabase.from("import_rules").select("*").order("priority", { ascending: true }).order("created_at", { ascending: true }),
     supabase.from("exchange_rates").select("*").order("effective_date", { ascending: false }).order("created_at", { ascending: false }),
     supabase.from("user_preferences").select("*").eq("user_id", user.id).maybeSingle(),
+    supabase.rpc("ledgerly_dashboard_summary"),
   ]);
-  [accountsResult, categoriesResult, transactionsResult, transactionSplitsResult, budgetsResult, recurringResult, billsResult, reconciliationsResult, clearingsResult, cardStatementsResult, importRulesResult, exchangeRatesResult, preferencesResult].forEach((result) => {
+  [accountsResult, categoriesResult, transactionsResult, transactionSplitsResult, budgetsResult, recurringResult, billsResult, reconciliationsResult, clearingsResult, cardStatementsResult, importRulesResult, exchangeRatesResult, preferencesResult, dashboardSummaryResult].forEach((result) => {
     if (result.error) throw result.error;
   });
   state = normalizeState({
@@ -514,6 +560,40 @@ async function loadCloudState() {
     exchangeRates: exchangeRatesResult.data || [],
     preferences: normalizePreferences(preferencesResult.data),
   });
+  transactionHistoryTotal = Number(transactionsResult.count ?? state.transactions.length);
+  transactionHistoryFullyLoaded = state.transactions.length >= transactionHistoryTotal;
+  dashboardServerSummary = normalizeDashboardServerSummary(dashboardSummaryResult.data) || dashboardServerSummary;
+  writeDashboardSummaryCache(dashboardServerSummary);
+}
+
+async function hydrateRemainingTransactions() {
+  if (mode !== "cloud" || transactionHistoryFullyLoaded) return;
+  const token = ++transactionHydrationToken;
+  const rows = [...state.transactions];
+  let offset = rows.length;
+  while (offset < transactionHistoryTotal) {
+    const end = Math.min(offset + TRANSACTION_HYDRATION_PAGE_SIZE - 1, transactionHistoryTotal - 1);
+    const { data, error } = await supabase.from("transactions")
+      .select("*")
+      .order("entry_date", { ascending: false })
+      .order("created_at", { ascending: false })
+      .order("id", { ascending: false })
+      .range(offset, end);
+    if (error) throw error;
+    if (token !== transactionHydrationToken) return;
+    const batch = data || [];
+    rows.push(...batch);
+    offset += batch.length;
+    setSyncStatus("syncing", `Loading history ${Math.min(offset, transactionHistoryTotal)}/${transactionHistoryTotal}`);
+    if (!batch.length) break;
+    await new Promise((resolve) => window.setTimeout(resolve, 0));
+  }
+  if (token !== transactionHydrationToken) return;
+  const currentById = new Map(state.transactions.map((transaction) => [transaction.id, transaction]));
+  rows.forEach((transaction) => currentById.set(transaction.id, transaction));
+  state.transactions = normalizeState({ transactions: [...currentById.values()] }).transactions;
+  transactionHistoryTotal = state.transactions.length;
+  transactionHistoryFullyLoaded = true;
 }
 
 async function seedDefaultCategories() {
@@ -734,6 +814,261 @@ function setSyncStatus(status, text) {
   el.syncText.textContent = text;
 }
 
+function normalizeDashboardServerSummary(value) {
+  if (!value || typeof value !== "object") return null;
+  return {
+    generated_at: value.generated_at || new Date().toISOString(),
+    month: String(value.month || ""),
+    net_worth: number(value.net_worth),
+    included_account_count: Number(value.included_account_count || 0),
+    income: number(value.income),
+    expenses: number(value.expenses),
+    income_count: Number(value.income_count || 0),
+    expense_count: Number(value.expense_count || 0),
+    budget_total: number(value.budget_total),
+    budget_count: Number(value.budget_count || 0),
+    category_totals: Array.isArray(value.category_totals) ? value.category_totals.map((item) => ({ ...item, amount: number(item.amount) })) : [],
+    cash_flow: Array.isArray(value.cash_flow) ? value.cash_flow.map((item) => ({ ...item, income: number(item.income), expenses: number(item.expenses) })) : [],
+  };
+}
+
+function dashboardSummaryCacheKey() {
+  return `ledgerly-dashboard-summary:${user?.id || "anonymous"}`;
+}
+
+function readDashboardSummaryCache() {
+  try {
+    const cached = JSON.parse(sessionStorage.getItem(dashboardSummaryCacheKey()) || "null");
+    if (!cached?.saved_at || Date.now() - Number(cached.saved_at) > DASHBOARD_SUMMARY_CACHE_TTL) return null;
+    return normalizeDashboardServerSummary(cached.summary);
+  } catch (error) {
+    return null;
+  }
+}
+
+function writeDashboardSummaryCache(summary) {
+  if (!summary || !user?.id) return;
+  try {
+    sessionStorage.setItem(dashboardSummaryCacheKey(), JSON.stringify({ saved_at: Date.now(), summary }));
+  } catch (error) {
+    console.warn("Dashboard summary cache is unavailable", error);
+  }
+}
+
+async function refreshDashboardSummary(showStatus = true) {
+  if (mode !== "cloud" || !supabase) return;
+  if (showStatus) setDashboardDataStatus("Refreshing dashboard…", true);
+  const { data, error } = await supabase.rpc("ledgerly_dashboard_summary");
+  if (error) throw error;
+  dashboardServerSummary = normalizeDashboardServerSummary(data);
+  writeDashboardSummaryCache(dashboardServerSummary);
+  renderSummary();
+  renderCategoryChart();
+  renderCashFlowChart();
+  setDashboardDataStatus("Cloud summary updated", false);
+}
+
+function setDashboardDataStatus(text, busy = false) {
+  if (!el.dashboardDataStatus) return;
+  el.dashboardDataStatus.textContent = text || "";
+  el.dashboardDataStatus.classList.toggle("busy", busy);
+}
+
+function scheduleTransactionPageLoad() {
+  window.clearTimeout(transactionSearchTimer);
+  transactionSearchTimer = window.setTimeout(() => loadTransactionPage(1), 300);
+}
+
+function transactionFilters() {
+  return {
+    search: (el.transactionSearch.value || "").trim(),
+    type: el.transactionTypeFilter.value || "all",
+    accountId: el.transactionAccountFilter.value && el.transactionAccountFilter.value !== "all" ? el.transactionAccountFilter.value : null,
+    month: el.transactionMonthFilter.value || null,
+  };
+}
+
+async function loadTransactionPage(page = transactionPageState.page) {
+  const nextPage = Math.max(1, Number(page) || 1);
+  if (mode !== "cloud") {
+    transactionPageState.page = nextPage;
+    renderAllTransactions();
+    return;
+  }
+  const requestToken = ++transactionPageState.requestToken;
+  transactionPageState.loading = true;
+  transactionPageState.error = "";
+  transactionPageState.page = nextPage;
+  renderAllTransactions();
+  const filters = transactionFilters();
+  try {
+    const { data, error } = await supabase.rpc("ledgerly_search_transactions", {
+      p_search: filters.search || null,
+      p_type: filters.type === "all" ? null : filters.type,
+      p_account_id: filters.accountId,
+      p_month: filters.month,
+      p_page: nextPage,
+      p_page_size: transactionPageState.pageSize,
+    });
+    if (error) throw error;
+    if (requestToken !== transactionPageState.requestToken) return;
+    const result = data && typeof data === "object" ? data : {};
+    const items = normalizeState({ transactions: Array.isArray(result.items) ? result.items : [] }).transactions;
+    transactionPageState.items = items;
+    transactionPageState.total = Number(result.total || 0);
+    transactionPageState.page = Number(result.page || nextPage);
+    transactionPageState.pageSize = Number(result.page_size || transactionPageState.pageSize);
+    const byId = new Map(state.transactions.map((transaction) => [transaction.id, transaction]));
+    items.forEach((transaction) => byId.set(transaction.id, transaction));
+    state.transactions = [...byId.values()];
+  } catch (error) {
+    if (requestToken !== transactionPageState.requestToken) return;
+    transactionPageState.error = friendlyError(error);
+  } finally {
+    if (requestToken === transactionPageState.requestToken) {
+      transactionPageState.loading = false;
+      renderAllTransactions();
+    }
+  }
+}
+
+function handleTransactionPaginationClick(event) {
+  const button = event.target.closest("[data-transaction-page]");
+  if (!button || button.disabled) return;
+  loadTransactionPage(Number(button.dataset.transactionPage));
+}
+
+function renderTransactionPagination(localTotal = null) {
+  if (!el.transactionPagination) return;
+  const total = localTotal == null ? transactionPageState.total : localTotal;
+  const pageSize = transactionPageState.pageSize;
+  const pages = Math.max(1, Math.ceil(total / pageSize));
+  const page = Math.min(transactionPageState.page, pages);
+  const start = total ? (page - 1) * pageSize + 1 : 0;
+  const end = Math.min(page * pageSize, total);
+  el.transactionPageInfo.textContent = total ? `${start}–${end} of ${total}` : "0 transactions";
+  el.transactionPreviousPage.dataset.transactionPage = String(Math.max(1, page - 1));
+  el.transactionNextPage.dataset.transactionPage = String(Math.min(pages, page + 1));
+  el.transactionPreviousPage.disabled = transactionPageState.loading || page <= 1;
+  el.transactionNextPage.disabled = transactionPageState.loading || page >= pages;
+  el.transactionPagination.hidden = total === 0 && !transactionPageState.loading;
+  if (el.transactionPageSize) el.transactionPageSize.value = String(pageSize);
+}
+
+function scheduleReportRender() {
+  window.clearTimeout(reportRenderTimer);
+  setReportLoading(true);
+  reportRenderTimer = window.setTimeout(async () => {
+    try {
+      if (mode === "cloud" && !transactionHistoryFullyLoaded && transactionHistoryHydrationPromise) await transactionHistoryHydrationPromise;
+      window.requestAnimationFrame(() => {
+        renderReports();
+        setReportLoading(false);
+      });
+    } catch (error) {
+      setReportLoading(false);
+      showToast(`Report history could not finish loading: ${friendlyError(error)}`, true);
+    }
+  }, 120);
+}
+
+function setReportLoading(loading) {
+  if (!el.reportLoading) return;
+  el.reportLoading.hidden = !loading;
+  el.reportsView?.classList.toggle("content-is-loading", loading);
+}
+
+function receiptThumbnailHTML(transaction) {
+  if (!transaction.receipt_path) return "";
+  return `<button class="receipt-thumbnail-button" data-action="open-receipt" data-id="${transaction.id}" type="button" aria-label="Open receipt"><span class="receipt-thumbnail-placeholder">▧</span><img class="receipt-thumbnail" data-receipt-thumbnail-path="${escapeHTML(transaction.receipt_path)}" alt="" loading="lazy" hidden /></button>`;
+}
+
+function hydrateReceiptThumbnails(root = document) {
+  if (mode !== "cloud" || !supabase) return;
+  const images = [...root.querySelectorAll("img[data-receipt-thumbnail-path]:not([data-receipt-thumbnail-ready])")];
+  if (!images.length) return;
+  if (!("IntersectionObserver" in window)) {
+    images.forEach(loadReceiptThumbnail);
+    return;
+  }
+  if (!receiptThumbnailObserver) {
+    receiptThumbnailObserver = new IntersectionObserver((entries) => {
+      entries.forEach((entry) => {
+        if (!entry.isIntersecting) return;
+        receiptThumbnailObserver.unobserve(entry.target);
+        void loadReceiptThumbnail(entry.target);
+      });
+    }, { rootMargin: "180px 0px" });
+  }
+  images.forEach((image) => receiptThumbnailObserver.observe(image));
+}
+
+async function loadReceiptThumbnail(image) {
+  if (!image?.isConnected || image.dataset.receiptThumbnailReady) return;
+  image.dataset.receiptThumbnailReady = "loading";
+  const path = image.dataset.receiptThumbnailPath;
+  try {
+    const cached = receiptThumbnailUrlCache.get(path);
+    let url = cached?.expiresAt > Date.now() ? cached.url : "";
+    if (!url) {
+      url = await createReceiptSignedUrl(path, RECEIPT_THUMBNAIL_SECONDS);
+      receiptThumbnailUrlCache.set(path, { url, expiresAt: Date.now() + (RECEIPT_THUMBNAIL_SECONDS - 30) * 1000 });
+    }
+    if (!image.isConnected) return;
+    image.src = url;
+    image.hidden = false;
+    image.previousElementSibling?.setAttribute("hidden", "");
+    image.dataset.receiptThumbnailReady = "true";
+  } catch (error) {
+    image.dataset.receiptThumbnailReady = "error";
+    console.warn("Could not load receipt thumbnail", error);
+  }
+}
+
+async function compressImageForUpload(file, { maxDimension = 2200, quality = 0.82, label = "image" } = {}) {
+  const type = receiptMimeType(file) || String(file?.type || "").toLowerCase();
+  if (!file || !OCR_IMAGE_TYPES.has(type)) return file;
+  if (file.size < 700 * 1024) return file;
+  let bitmap;
+  try {
+    bitmap = await createImageBitmap(file, { imageOrientation: "from-image" });
+  } catch (error) {
+    const sourceUrl = URL.createObjectURL(file);
+    try {
+      bitmap = await loadImageElement(sourceUrl);
+    } finally {
+      URL.revokeObjectURL(sourceUrl);
+    }
+  }
+  const width = bitmap.width || bitmap.naturalWidth;
+  const height = bitmap.height || bitmap.naturalHeight;
+  if (!width || !height) return file;
+  const scale = Math.min(1, maxDimension / Math.max(width, height));
+  const canvas = document.createElement("canvas");
+  canvas.width = Math.max(1, Math.round(width * scale));
+  canvas.height = Math.max(1, Math.round(height * scale));
+  const context = canvas.getContext("2d", { alpha: false });
+  context.fillStyle = "#ffffff";
+  context.fillRect(0, 0, canvas.width, canvas.height);
+  context.drawImage(bitmap, 0, 0, canvas.width, canvas.height);
+  if (typeof bitmap.close === "function") bitmap.close();
+  const blob = await new Promise((resolve, reject) => canvas.toBlob((value) => value ? resolve(value) : reject(new Error(`Could not compress the ${label}.`)), "image/jpeg", quality));
+  if (blob.size >= file.size) return file;
+  const baseName = String(file.name || label).replace(/\.[^.]+$/, "");
+  return new File([blob], `${baseName}.jpg`, { type: "image/jpeg", lastModified: Date.now() });
+}
+
+async function refreshPerformanceDataAfterMutation() {
+  if (mode !== "cloud") return;
+  void loadTransactionPage(transactionPageState.page);
+  try {
+    await refreshDashboardSummary(true);
+  } catch (error) {
+    setDashboardDataStatus("Dashboard refresh failed", false);
+    console.warn("Could not refresh dashboard summary", error);
+  }
+}
+
 function switchView(view) {
   activeView = view;
   document.querySelectorAll(".view").forEach((section) => section.classList.toggle("active", section.id === `${view}View`));
@@ -741,7 +1076,8 @@ function switchView(view) {
   const titles = { dashboard: "Dashboard", accounts: "Accounts", creditcards: "Credit cards", transactions: "Transactions", rules: "Import rules", reconcile: "Reconcile", calendar: "Calendar", recurring: "Recurring", bills: "Bills & reminders", budgets: "Budgets", reports: "Reports", health: "Financial health", categories: "Categories", settings: "Data & settings" };
   el.pageTitle.textContent = titles[view] || "Ledgerly";
   el.sidebar.classList.remove("open");
-  if (view === "reports") renderReports();
+  if (view === "reports") scheduleReportRender();
+  if (view === "transactions") void loadTransactionPage(transactionPageState.page || 1);
   if (view === "health") renderFinancialHealth();
   if (view === "rules") renderImportRules();
   if (view === "creditcards") renderCreditCards();
@@ -768,7 +1104,7 @@ function render() {
   renderCashFlowChart();
   renderBudgets();
   renderCategories();
-  renderReports();
+  if (activeView === "reports") renderReports();
   renderFinancialHealth();
   renderSettings();
   renderExchangeRates();
@@ -969,17 +1305,23 @@ function inputCurrencyLabel(code) {
 
 function renderSummary() {
   const month = todayISO().slice(0, 7);
-  const monthTx = state.transactions.filter((item) => item.entry_date?.startsWith(month));
-  const income = sumTransactions(monthTx, "income");
-  const expenses = sumTransactions(monthTx, "expense");
-  const netWorth = calculateNetWorth();
+  const server = mode === "cloud" && dashboardServerSummary?.month === month ? dashboardServerSummary : null;
+  const monthTx = server ? [] : state.transactions.filter((item) => item.entry_date?.startsWith(month));
+  const income = server ? server.income : sumTransactions(monthTx, "income");
+  const expenses = server ? server.expenses : sumTransactions(monthTx, "expense");
+  const netWorth = server ? server.net_worth : calculateNetWorth();
   const cashFlow = income - expenses;
-  const budget = budgetMetrics("monthly", month);
+  const budget = server ? { total: server.budget_total, count: server.budget_count } : budgetMetrics("monthly", month);
+  const incomeCount = server ? server.income_count : monthTx.filter((item) => item.type === "income").length;
+  const expenseCount = server ? server.expense_count : monthTx.filter((item) => item.type === "expense").length;
+  const includedCount = server ? server.included_account_count : state.accounts.filter((a) => a.include_in_net_worth !== false).length;
   const missingRates = missingRateCurrencies();
-  el.summaryNetWorth.innerHTML = summaryCard("Net worth", netWorth, missingRates.length ? `AED value excludes ${missingRates.join(", ")} until a rate is added` : `${state.accounts.filter((a) => a.include_in_net_worth !== false).length} included accounts`, tone(netWorth));
-  el.summaryIncome.innerHTML = summaryCard("Income this month", income, `${monthTx.filter((item) => item.type === "income").length} entries`, "positive");
-  el.summaryExpenses.innerHTML = summaryCard("Expenses this month", expenses, budget.total ? `${Math.round((expenses / budget.total) * 100)}% of monthly budget` : `${monthTx.filter((item) => item.type === "expense").length} entries`, expenses ? "negative" : "");
+  el.summaryNetWorth.innerHTML = summaryCard("Net worth", netWorth, missingRates.length ? `AED value excludes ${missingRates.join(", ")} until a rate is added` : `${includedCount} included accounts`, tone(netWorth));
+  el.summaryIncome.innerHTML = summaryCard("Income this month", income, `${incomeCount} entries`, "positive");
+  el.summaryExpenses.innerHTML = summaryCard("Expenses this month", expenses, budget.total ? `${Math.round((expenses / budget.total) * 100)}% of monthly budget` : `${expenseCount} entries`, expenses ? "negative" : "");
   el.summaryCashFlow.innerHTML = summaryCard("Net cash flow", cashFlow, "Income minus expenses", tone(cashFlow));
+  const generated = server?.generated_at ? new Date(server.generated_at) : null;
+  setDashboardDataStatus(transactionHistoryFullyLoaded ? (generated ? `Updated ${generated.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}` : "") : `Loading older history ${state.transactions.length}/${transactionHistoryTotal}`, !transactionHistoryFullyLoaded);
 }
 
 function accountVisualStyle(account) {
@@ -1399,6 +1741,7 @@ function daysBetweenISO(fromISO, toISO) {
 function renderTransactions() {
   renderRecentTransactions();
   renderAllTransactions();
+  window.queueMicrotask(() => hydrateReceiptThumbnails());
 }
 
 function renderRecentTransactions() {
@@ -1406,21 +1749,44 @@ function renderRecentTransactions() {
   el.recentTransactions.innerHTML = items.length ? transactionListHTML(items, false) : emptyHTML("No entries yet", "Add an expense, income, or transfer to start your history.");
 }
 
-function renderAllTransactions() {
-  const search = (el.transactionSearch.value || "").trim().toLowerCase();
-  const type = el.transactionTypeFilter.value || "all";
-  const account = el.transactionAccountFilter.value || "all";
-  const month = el.transactionMonthFilter.value || "";
-  const items = sortedTransactions().filter((transaction) => {
+function filteredLocalTransactions() {
+  const { search, type, accountId, month } = transactionFilters();
+  const lowerSearch = search.toLowerCase();
+  return sortedTransactions().filter((transaction) => {
     const category = transactionCategorySearchText(transaction);
     const accountText = transactionAccountText(transaction);
-    const matchesSearch = !search || [transaction.description, transaction.remarks, category, accountText].some((value) => String(value || "").toLowerCase().includes(search));
+    const matchesSearch = !lowerSearch || [transaction.description, transaction.remarks, category, accountText].some((value) => String(value || "").toLowerCase().includes(lowerSearch));
     const matchesType = type === "all" || transaction.type === type;
-    const matchesAccount = account === "all" || [transaction.account_id, transaction.from_account_id, transaction.to_account_id].includes(account);
+    const matchesAccount = !accountId || [transaction.account_id, transaction.from_account_id, transaction.to_account_id].includes(accountId);
     const matchesMonth = !month || transaction.entry_date?.startsWith(month);
     return matchesSearch && matchesType && matchesAccount && matchesMonth;
   });
-  el.allTransactions.innerHTML = items.length ? transactionListHTML(items, true) : emptyHTML("No matching entries", "Try changing the filters or add a new entry.");
+}
+
+function renderAllTransactions() {
+  if (mode === "cloud") {
+    if (transactionPageState.loading && !transactionPageState.items.length) {
+      el.allTransactions.innerHTML = loadingBlockHTML("Loading transactions…", "Search and filters run securely in Supabase.");
+    } else if (transactionPageState.error) {
+      el.allTransactions.innerHTML = `<div class="inline-error performance-error"><strong>Transactions could not load.</strong><span>${escapeHTML(transactionPageState.error)}</span><button class="secondary-button" type="button" onclick="void 0" data-action="retry-transaction-page">Try again</button></div>`;
+    } else {
+      el.allTransactions.innerHTML = transactionPageState.items.length ? transactionListHTML(transactionPageState.items, true) : emptyHTML("No matching entries", "Try changing the filters or add a new entry.");
+    }
+    renderTransactionPagination();
+  } else {
+    const all = filteredLocalTransactions();
+    const pages = Math.max(1, Math.ceil(all.length / transactionPageState.pageSize));
+    transactionPageState.page = Math.min(transactionPageState.page, pages);
+    const start = (transactionPageState.page - 1) * transactionPageState.pageSize;
+    const items = all.slice(start, start + transactionPageState.pageSize);
+    el.allTransactions.innerHTML = items.length ? transactionListHTML(items, true) : emptyHTML("No matching entries", "Try changing the filters or add a new entry.");
+    renderTransactionPagination(all.length);
+  }
+  window.queueMicrotask(() => hydrateReceiptThumbnails(el.transactionsView || document));
+}
+
+function loadingBlockHTML(title, detail = "") {
+  return `<div class="content-loading-block" role="status"><span class="loading-spinner" aria-hidden="true"></span><div><strong>${escapeHTML(title)}</strong>${detail ? `<small>${escapeHTML(detail)}</small>` : ""}</div></div>`;
 }
 
 function chronologicalTransactions() {
@@ -1449,17 +1815,18 @@ function transactionRunningBalanceHTML(transaction, runningIndex) {
   if (transaction.type === "transfer") {
     const fromAccount = accountById(transaction.from_account_id);
     const toAccount = accountById(transaction.to_account_id);
-    const fromBalance = runningIndex.get(transaction.from_account_id)?.get(transaction.id);
-    const toBalance = runningIndex.get(transaction.to_account_id)?.get(transaction.id);
+    const fromBalance = transaction.server_from_running_balance ?? runningIndex?.get(transaction.from_account_id)?.get(transaction.id);
+    const toBalance = transaction.server_to_running_balance ?? runningIndex?.get(transaction.to_account_id)?.get(transaction.id);
     return `<small class="running-balance">From balance ${formatCurrencyText(fromBalance, accountCurrency(fromAccount))}</small><small class="running-balance">To balance ${formatCurrencyText(toBalance, accountCurrency(toAccount))}</small>`;
   }
   const account = accountById(transaction.account_id);
-  const balance = runningIndex.get(transaction.account_id)?.get(transaction.id);
+  const balance = transaction.server_running_balance ?? runningIndex?.get(transaction.account_id)?.get(transaction.id);
   return `<small class="running-balance">Balance ${formatCurrencyText(balance, accountCurrency(account))}</small>`;
 }
 
 function transactionListHTML(items, showActions) {
-  const runningIndex = buildRunningBalanceIndex();
+  const hasServerBalances = items.every((transaction) => transaction.type === "transfer" ? transaction.server_from_running_balance != null && transaction.server_to_running_balance != null : transaction.server_running_balance != null);
+  const runningIndex = hasServerBalances ? null : buildRunningBalanceIndex();
   return `<div class="transaction-list">${items.map((transaction) => {
     const category = categoryById(transaction.category_id);
     const splitCount = splitsForTransaction(transaction.id).length;
@@ -1472,7 +1839,7 @@ function transactionListHTML(items, showActions) {
     const receiptAction = transaction.receipt_path ? `<button class="row-action receipt-action" data-action="open-receipt" data-id="${transaction.id}" aria-label="Open receipt" title="Open receipt">▧</button>` : "";
     return `<div class="transaction-row">
       <div class="transaction-main">
-        <span class="transaction-icon ${transaction.type}">${transaction.type === "expense" ? "↓" : transaction.type === "income" ? "↑" : "⇄"}</span>
+        ${receiptThumbnailHTML(transaction) || `<span class="transaction-icon ${transaction.type}">${transaction.type === "expense" ? "↓" : transaction.type === "income" ? "↑" : "⇄"}</span>`}
         <div style="min-width:0"><div class="transaction-title">${escapeHTML(title)}</div><div class="transaction-subtitle">${escapeHTML(subtitle)}${splitCount ? ` · <span class="split-indicator">${splitCount} splits</span>` : ""}${transaction.recurring_entry_id ? ' · <span class="recurring-indicator">Recurring</span>' : ""}${transaction.receipt_path ? ' · <span class="receipt-indicator">Receipt</span>' : ""}${reconciliationBadge}</div>${remarks ? `<div class="transaction-remarks">${escapeHTML(remarks)}</div>` : ""}</div>
       </div>
       <div class="transaction-meta account-column">${escapeHTML(transactionAccountText(transaction))}</div>
@@ -1513,7 +1880,7 @@ function accountActivityRowHTML(transaction, account, runningIndex) {
   const receiptAction = transaction.receipt_path ? `<button class="row-action" data-action="open-receipt" data-id="${transaction.id}" aria-label="Open receipt">▧</button>` : "";
   return `<div class="account-activity-row">
     <div class="transaction-main">
-      <span class="transaction-icon ${toneClass}">${effect < 0 ? "↓" : effect > 0 ? "↑" : "⇄"}</span>
+      ${receiptThumbnailHTML(transaction) || `<span class="transaction-icon ${toneClass}">${effect < 0 ? "↓" : effect > 0 ? "↑" : "⇄"}</span>`}
       <div class="account-activity-copy"><strong>${escapeHTML(title)}</strong><span>${escapeHTML(counterpart)} · ${formatDate(transaction.entry_date)}</span>${remarks ? `<small>${escapeHTML(remarks)}</small>` : ""}</div>
     </div>
     <div class="account-activity-amount ${toneClass}"><strong>${sign}${formatCurrencyHTML(displayAmount, accountCurrency(account))}</strong><span>${formatCurrencyHTML(balance, accountCurrency(account))}</span></div>
@@ -1554,6 +1921,7 @@ function renderAccountDetail() {
     el.accountDetailTransactions.innerHTML = [...groups.entries()].map(([month, rows]) => `<section class="account-activity-month"><h3>${escapeHTML(accountActivityMonthLabel(month))}</h3><div class="account-activity-list">${rows.map((transaction) => accountActivityRowHTML(transaction, account, runningIndex)).join("")}</div></section>`).join("");
   }
   void hydrateCreditCardArtwork();
+  window.queueMicrotask(() => hydrateReceiptThumbnails(el.accountDetailModal));
 }
 
 function openAccountDetail(accountId) {
@@ -1982,12 +2350,17 @@ async function cleanupTransactionClearingsForTransaction(transactionId, transact
 
 function renderCategoryChart() {
   const month = todayISO().slice(0, 7);
-  const totals = categoryTotals(state.transactions.filter((item) => item.type === "expense" && item.entry_date?.startsWith(month)));
+  const totals = mode === "cloud" && dashboardServerSummary?.month === month
+    ? dashboardServerSummary.category_totals
+    : categoryTotals(state.transactions.filter((item) => item.type === "expense" && item.entry_date?.startsWith(month)));
   el.categoryChart.innerHTML = categoryBarsHTML(totals, "No spending this month");
 }
 
 function renderCashFlowChart() {
-  el.cashFlowChart.innerHTML = cashFlowBarsHTML(monthSeries(6, new Date()));
+  const series = mode === "cloud" && dashboardServerSummary?.cash_flow?.length
+    ? dashboardServerSummary.cash_flow.map((item) => ({ ...item, date: dateFromMonth(item.key) }))
+    : monthSeries(6, new Date());
+  el.cashFlowChart.innerHTML = cashFlowBarsHTML(series);
 }
 
 
@@ -3080,6 +3453,7 @@ function renderReports() {
   el.reportCashFlowChart.innerHTML = cashFlowBarsHTML(chartMonths);
   el.netWorthChart.innerHTML = netWorthLineHTML(monthSeries(12, dateFromMonth(anchor)));
   el.reportMonth.parentElement.querySelector("span").textContent = period === "yearly" ? "Year anchor" : "Month";
+  setReportLoading(false);
 }
 
 
@@ -3260,7 +3634,7 @@ async function handleExchangeRateSubmit(event) {
       state.exchangeRates.push(await insertRow("exchange_rates", row));
       showToast("Exchange rate added.");
     }
-    persistLocal(); closeModal(el.exchangeRateModal); render();
+    persistLocal(); closeModal(el.exchangeRateModal); render(); void refreshPerformanceDataAfterMutation();
   } catch (error) { showFormError(el.exchangeRateFormError, friendlyError(error)); }
 }
 
@@ -3270,7 +3644,7 @@ async function deleteExchangeRate(id) {
   try {
     await deleteRow("exchange_rates", id);
     state.exchangeRates = state.exchangeRates.filter((item) => item.id !== id);
-    persistLocal(); render(); showToast("Exchange rate deleted.");
+    persistLocal(); render(); void refreshPerformanceDataAfterMutation(); showToast("Exchange rate deleted.");
   } catch (error) { showToast(friendlyError(error), true); }
 }
 
@@ -3698,6 +4072,7 @@ async function handleTransactionSubmit(event) {
     closeModal(el.transactionModal);
     clearReceiptFormState();
     render();
+    void refreshPerformanceDataAfterMutation();
   } catch (error) {
     if (newlyUploadedPath) await removeReceiptFile(newlyUploadedPath, false);
     if (newlyInsertedId) {
@@ -3743,7 +4118,7 @@ function handleReceiptSelection(event) {
     if (mode !== "cloud") throw new Error("Receipt uploads require Supabase cloud sync.");
     selectedReceiptFile = file;
     removeExistingReceipt = false;
-    el.receiptFileHelp.textContent = "The selected receipt will be uploaded privately when you save this entry.";
+    el.receiptFileHelp.textContent = file.size > 700 * 1024 ? "The receipt will be compressed in your browser, then uploaded privately when you save." : "The selected receipt will be uploaded privately when you save this entry.";
     showSelectedReceiptPreview(file);
     updateReceiptOcrAvailability();
   } catch (error) {
@@ -3996,7 +4371,8 @@ function applyReceiptOcrResult() {
 function validateReceiptFile(file) {
   const type = receiptMimeType(file);
   if (!file || !ALLOWED_RECEIPT_TYPES.has(type)) throw new Error("Choose a JPEG, PNG, WebP, HEIC, or HEIF image.");
-  if (file.size > MAX_RECEIPT_BYTES) throw new Error("Receipt image must be 8 MB or smaller.");
+  const limit = OCR_IMAGE_TYPES.has(type) ? MAX_RECEIPT_SOURCE_BYTES : MAX_RECEIPT_BYTES;
+  if (file.size > limit) throw new Error(OCR_IMAGE_TYPES.has(type) ? "Receipt image must be 20 MB or smaller before compression." : "HEIC or HEIF receipts must be 8 MB or smaller.");
 }
 
 function receiptMimeType(file) {
@@ -4124,11 +4500,14 @@ async function createReceiptSignedUrl(path, expiresIn = 120) {
 async function uploadReceipt(transactionId, file) {
   validateReceiptFile(file);
   if (mode !== "cloud") throw new Error("Receipt uploads require Supabase cloud sync.");
+  setSyncStatus("syncing", "Compressing receipt");
+  const uploadFile = await compressImageForUpload(file, { maxDimension: 2200, quality: 0.82, label: "receipt" });
+  if (uploadFile.size > MAX_RECEIPT_BYTES) throw new Error("The compressed receipt is still larger than 8 MB. Crop it or choose a smaller image.");
   setSyncStatus("syncing", "Uploading receipt");
-  const safeName = sanitizeReceiptFilename(file.name);
+  const safeName = sanitizeReceiptFilename(uploadFile.name);
   const path = `${user.id}/${transactionId}/${crypto.randomUUID()}-${safeName}`;
-  const mimeType = receiptMimeType(file);
-  const { data, error } = await supabase.storage.from(RECEIPT_BUCKET).upload(path, file, {
+  const mimeType = receiptMimeType(uploadFile);
+  const { data, error } = await supabase.storage.from(RECEIPT_BUCKET).upload(path, uploadFile, {
     cacheControl: "3600",
     upsert: false,
     contentType: mimeType,
@@ -4137,9 +4516,9 @@ async function uploadReceipt(transactionId, file) {
   setSyncStatus("cloud", "Cloud synchronized");
   return {
     receipt_path: data?.path || path,
-    receipt_name: file.name.slice(0, 255),
+    receipt_name: uploadFile.name.slice(0, 255),
     receipt_mime_type: mimeType.slice(0, 100),
-    receipt_size: file.size,
+    receipt_size: uploadFile.size,
   };
 }
 
@@ -4300,9 +4679,10 @@ async function loadExistingCardArtworkPreview(account) {
 
 function validateCardArtworkFile(file) {
   if (!file) throw new Error("Choose an image file.");
-  const type = String(file.type || "").toLowerCase();
+  const type = receiptMimeType(file);
   if (!ALLOWED_CARD_ARTWORK_TYPES.has(type)) throw new Error("Account artwork must be JPEG, PNG, WebP, HEIC, or HEIF.");
-  if (file.size > MAX_CARD_ARTWORK_BYTES) throw new Error("Account artwork must be 5 MB or smaller.");
+  const limit = OCR_IMAGE_TYPES.has(type) ? MAX_CARD_ARTWORK_SOURCE_BYTES : MAX_CARD_ARTWORK_BYTES;
+  if (file.size > limit) throw new Error(OCR_IMAGE_TYPES.has(type) ? "Account artwork must be 15 MB or smaller before compression." : "HEIC or HEIF artwork must be 5 MB or smaller.");
 }
 
 function handleCardArtworkSelection(event) {
@@ -4361,11 +4741,14 @@ async function createCardArtworkSignedUrl(path, expiresIn = 120) {
 async function uploadCardArtwork(accountId, file) {
   validateCardArtworkFile(file);
   if (mode !== "cloud") throw new Error("Account artwork uploads require Supabase cloud sync.");
+  setSyncStatus("syncing", "Compressing account artwork");
+  const uploadFile = await compressImageForUpload(file, { maxDimension: 1800, quality: 0.84, label: "account artwork" });
+  if (uploadFile.size > MAX_CARD_ARTWORK_BYTES) throw new Error("The compressed artwork is still larger than 5 MB. Crop it or choose a smaller image.");
   setSyncStatus("syncing", "Uploading card artwork");
-  const safeName = sanitizeCardArtworkFilename(file.name);
+  const safeName = sanitizeCardArtworkFilename(uploadFile.name);
   const path = `${user.id}/${accountId}/${crypto.randomUUID()}-${safeName}`;
-  const mimeType = String(file.type || "image/jpeg").toLowerCase();
-  const { data, error } = await supabase.storage.from(CARD_ARTWORK_BUCKET).upload(path, file, {
+  const mimeType = receiptMimeType(uploadFile) || "image/jpeg";
+  const { data, error } = await supabase.storage.from(CARD_ARTWORK_BUCKET).upload(path, uploadFile, {
     cacheControl: "3600",
     upsert: false,
     contentType: mimeType,
@@ -4374,9 +4757,9 @@ async function uploadCardArtwork(accountId, file) {
   setSyncStatus("cloud", "Cloud synchronized");
   return {
     card_artwork_path: data?.path || path,
-    card_artwork_name: file.name.slice(0, 255),
+    card_artwork_name: uploadFile.name.slice(0, 255),
     card_artwork_mime_type: mimeType.slice(0, 100),
-    card_artwork_size: file.size,
+    card_artwork_size: uploadFile.size,
   };
 }
 
@@ -4480,7 +4863,7 @@ async function handleAccountSubmit(event) {
       showToast(selectedCardArtworkFile ? "Account and artwork added." : "Account added.");
     }
     if (row.currency_code !== BASE_CURRENCY && accountRate > 0) await upsertExchangeRate(row.currency_code, todayISO(), accountRate, "Updated from account settings");
-    persistLocal(); closeModal(el.accountModal); resetCardArtworkFormState(); render();
+    persistLocal(); closeModal(el.accountModal); resetCardArtworkFormState(); render(); void refreshPerformanceDataAfterMutation();
   } catch (error) {
     if (newlyUploadedPath) await removeCardArtworkFile(newlyUploadedPath, false);
     if (newlyInsertedId) await deleteRow("accounts", newlyInsertedId).catch(() => {});
@@ -4641,7 +5024,7 @@ async function handleBudgetSubmit(event) {
       state.budgets.push(await insertRow("budgets", row));
       showToast("Budget created.");
     }
-    persistLocal(); closeModal(el.budgetModal); render();
+    persistLocal(); closeModal(el.budgetModal); render(); void refreshPerformanceDataAfterMutation();
   } catch (error) { showFormError(el.budgetFormError, friendlyError(error)); }
 }
 
@@ -4687,7 +5070,7 @@ async function handleCategorySubmit(event) {
       state.categories.push(await insertRow("categories", row));
       showToast("Category added.");
     }
-    persistLocal(); closeModal(el.categoryModal); render();
+    persistLocal(); closeModal(el.categoryModal); render(); void refreshPerformanceDataAfterMutation();
   } catch (error) { showFormError(el.categoryFormError, friendlyError(error)); }
 }
 
@@ -4701,7 +5084,7 @@ async function deleteAccount(id) {
     await deleteRow("accounts", id);
     const artworkRemoved = account.card_artwork_path ? await removeCardArtworkFile(account.card_artwork_path, false) : true;
     state.accounts = state.accounts.filter((item) => item.id !== id);
-    persistLocal(); render(); showToast(artworkRemoved ? "Account deleted." : "Account deleted, but its card artwork could not be cleaned up.", !artworkRemoved);
+    persistLocal(); render(); void refreshPerformanceDataAfterMutation(); showToast(artworkRemoved ? "Account deleted." : "Account deleted, but its card artwork could not be cleaned up.", !artworkRemoved);
   } catch (error) { showToast(friendlyError(error), true); }
 }
 
@@ -4724,6 +5107,7 @@ async function deleteTransaction(id) {
     }
     const receiptRemoved = transaction?.receipt_path ? await removeReceiptFile(transaction.receipt_path, false) : true;
     persistLocal(); render();
+    void refreshPerformanceDataAfterMutation();
     showToast(receiptRemoved ? "Entry deleted." : "Entry deleted, but its receipt file could not be cleaned up.", !receiptRemoved);
   } catch (error) { showToast(friendlyError(error), true); }
 }
@@ -4733,7 +5117,7 @@ async function deleteBudget(id) {
   try {
     await deleteRow("budgets", id);
     state.budgets = state.budgets.filter((item) => item.id !== id);
-    persistLocal(); render(); showToast("Budget deleted.");
+    persistLocal(); render(); void refreshPerformanceDataAfterMutation(); showToast("Budget deleted.");
   } catch (error) { showToast(friendlyError(error), true); }
 }
 
@@ -4746,7 +5130,7 @@ async function deleteCategory(id) {
   try {
     await deleteRow("categories", id);
     state.categories = state.categories.filter((item) => item.id !== id);
-    persistLocal(); render(); showToast("Category deleted.");
+    persistLocal(); render(); void refreshPerformanceDataAfterMutation(); showToast("Category deleted.");
   } catch (error) { showToast(friendlyError(error), true); }
 }
 
@@ -5495,6 +5879,7 @@ async function importValidatedTransactions() {
     await insertImportedTransactions(transactionRows, importedSplits);
     persistLocal();
     render();
+    void refreshPerformanceDataAfterMutation();
     closeModal(el.transactionImportModal);
     const duplicateCount = transactionImportValidation.filter((row) => row.status === "duplicate").length;
     showToast(`${transactionRows.length} transaction${transactionRows.length === 1 ? "" : "s"} imported${duplicateCount ? `; ${duplicateCount} duplicate${duplicateCount === 1 ? "" : "s"} skipped` : ""}.`);
@@ -5816,6 +6201,7 @@ function friendlyError(error) {
   if (message.toLowerCase().includes("signups not allowed") || message.toLowerCase().includes("signup is disabled")) return "New account registration is closed. Existing users can still sign in.";
   if ((message.includes("exchange_rates") || message.includes("currency_code") || message.includes("destination_amount") || message.includes("base_amount")) && (message.includes("does not exist") || message.includes("schema cache") || message.includes("column"))) return "Multi-currency support is not ready. Run supabase/add-financial-health-multicurrency.sql in the Supabase SQL Editor.";
   if (message.includes("user_preferences") && (message.includes("does not exist") || message.includes("schema cache"))) return "Dashboard customization is not ready. Run supabase/add-receipt-ocr-dashboard-customization.sql in the Supabase SQL Editor.";
+  if (message.includes("ledgerly_search_transactions") || message.includes("ledgerly_dashboard_summary")) return "Performance functions are not ready. Run supabase/add-performance-improvements.sql in the Supabase SQL Editor.";
   if ((message.includes("reconciliations") || message.includes("transaction_clearings")) && (message.includes("does not exist") || message.includes("schema cache"))) return "Account reconciliation is not ready. Run supabase/add-account-reconciliation.sql in the Supabase SQL Editor.";
   if (message.includes("reconciliations_user_id_account_id_statement_date_key") || (message.includes("duplicate key") && message.includes("reconciliations"))) return "This account already has a completed reconciliation for that statement date. Undo it before creating another.";
   if ((message.includes("credit_card_statements") || message.includes("credit_limit") || message.includes("statement_closing_day") || message.includes("payment_due_day")) && (message.includes("does not exist") || message.includes("schema cache") || message.includes("column"))) return "Credit-card management is not ready. Run supabase/add-credit-card-management.sql in the Supabase SQL Editor.";
