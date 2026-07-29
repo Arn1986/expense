@@ -1,0 +1,112 @@
+name: Daily Supabase database backup
+
+on:
+  workflow_dispatch:
+  schedule:
+    # 01:15 UTC = 05:15 in the UAE. Scheduled runs can start a little late.
+    - cron: "15 1 * * *"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ledgerly-daily-database-backup
+  cancel-in-progress: false
+
+jobs:
+  backup:
+    name: Create and store private backup
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    env:
+      SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
+      BACKUP_REPOSITORY: arn1986/expense-backups
+
+    steps:
+      - name: Check required configuration
+        env:
+          BACKUP_REPO_TOKEN: ${{ secrets.BACKUP_REPO_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -z "${SUPABASE_DB_URL:-}" ]; then
+            echo "Missing repository secret: SUPABASE_DB_URL" >&2
+            exit 1
+          fi
+          if [ -z "${BACKUP_REPO_TOKEN:-}" ]; then
+            echo "Missing repository secret: BACKUP_REPO_TOKEN" >&2
+            exit 1
+          fi
+          if [ -z "${BACKUP_REPOSITORY:-}" ]; then
+            echo "BACKUP_REPOSITORY is not configured in this workflow." >&2
+            exit 1
+          fi
+
+      - name: Install Supabase CLI
+        uses: supabase/setup-cli@v1
+        with:
+          version: latest
+
+      - name: Create logical database dump
+        id: dump
+        shell: bash
+        run: |
+          set -euo pipefail
+          stamp="$(date -u +'%Y-%m-%dT%H-%M-%SZ')"
+          backup_root="$RUNNER_TEMP/ledgerly-backup"
+          backup_dir="$backup_root/$stamp"
+          archive="$RUNNER_TEMP/ledgerly-supabase-$stamp.tar.gz"
+
+          mkdir -p "$backup_dir"
+          supabase db dump --db-url "$SUPABASE_DB_URL" -f "$backup_dir/roles.sql" --role-only
+          supabase db dump --db-url "$SUPABASE_DB_URL" -f "$backup_dir/schema.sql"
+          supabase db dump --db-url "$SUPABASE_DB_URL" -f "$backup_dir/data.sql" --data-only --use-copy -x "storage.buckets_vectors" -x "storage.vector_indexes"
+
+          cat > "$backup_dir/BACKUP-INFO.txt" <<EOF
+          Ledgerly Supabase logical database backup
+          Created UTC: $stamp
+          Source repository: $GITHUB_REPOSITORY
+          Source commit: $GITHUB_SHA
+
+          Files:
+          - roles.sql
+          - schema.sql
+          - data.sql
+
+          Important: Supabase Storage objects such as receipt images and card artwork are not included.
+          EOF
+
+          tar -czf "$archive" -C "$backup_root" "$stamp"
+          sha256sum "$archive" > "$archive.sha256"
+
+          echo "stamp=$stamp" >> "$GITHUB_OUTPUT"
+          echo "archive=$archive" >> "$GITHUB_OUTPUT"
+          echo "checksum=$archive.sha256" >> "$GITHUB_OUTPUT"
+
+      - name: Check out private backup repository
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.BACKUP_REPOSITORY }}
+          token: ${{ secrets.BACKUP_REPO_TOKEN }}
+          path: private-backups
+          fetch-depth: 1
+
+      - name: Commit backup to private repository
+        env:
+          BACKUP_STAMP: ${{ steps.dump.outputs.stamp }}
+          BACKUP_ARCHIVE: ${{ steps.dump.outputs.archive }}
+          BACKUP_CHECKSUM: ${{ steps.dump.outputs.checksum }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          destination="private-backups/daily/${BACKUP_STAMP:0:7}"
+          mkdir -p "$destination"
+          cp "$BACKUP_ARCHIVE" "$destination/"
+          cp "$BACKUP_CHECKSUM" "$destination/"
+
+          cd private-backups
+          git config user.name "Ledgerly Backup Bot"
+          git config user.email "ledgerly-backup@users.noreply.github.com"
+          git add daily
+          git commit -m "Ledgerly database backup $BACKUP_STAMP"
+          git push
