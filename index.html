@@ -2,13 +2,20 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
   <meta name="theme-color" content="#0f172a" />
-  <meta name="description" content="Ledgerly is a multi-account personal finance tracker with budgets, reports, and optional Supabase cloud sync." />
+  <meta name="description" content="Ledgerly is a multi-account personal finance tracker with budgets, reports, and secure Supabase cloud sync." />
+  <meta name="mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+  <meta name="apple-mobile-web-app-title" content="Ledgerly" />
+  <meta name="format-detection" content="telephone=no" />
   <title>Ledgerly — Personal Finance</title>
-  <link rel="manifest" href="manifest.webmanifest" />
-  <link rel="icon" type="image/png" href="assets/dirham-symbol.png" />
-  <link rel="stylesheet" href="styles.css?v=14" />
+  <link rel="manifest" href="manifest.webmanifest?v=1" />
+  <link rel="apple-touch-icon" sizes="180x180" href="assets/icons/apple-touch-icon.png?v=1" />
+  <link rel="icon" type="image/png" sizes="32x32" href="assets/icons/favicon-32.png?v=1" />
+  <link rel="icon" type="image/png" sizes="192x192" href="assets/icons/icon-192.png?v=1" />
+  <link rel="stylesheet" href="styles.css?v=15" />
 </head>
 <body>
   <section class="auth-screen" id="authScreen">
@@ -881,7 +888,27 @@
     </section>
   </div>
 
+  <div class="network-status-banner" id="networkStatusBanner" role="status" aria-live="polite" hidden>
+    You are offline. Ledgerly will reconnect when internet access returns.
+  </div>
+
+  <aside class="pwa-update-banner" id="pwaUpdateBanner" role="status" aria-live="polite" hidden>
+    <div>
+      <strong>Ledgerly update available</strong>
+      <span>A newer version is ready. Update now to use the latest changes.</span>
+    </div>
+    <div class="pwa-update-actions">
+      <button class="text-button pwa-later-button" id="pwaUpdateLaterButton" type="button">Later</button>
+      <button class="primary-button" id="pwaUpdateButton" type="button">Update now</button>
+    </div>
+  </aside>
+
+  <noscript>
+    <div class="noscript-warning">Ledgerly requires JavaScript to run.</div>
+  </noscript>
+
   <div class="toast" id="toast" role="status" aria-live="polite"></div>
-  <script type="module" src="app.js?v=13"></script>
+  <script src="pwa.js?v=1" defer></script>
+  <script type="module" src="app.js?v=14"></script>
 </body>
 </html>
