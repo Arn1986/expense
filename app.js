@@ -4634,7 +4634,7 @@ function updateCreditCardAccountFields() {
 function accountCardPreviewObject() {
   return {
     name: el.accountName.value.trim() || "Account",
-    type: el.accountType.value || "other",
+    type: String(el.accountType.value || "other").trim().toLowerCase(),
     currency_code: normalizeCurrencyCode(el.accountCurrency.value || BASE_CURRENCY),
     color: safeColor(el.accountColor.value),
     card_accent_color: safeColor(el.accountCardAccentColor.value || "#0f172a"),
@@ -4798,7 +4798,7 @@ async function handleAccountSubmit(event) {
   const lastFour = el.accountCardLastFour.value.trim();
   const row = {
     name: el.accountName.value.trim(),
-    type: el.accountType.value,
+    type: String(el.accountType.value || "other").trim().toLowerCase(),
     opening_balance: number(el.accountOpeningBalance.value),
     currency_code: normalizeCurrencyCode(el.accountCurrency.value),
     color: safeColor(el.accountColor.value),
