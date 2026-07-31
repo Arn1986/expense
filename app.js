@@ -386,6 +386,7 @@ function bindEvents() {
       "edit-transaction": () => { if (!el.accountDetailModal.hidden) closeModal(el.accountDetailModal); openTransactionModal(id); },
       "open-receipt": () => openTransactionReceipt(id),
       "delete-transaction": () => deleteTransaction(id),
+      "delete-reconciliation-transaction": () => deleteTransactionFromReconciliation(id, actionTarget.dataset.accountId),
       "edit-budget": () => openBudgetModal(id),
       "delete-budget": () => deleteBudget(id),
       "edit-category": () => openCategoryModal(id),
@@ -2308,6 +2309,7 @@ function reconciliationTransactions(accountId, statementDate) {
 function reconciliationTransactionHTML(transaction, accountId) {
   const clearing = clearingFor(transaction.id, accountId);
   const reconciled = Boolean(clearing?.reconciliation_id);
+  const protectedByReconciliation = transactionHasReconciledSide(transaction);
   const checked = Boolean(clearing?.is_cleared);
   const effect = transactionEffectForAccount(transaction, accountId);
   const category = categoryById(transaction.category_id);
@@ -2322,7 +2324,10 @@ function reconciliationTransactionHTML(transaction, accountId) {
     : checked
       ? '<span class="reconciliation-row-status cleared">Cleared</span>'
       : '<span class="reconciliation-row-status outstanding">Outstanding</span>';
-  return `<div class="reconciliation-transaction-row ${reconciled ? "locked" : ""}">
+  const deleteControl = protectedByReconciliation
+    ? `<button class="reconciliation-delete-button locked" type="button" disabled title="This entry is protected by a completed reconciliation. Undo that reconciliation before deleting it." aria-label="Reconciled entry is protected">🔒</button>`
+    : `<button class="reconciliation-delete-button" data-action="delete-reconciliation-transaction" data-id="${transaction.id}" data-account-id="${accountId}" type="button" title="Delete invalid entry" aria-label="Delete ${escapeHTML(title)}">×</button>`;
+  return `<div class="reconciliation-transaction-row ${protectedByReconciliation ? "locked" : ""}">
     <label class="reconciliation-check" title="${reconciled ? "Undo the reconciliation to change this item" : checked ? "Mark as outstanding" : "Mark as cleared"}">
       <input type="checkbox" ${checked ? "checked" : ""} ${reconciled || reconciliationBusy ? "disabled" : ""} data-action="toggle-reconciliation-cleared" data-id="${transaction.id}" data-account-id="${accountId}" />
       <span aria-hidden="true"></span>
@@ -2330,7 +2335,10 @@ function reconciliationTransactionHTML(transaction, accountId) {
     <span class="transaction-icon ${transaction.type}">${transaction.type === "expense" ? "↓" : transaction.type === "income" ? "↑" : "⇄"}</span>
     <div class="reconciliation-transaction-copy"><strong>${escapeHTML(title)}</strong><span>${escapeHTML(subtitle)}</span>${transaction.remarks ? `<small>${escapeHTML(transaction.remarks)}</small>` : ""}</div>
     <div class="reconciliation-row-status-wrap">${status}</div>
-    <div class="reconciliation-effect ${tone(effect)}">${effect > 0 ? "+" : effect < 0 ? "−" : ""}${formatCurrencyHTML(Math.abs(effect), accountCurrency(accountId))}</div>
+    <div class="reconciliation-amount-actions">
+      <div class="reconciliation-effect ${tone(effect)}">${effect > 0 ? "+" : effect < 0 ? "−" : ""}${formatCurrencyHTML(Math.abs(effect), accountCurrency(accountId))}</div>
+      ${deleteControl}
+    </div>
   </div>`;
 }
 
@@ -5429,12 +5437,25 @@ async function deleteAccount(id) {
   } catch (error) { showToast(friendlyError(error), true); }
 }
 
-async function deleteTransaction(id) {
+async function deleteTransactionFromReconciliation(id, accountId) {
   const transaction = state.transactions.find((item) => item.id === id);
-  if (transaction && transactionHasReconciledSide(transaction)) return showToast("Undo the related reconciliation before deleting this entry.", true);
-  const warning = transaction?.recurring_entry_id
+  if (!transaction) return showToast("This transaction could not be found. Sync and try again.", true);
+  if (transactionHasReconciledSide(transaction)) return showToast("This entry is protected by a completed reconciliation. Undo that reconciliation before deleting it.", true);
+  const account = accountById(accountId);
+  const clearing = clearingFor(id, accountId);
+  const title = transaction.description || (transaction.type === "transfer" ? "Account transfer" : transactionCategorySummary(transaction));
+  const effect = transactionEffectForAccount(transaction, accountId);
+  const clearedWarning = clearing?.is_cleared ? " It is currently marked cleared, so deleting it will immediately change the cleared balance and reconciliation difference." : "";
+  const warning = `Delete “${title}” (${formatCurrencyText(Math.abs(effect), accountCurrency(accountId))}) from ${account?.name || "this account"}? This permanently removes the transaction from Ledgerly.${clearedWarning}`;
+  await deleteTransaction(id, { warning });
+}
+
+async function deleteTransaction(id, options = {}) {
+  const transaction = state.transactions.find((item) => item.id === id);
+  if (transaction && transactionHasReconciledSide(transaction)) return showToast("This entry is protected by a completed reconciliation. Undo that reconciliation before deleting it.", true);
+  const warning = options.warning || (transaction?.recurring_entry_id
     ? "Delete this entry? It came from a recurring schedule and may be posted again while that schedule remains active."
-    : "Delete this entry?";
+    : "Delete this entry?");
   if (!confirm(warning)) return;
   try {
     await deleteRow("transactions", id);

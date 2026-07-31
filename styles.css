@@ -586,7 +586,12 @@ a.secondary-button { display: inline-flex; align-items: center; justify-content:
 .reconciliation-row-status.reconciled { color: var(--green-700); background: var(--green-100); }
 .reconciliation-row-status.cleared { color: var(--blue-600); background: var(--blue-100); }
 .reconciliation-row-status.outstanding { color: var(--amber-700); background: var(--amber-100); }
-.reconciliation-effect { min-width: 125px; text-align: right; font-weight: 900; white-space: nowrap; }
+.reconciliation-amount-actions { min-width: 155px; display: flex; align-items: center; justify-content: flex-end; gap: 9px; }
+.reconciliation-effect { min-width: 0; text-align: right; font-weight: 900; white-space: nowrap; }
+.reconciliation-delete-button { width: 32px; height: 32px; flex: 0 0 32px; display: grid; place-items: center; border: 1px solid #fecaca; border-radius: 9px; color: #dc2626; font-size: 1.15rem; font-weight: 900; line-height: 1; background: #fff; cursor: pointer; transition: .15s ease; }
+.reconciliation-delete-button:hover { border-color: #ef4444; color: #fff; background: #ef4444; transform: translateY(-1px); }
+.reconciliation-delete-button:focus-visible { outline: 3px solid rgba(239,68,68,.2); outline-offset: 2px; }
+.reconciliation-delete-button.locked, .reconciliation-delete-button:disabled { border-color: var(--slate-200); color: var(--slate-400); font-size: .78rem; background: var(--slate-100); cursor: not-allowed; transform: none; opacity: 1; }
 .reconciliation-complete-bar { margin-top: 17px; padding: 15px 16px; display: flex; align-items: center; justify-content: space-between; gap: 18px; border: 1px solid var(--slate-200); border-radius: var(--radius-md); background: var(--slate-50); }
 .reconciliation-complete-bar strong, .reconciliation-complete-bar span { display: block; }
 .reconciliation-complete-bar strong { font-size: .86rem; }
@@ -612,7 +617,7 @@ a.secondary-button { display: inline-flex; align-items: center; justify-content:
   .reconciliation-toolbar-actions { justify-content: flex-start; }
   .reconciliation-transaction-row { grid-template-columns: 28px 38px minmax(0, 1fr) minmax(105px, auto); }
   .reconciliation-row-status-wrap { grid-column: 3; text-align: left; }
-  .reconciliation-effect { grid-column: 4; grid-row: 1 / span 2; }
+  .reconciliation-amount-actions { grid-column: 4; grid-row: 1 / span 2; }
   .reconciliation-history-row { grid-template-columns: minmax(0, 1fr) auto; }
   .reconciliation-history-row > div:nth-child(2), .reconciliation-history-row > div:nth-child(3), .reconciliation-history-row > div:nth-child(4) { display: none; }
 }
@@ -625,7 +630,8 @@ a.secondary-button { display: inline-flex; align-items: center; justify-content:
   .reconciliation-transaction-row { padding: 11px 10px; grid-template-columns: 26px 34px minmax(0, 1fr); gap: 8px; }
   .reconciliation-transaction-row .transaction-icon { width: 34px; height: 34px; }
   .reconciliation-row-status-wrap { grid-column: 3; }
-  .reconciliation-effect { grid-column: 3; grid-row: auto; text-align: left; min-width: 0; }
+  .reconciliation-amount-actions { grid-column: 3; grid-row: auto; min-width: 0; justify-content: space-between; }
+  .reconciliation-effect { text-align: left; }
   .reconciliation-complete-bar { align-items: stretch; flex-direction: column; }
   .reconciliation-complete-bar .primary-button { width: 100%; }
 }
