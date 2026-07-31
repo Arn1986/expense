@@ -29,6 +29,8 @@ const TRANSACTION_HYDRATION_PAGE_SIZE = 500;
 const DEFAULT_TRANSACTION_PAGE_SIZE = 50;
 const DASHBOARD_SUMMARY_CACHE_TTL = 15 * 60 * 1000;
 const RECEIPT_THUMBNAIL_SECONDS = 600;
+const AUTO_SYNC_MIN_INTERVAL = 60 * 1000;
+const LAST_SYNC_STORAGE_PREFIX = "ledgerly-last-sync-v1";
 const TESSERACT_ESM_URL = "https://cdn.jsdelivr.net/npm/tesseract.js@7.0.0/dist/tesseract.esm.min.js";
 const OCR_IMAGE_TYPES = new Set(["image/jpeg", "image/png", "image/webp"]);
 const DASHBOARD_WIDGETS = [
@@ -120,6 +122,9 @@ let reportRenderTimer = null;
 let transactionPageState = { page: 1, pageSize: DEFAULT_TRANSACTION_PAGE_SIZE, total: 0, items: [], loading: false, error: "", requestToken: 0 };
 let dashboardServerSummary = null;
 let receiptThumbnailObserver = null;
+let activeDataSyncPromise = null;
+let lastSuccessfulSyncAt = 0;
+let lastAutomaticSyncAttemptAt = 0;
 const receiptThumbnailUrlCache = new Map();
 
 const el = Object.fromEntries([...document.querySelectorAll("[id]")].map((node) => [node.id, node]));
@@ -187,6 +192,17 @@ function bindEvents() {
   el.authForm.addEventListener("submit", handleAuthSubmit);
   el.continueLocalButton.addEventListener("click", enterLocalApp);
   el.signOutButton.addEventListener("click", handleSignOut);
+  el.syncNowButton?.addEventListener("click", () => {
+    void syncLedgerlyData({ reason: "manual", force: true, fullHistory: true, backgroundHistory: false, showSuccessToast: true });
+  });
+  document.addEventListener("visibilitychange", () => {
+    if (document.visibilityState === "visible") requestAutomaticSync("resume");
+  });
+  window.addEventListener("pageshow", () => requestAutomaticSync("resume"));
+  window.addEventListener("online", () => {
+    void syncLedgerlyData({ reason: "reconnect", force: true, fullHistory: false, backgroundHistory: true, showSuccessToast: false });
+  });
+  window.addEventListener("offline", () => setSyncStatus("offline", "Offline", { recordSuccess: false }));
   el.menuButton.addEventListener("click", () => el.sidebar.classList.toggle("open"));
 
   document.querySelectorAll(".nav-item").forEach((button) => {
@@ -421,38 +437,106 @@ async function handleAuthSubmit(event) {
 async function enterCloudApp(authUser) {
   mode = "cloud";
   user = authUser;
+  lastSuccessfulSyncAt = readLastSuccessfulSyncAt();
   dashboardServerSummary = readDashboardSummaryCache();
   showAppScreen();
-  setSyncStatus("syncing", "Loading cloud data");
-  try {
-    await loadCloudState();
+  updateLastSyncDisplay();
+  await syncLedgerlyData({
+    reason: "initial",
+    force: true,
+    fullHistory: true,
+    backgroundHistory: true,
+    showSuccessToast: false,
+  });
+}
+
+async function syncLedgerlyData({
+  reason = "manual",
+  force = false,
+  fullHistory = reason === "manual",
+  backgroundHistory = false,
+  showSuccessToast = reason === "manual",
+} = {}) {
+  if (mode !== "cloud" || !supabase || !user) {
+    setSyncStatus("local", "Local browser only", { recordSuccess: false });
+    if (reason === "manual") showToast("Cloud synchronization is available after signing in to Supabase.", true);
+    return false;
+  }
+  if (!navigator.onLine) {
+    setSyncStatus("offline", "Offline", { recordSuccess: false });
+    if (reason === "manual") showToast("You are offline. Ledgerly will synchronize when the connection returns.", true);
+    return false;
+  }
+  if (!force && lastSuccessfulSyncAt && Date.now() - lastSuccessfulSyncAt < AUTO_SYNC_MIN_INTERVAL) {
+    updateLastSyncDisplay();
+    return true;
+  }
+  if (activeDataSyncPromise) return activeDataSyncPromise;
+
+  activeDataSyncPromise = (async () => {
+    const previousHistoryWasComplete = transactionHistoryFullyLoaded;
+    const preserveTransactionHistory = !fullHistory && previousHistoryWasComplete;
+    transactionHydrationToken += 1;
+    transactionHistoryHydrationPromise = null;
+    setSyncStatus("syncing", reason === "manual" ? "Synchronizing now" : "Refreshing cloud data", { recordSuccess: false });
+
+    await loadCloudState({ preserveTransactionHistory });
     if (!state.categories.length) await seedDefaultCategories();
     render();
     showReminderNoticeOnce();
-    void loadTransactionPage(1);
-    if (transactionHistoryFullyLoaded) {
+    void loadTransactionPage(transactionPageState.page || 1);
+
+    // The dashboard, accounts, reminders, and current transaction page are now
+    // current. Record this immediately, while older history can continue in the
+    // background during the first app launch.
+    recordSuccessfulSync();
+
+    const finishHistoryAndDerivedData = async () => {
+      if (!transactionHistoryFullyLoaded) {
+        setSyncStatus("syncing", `Loading history ${state.transactions.length}/${transactionHistoryTotal}`, { recordSuccess: false });
+        transactionHistoryHydrationPromise = hydrateRemainingTransactions();
+        await transactionHistoryHydrationPromise;
+      }
       await postDueRecurringEntries();
-      setSyncStatus("cloud", "Cloud synchronized");
       await refreshDashboardSummary(false);
       render();
-    } else {
-      setSyncStatus("syncing", `Loading history ${state.transactions.length}/${transactionHistoryTotal}`);
-      transactionHistoryHydrationPromise = hydrateRemainingTransactions();
-      void transactionHistoryHydrationPromise.then(async () => {
-        await postDueRecurringEntries();
-        await refreshDashboardSummary(false);
-        setSyncStatus("cloud", "Cloud synchronized");
-        render();
-        showReminderNoticeOnce();
-      }).catch((error) => {
-        setSyncStatus("local", "History sync incomplete");
+      showReminderNoticeOnce();
+      setSyncStatus("cloud", "Cloud synchronized");
+      if (showSuccessToast) showToast("Ledgerly is up to date.");
+    };
+
+    if (backgroundHistory && !transactionHistoryFullyLoaded) {
+      void finishHistoryAndDerivedData().catch((error) => {
+        setSyncStatus("error", "History sync incomplete", { recordSuccess: false });
         showToast(`Older transaction history could not finish loading: ${friendlyError(error)}`, true);
+      }).finally(() => {
+        transactionHistoryHydrationPromise = null;
       });
+      return true;
     }
-  } catch (error) {
-    setSyncStatus("local", "Sync error");
+
+    await finishHistoryAndDerivedData();
+    transactionHistoryHydrationPromise = null;
+    return true;
+  })().catch((error) => {
+    setSyncStatus(navigator.onLine ? "error" : "offline", navigator.onLine ? "Sync failed" : "Offline", { recordSuccess: false });
     showToast(friendlyError(error), true);
-  }
+    return false;
+  }).finally(() => {
+    activeDataSyncPromise = null;
+  });
+
+  return activeDataSyncPromise;
+}
+
+function requestAutomaticSync(reason = "resume") {
+  if (mode !== "cloud" || !user || !supabase || !navigator.onLine) return;
+  if (document.visibilityState !== "visible") return;
+  const now = Date.now();
+  if (activeDataSyncPromise || transactionHistoryHydrationPromise) return;
+  if (now - Math.max(lastSuccessfulSyncAt, lastAutomaticSyncAttemptAt) < AUTO_SYNC_MIN_INTERVAL) return;
+  lastAutomaticSyncAttemptAt = now;
+  void syncLedgerlyData({ reason, force: false, fullHistory: false, backgroundHistory: true, showSuccessToast: false });
 }
 
 function enterLocalApp() {
@@ -500,6 +584,8 @@ function showAppScreen() {
   el.localBanner.hidden = mode !== "local";
   el.signedInEmail.textContent = user?.email || "";
   el.signOutButton.textContent = mode === "cloud" ? "Sign out" : "Exit local preview";
+  if (el.syncNowButton) el.syncNowButton.disabled = mode !== "cloud";
+  updateLastSyncDisplay();
 }
 
 function setAuthMode(nextMode) {
@@ -524,7 +610,8 @@ function setAuthBusy(busy) {
 
 function showAuthError(message) { el.authError.textContent = message; }
 
-async function loadCloudState() {
+async function loadCloudState({ preserveTransactionHistory = false } = {}) {
+  const existingTransactions = preserveTransactionHistory && transactionHistoryFullyLoaded ? [...state.transactions] : [];
   const [accountsResult, categoriesResult, transactionsResult, transactionSplitsResult, budgetsResult, recurringResult, billsResult, reconciliationsResult, clearingsResult, cardStatementsResult, importRulesResult, exchangeRatesResult, preferencesResult, dashboardSummaryResult] = await Promise.all([
     supabase.from("accounts").select("*").order("sort_order", { ascending: true, nullsFirst: false }).order("created_at", { ascending: true }),
     supabase.from("categories").select("*").order("kind").order("name"),
@@ -544,7 +631,7 @@ async function loadCloudState() {
   [accountsResult, categoriesResult, transactionsResult, transactionSplitsResult, budgetsResult, recurringResult, billsResult, reconciliationsResult, clearingsResult, cardStatementsResult, importRulesResult, exchangeRatesResult, preferencesResult, dashboardSummaryResult].forEach((result) => {
     if (result.error) throw result.error;
   });
-  state = normalizeState({
+  const loadedState = normalizeState({
     version: 11,
     accounts: accountsResult.data || [],
     categories: categoriesResult.data || [],
@@ -560,8 +647,23 @@ async function loadCloudState() {
     exchangeRates: exchangeRatesResult.data || [],
     preferences: normalizePreferences(preferencesResult.data),
   });
-  transactionHistoryTotal = Number(transactionsResult.count ?? state.transactions.length);
-  transactionHistoryFullyLoaded = state.transactions.length >= transactionHistoryTotal;
+  transactionHistoryTotal = Number(transactionsResult.count ?? loadedState.transactions.length);
+  if (existingTransactions.length) {
+    const merged = new Map(existingTransactions.map((transaction) => [transaction.id, transaction]));
+    loadedState.transactions.forEach((transaction) => merged.set(transaction.id, transaction));
+    const mergedTransactions = normalizeState({ transactions: [...merged.values()] }).transactions;
+    // If the total changed in a way that leaves a stale deleted row, fall back
+    // to a clean page and let history hydration rebuild the exact set.
+    if (mergedTransactions.length === transactionHistoryTotal) {
+      loadedState.transactions = mergedTransactions;
+      transactionHistoryFullyLoaded = true;
+    } else {
+      transactionHistoryFullyLoaded = loadedState.transactions.length >= transactionHistoryTotal;
+    }
+  } else {
+    transactionHistoryFullyLoaded = loadedState.transactions.length >= transactionHistoryTotal;
+  }
+  state = loadedState;
   dashboardServerSummary = normalizeDashboardServerSummary(dashboardSummaryResult.data) || dashboardServerSummary;
   writeDashboardSummaryCache(dashboardServerSummary);
 }
@@ -807,11 +909,65 @@ async function deleteRow(table, id) {
   }
 }
 
-function setSyncStatus(status, text) {
-  el.syncPill.classList.remove("local", "syncing");
-  if (status === "local") el.syncPill.classList.add("local");
-  if (status === "syncing") el.syncPill.classList.add("syncing");
+function setSyncStatus(status, text, { recordSuccess = status === "cloud" } = {}) {
+  el.syncPill.classList.remove("local", "syncing", "offline", "error");
+  if (["local", "syncing", "offline", "error"].includes(status)) el.syncPill.classList.add(status);
   el.syncText.textContent = text;
+  if (recordSuccess && mode === "cloud") recordSuccessfulSync();
+  if (el.syncNowButton) {
+    el.syncNowButton.disabled = mode !== "cloud" || status === "syncing";
+    el.syncNowButton.classList.toggle("syncing", status === "syncing");
+    el.syncNowButton.classList.toggle("offline", status === "offline");
+    el.syncNowButton.setAttribute("aria-label", status === "syncing" ? "Ledgerly is synchronizing" : "Synchronize Ledgerly now");
+    el.syncNowButton.title = status === "syncing" ? text : syncButtonTitle();
+  }
+  if (el.syncNowText) el.syncNowText.textContent = status === "syncing" ? "Syncing" : status === "offline" ? "Offline" : "Sync";
+  updateLastSyncDisplay();
+}
+
+function lastSyncStorageKey() {
+  return `${LAST_SYNC_STORAGE_PREFIX}:${user?.id || "anonymous"}`;
+}
+
+function readLastSuccessfulSyncAt() {
+  try {
+    const value = Number(localStorage.getItem(lastSyncStorageKey()) || 0);
+    return Number.isFinite(value) ? value : 0;
+  } catch {
+    return 0;
+  }
+}
+
+function recordSuccessfulSync(timestamp = Date.now()) {
+  lastSuccessfulSyncAt = Number(timestamp) || Date.now();
+  try { localStorage.setItem(lastSyncStorageKey(), String(lastSuccessfulSyncAt)); } catch { /* private browsing can restrict storage */ }
+  updateLastSyncDisplay();
+}
+
+function relativeSyncTime(timestamp) {
+  if (!timestamp) return "Not synced yet";
+  const seconds = Math.max(0, Math.round((Date.now() - timestamp) / 1000));
+  if (seconds < 10) return "Last synced just now";
+  if (seconds < 60) return `Last synced ${seconds}s ago`;
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) return `Last synced ${minutes}m ago`;
+  const date = new Date(timestamp);
+  const sameDay = date.toDateString() === new Date().toDateString();
+  return `Last synced ${sameDay ? date.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" }) : date.toLocaleDateString([], { month: "short", day: "numeric" })}`;
+}
+
+function syncButtonTitle() {
+  return lastSuccessfulSyncAt ? `${relativeSyncTime(lastSuccessfulSyncAt)}. Tap to synchronize now.` : "Synchronize Ledgerly now";
+}
+
+function updateLastSyncDisplay() {
+  if (!el.lastSyncText) return;
+  if (mode === "local") {
+    el.lastSyncText.textContent = "Cloud sync unavailable";
+    return;
+  }
+  el.lastSyncText.textContent = relativeSyncTime(lastSuccessfulSyncAt);
+  if (el.syncNowButton && !el.syncNowButton.classList.contains("syncing")) el.syncNowButton.title = syncButtonTitle();
 }
 
 function normalizeDashboardServerSummary(value) {

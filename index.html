@@ -91,6 +91,7 @@
 
       <div class="sidebar-footer">
         <div class="sync-pill" id="syncPill"><span class="status-dot"></span><span id="syncText">Cloud sync</span></div>
+        <p class="last-sync-text" id="lastSyncText" aria-live="polite">Not synced yet</p>
         <p id="signedInEmail"></p>
         <button class="text-button sidebar-action" id="signOutButton" type="button">Sign out</button>
       </div>
@@ -104,6 +105,9 @@
           <h1 id="pageTitle">Dashboard</h1>
         </div>
         <div class="topbar-actions">
+          <button class="sync-now-button" id="syncNowButton" type="button" aria-label="Synchronize Ledgerly now" title="Synchronize Ledgerly now">
+            <span class="sync-now-icon" aria-hidden="true">↻</span><span id="syncNowText">Sync</span>
+          </button>
           <button class="reminder-button" id="reminderButton" type="button" aria-label="Open reminders" aria-expanded="false">
             <span aria-hidden="true">🔔</span><span class="reminder-badge" id="reminderBadge" hidden>0</span>
           </button>
@@ -908,7 +912,7 @@
   </noscript>
 
   <div class="toast" id="toast" role="status" aria-live="polite"></div>
-  <script src="pwa.js?v=1" defer></script>
-  <script type="module" src="app.js?v=14"></script>
+  <script src="pwa.js?v=2" defer></script>
+  <script type="module" src="app.js?v=15"></script>
 </body>
 </html>

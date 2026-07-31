@@ -1596,3 +1596,68 @@ body,
     -webkit-tap-highlight-color: transparent;
   }
 }
+
+/* Manual and automatic cloud synchronization */
+.last-sync-text {
+  margin-top: 5px !important;
+  color: var(--slate-500) !important;
+  font-size: .7rem !important;
+}
+.sync-pill.offline .status-dot {
+  background: #f59e0b;
+  box-shadow: 0 0 0 4px rgba(245,158,11,.12);
+}
+.sync-pill.error .status-dot {
+  background: #ef4444;
+  box-shadow: 0 0 0 4px rgba(239,68,68,.12);
+}
+.sync-now-button {
+  min-height: 42px;
+  padding: 9px 12px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  border: 1px solid var(--slate-200);
+  border-radius: 13px;
+  color: var(--slate-700);
+  background: var(--white);
+  font-size: .78rem;
+  font-weight: 850;
+  cursor: pointer;
+  transition: .15s ease;
+}
+.sync-now-button:hover:not(:disabled) {
+  border-color: #93c5fd;
+  color: var(--blue-700);
+  background: #eff6ff;
+  transform: translateY(-1px);
+}
+.sync-now-button:disabled {
+  cursor: default;
+  opacity: .68;
+}
+.sync-now-button.offline {
+  border-color: #fde68a;
+  color: #92400e;
+  background: #fffbeb;
+}
+.sync-now-icon {
+  display: inline-block;
+  font-size: 1rem;
+  line-height: 1;
+}
+.sync-now-button.syncing .sync-now-icon {
+  animation: ledgerly-sync-spin .85s linear infinite;
+}
+@keyframes ledgerly-sync-spin { to { transform: rotate(360deg); } }
+
+@media (max-width: 620px) {
+  .sync-now-button {
+    width: 38px;
+    height: 38px;
+    min-height: 38px;
+    padding: 0;
+  }
+  .sync-now-button #syncNowText { display: none; }
+}
