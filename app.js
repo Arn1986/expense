@@ -143,7 +143,15 @@ async function initialize() {
   }).format(new Date());
   el.entryDate.value = todayISO();
   el.recurringStartDate.value = todayISO();
-  el.reportMonth.value = todayISO().slice(0, 7);
+  const currentReportMonth = todayISO().slice(0, 7);
+  const currentReportYear = Number(currentReportMonth.slice(0, 4));
+  el.reportPeriod.value = "monthly";
+  el.reportPreset.value = "last12";
+  el.reportStartMonth.value = monthKeyOffset(currentReportMonth, -11);
+  el.reportEndMonth.value = currentReportMonth;
+  el.reportStartYear.value = String(currentReportYear - 2);
+  el.reportEndYear.value = String(currentReportYear);
+  updateReportRangeControls();
   el.reconcileStatementDate.value = todayISO();
   el.billDueDate.value = todayISO();
   el.exchangeRateDate.value = todayISO();
@@ -310,6 +318,7 @@ function bindEvents() {
   el.recurringEndMode.addEventListener("change", updateRecurringEndDateVisibility);
   el.accountType.addEventListener("change", () => {
     if (!el.accountId.value) el.accountColor.value = ACCOUNT_COLORS[el.accountType.value] || ACCOUNT_COLORS.other;
+    el.accountIncludeLiquidAssets.checked = defaultLiquidAssetForType(el.accountType.value);
     updateCreditCardAccountFields();
   });
   [el.accountName, el.accountColor, el.accountCardAccentColor, el.accountCardNetwork, el.accountCardLastFour].forEach((input) => input.addEventListener("input", updateAccountCardPreview));
@@ -352,7 +361,20 @@ function bindEvents() {
     transactionPageState.pageSize = Math.max(10, Math.min(200, Number(el.transactionPageSize.value) || DEFAULT_TRANSACTION_PAGE_SIZE));
     loadTransactionPage(1);
   });
-  [el.reportPeriod, el.reportMonth].forEach((input) => input.addEventListener("input", scheduleReportRender));
+  el.reportPeriod.addEventListener("change", () => {
+    el.reportPreset.value = "custom";
+    updateReportRangeControls();
+    scheduleReportRender();
+  });
+  [el.reportStartMonth, el.reportEndMonth, el.reportStartYear, el.reportEndYear].forEach((input) => input.addEventListener("input", () => {
+    el.reportPreset.value = "custom";
+    scheduleReportRender();
+  }));
+  el.reportPreset.addEventListener("change", () => {
+    applyReportPreset(el.reportPreset.value);
+    updateReportRangeControls();
+    scheduleReportRender();
+  });
   [el.recurringStatusFilter, el.recurringTypeFilter].forEach((input) => input.addEventListener("input", renderRecurringEntries));
 
   el.exportButton.addEventListener("click", exportJSON);
@@ -732,7 +754,7 @@ function emptyState() {
 function normalizeState(value) {
   return {
     version: 11,
-    accounts: normalizeAccountOrder(Array.isArray(value?.accounts) ? value.accounts.map((account) => ({ ...account, currency_code: normalizeCurrencyCode(account.currency_code || BASE_CURRENCY) })) : []),
+    accounts: normalizeAccountOrder(Array.isArray(value?.accounts) ? value.accounts.map((account) => ({ ...account, currency_code: normalizeCurrencyCode(account.currency_code || BASE_CURRENCY), include_in_liquid_assets: typeof account.include_in_liquid_assets === "boolean" ? account.include_in_liquid_assets : defaultLiquidAssetForType(account.type) })) : []),
     categories: Array.isArray(value?.categories) ? value.categories : [],
     transactions: Array.isArray(value?.transactions) ? value.transactions.map((transaction) => ({
       ...transaction,
@@ -805,9 +827,9 @@ function defaultLocalState() {
   return {
     version: 11,
     accounts: [
-      localRow({ name: "Current Account", type: "current", opening_balance: 0, currency_code: BASE_CURRENCY, color: ACCOUNT_COLORS.current, card_accent_color: "#0f172a", sort_order: 0, include_in_net_worth: true }),
-      localRow({ name: "Savings", type: "savings", opening_balance: 0, currency_code: BASE_CURRENCY, color: ACCOUNT_COLORS.savings, card_accent_color: "#064e3b", sort_order: 1, include_in_net_worth: true }),
-      localRow({ name: "Cash", type: "cash", opening_balance: 0, currency_code: BASE_CURRENCY, color: ACCOUNT_COLORS.cash, card_accent_color: "#78350f", sort_order: 2, include_in_net_worth: true }),
+      localRow({ name: "Current Account", type: "current", opening_balance: 0, currency_code: BASE_CURRENCY, color: ACCOUNT_COLORS.current, card_accent_color: "#0f172a", sort_order: 0, include_in_net_worth: true, include_in_liquid_assets: true }),
+      localRow({ name: "Savings", type: "savings", opening_balance: 0, currency_code: BASE_CURRENCY, color: ACCOUNT_COLORS.savings, card_accent_color: "#064e3b", sort_order: 1, include_in_net_worth: true, include_in_liquid_assets: true }),
+      localRow({ name: "Cash", type: "cash", opening_balance: 0, currency_code: BASE_CURRENCY, color: ACCOUNT_COLORS.cash, card_accent_color: "#78350f", sort_order: 2, include_in_net_worth: true, include_in_liquid_assets: true }),
     ],
     categories: defaultCategoryRows().map(localRow),
     transactions: [],
@@ -874,6 +896,7 @@ function migrateLegacyState(legacy) {
     opening_balance: number(account.openingBalance ?? account.opening_balance),
     color: ACCOUNT_COLORS[account.type] || ACCOUNT_COLORS.other,
     include_in_net_worth: true,
+    include_in_liquid_assets: defaultLiquidAssetForType(account.type),
     created_at: new Date().toISOString(),
     updated_at: new Date().toISOString(),
   }));
@@ -1545,7 +1568,7 @@ function renderAccounts() {
         <div class="account-card-symbol" aria-hidden="true">${accountTypeIcon(account)}</div>
         <h3>${escapeHTML(account.name)}</h3>
         <p class="large-balance">${formatCurrencyHTML(balance, accountCurrency(account))}</p>
-        <p class="opening-balance">Starting balance: ${formatCurrencyHTML(number(account.opening_balance), accountCurrency(account))}${account.include_in_net_worth === false ? " · excluded from net worth" : ""}</p>
+        <p class="opening-balance">Starting balance: ${formatCurrencyHTML(number(account.opening_balance), accountCurrency(account))}${account.include_in_net_worth === false ? " · excluded from net worth" : ""}${accountCountsAsLiquid(account) ? " · liquid" : " · non-liquid"}</p>
         ${accountCurrency(account) !== BASE_CURRENCY ? `<p class="account-base-equivalent">${accountBalanceInBase(account) == null ? `Add a ${accountCurrency(account)} exchange rate` : `AED equivalent: ${formatMoneyHTML(accountBalanceInBase(account))}`}</p>` : ""}
         ${account.type === "credit" ? `<p class="account-credit-meta">${number(account.credit_limit) > 0 ? `${creditCardUtilization(account).toFixed(1)}% of ${formatCurrencyHTML(account.credit_limit, accountCurrency(account))} limit` : "Credit limit not configured"}</p>` : ""}
         <div class="account-card-footer-actions"><button class="account-reconcile-button primary-on-card" data-action="open-account-details" data-id="${account.id}" type="button">Activity</button><button class="account-reconcile-button" data-action="open-reconcile-account" data-id="${account.id}" type="button">✓ Reconcile</button>${account.type === "credit" ? `<button class="account-reconcile-button" data-action="add-credit-card-statement" data-id="${account.id}" type="button">▤ Statement</button>` : ""}</div>
@@ -3775,36 +3798,223 @@ function categoryManagerHTML(kind) {
   </div>`).join("");
 }
 
+function defaultLiquidAssetForType(type) {
+  return ["current", "savings", "cash"].includes(String(type || "").toLowerCase());
+}
+
+function accountCountsAsLiquid(account) {
+  return typeof account?.include_in_liquid_assets === "boolean" ? account.include_in_liquid_assets : defaultLiquidAssetForType(account?.type);
+}
+
+function monthKeyOffset(anchor, offset) {
+  const date = dateFromMonth(anchor || todayISO().slice(0, 7));
+  const shifted = new Date(date.getFullYear(), date.getMonth() + Number(offset || 0), 1);
+  return `${shifted.getFullYear()}-${String(shifted.getMonth() + 1).padStart(2, "0")}`;
+}
+
+function earliestTransactionMonth() {
+  const dates = state.transactions.map((item) => item.entry_date).filter(Boolean).sort();
+  return dates.length ? dates[0].slice(0, 7) : todayISO().slice(0, 7);
+}
+
+function updateReportRangeControls() {
+  const yearly = el.reportPeriod.value === "yearly";
+  el.reportStartMonthField.hidden = yearly;
+  el.reportEndMonthField.hidden = yearly;
+  el.reportStartYearField.hidden = !yearly;
+  el.reportEndYearField.hidden = !yearly;
+}
+
+function applyReportPreset(preset) {
+  const currentMonth = todayISO().slice(0, 7);
+  const currentYear = Number(currentMonth.slice(0, 4));
+  if (preset === "last3" || preset === "last6" || preset === "last12") {
+    const count = Number(preset.replace("last", ""));
+    el.reportPeriod.value = "monthly";
+    el.reportStartMonth.value = monthKeyOffset(currentMonth, -(count - 1));
+    el.reportEndMonth.value = currentMonth;
+  } else if (preset === "thisYear") {
+    el.reportPeriod.value = "monthly";
+    el.reportStartMonth.value = `${currentYear}-01`;
+    el.reportEndMonth.value = currentMonth;
+  } else if (preset === "last3Years") {
+    el.reportPeriod.value = "yearly";
+    el.reportStartYear.value = String(currentYear - 2);
+    el.reportEndYear.value = String(currentYear);
+  } else if (preset === "allTime") {
+    el.reportPeriod.value = "yearly";
+    el.reportStartYear.value = earliestTransactionMonth().slice(0, 4);
+    el.reportEndYear.value = String(currentYear);
+  }
+}
+
+function reportRangeConfig() {
+  const period = el.reportPeriod.value === "yearly" ? "yearly" : "monthly";
+  if (period === "yearly") {
+    let startYear = Math.trunc(number(el.reportStartYear.value)) || new Date().getFullYear();
+    let endYear = Math.trunc(number(el.reportEndYear.value)) || startYear;
+    startYear = Math.max(1900, Math.min(2200, startYear));
+    endYear = Math.max(1900, Math.min(2200, endYear));
+    if (startYear > endYear) [startYear, endYear] = [endYear, startYear];
+    return {
+      period,
+      startDate: `${startYear}-01-01`,
+      endDate: `${endYear}-12-31`,
+      startYear,
+      endYear,
+      label: startYear === endYear ? String(startYear) : `${startYear} – ${endYear}`,
+    };
+  }
+  let startMonth = /^\d{4}-\d{2}$/.test(el.reportStartMonth.value) ? el.reportStartMonth.value : todayISO().slice(0, 7);
+  let endMonth = /^\d{4}-\d{2}$/.test(el.reportEndMonth.value) ? el.reportEndMonth.value : startMonth;
+  if (startMonth > endMonth) [startMonth, endMonth] = [endMonth, startMonth];
+  const startDate = `${startMonth}-01`;
+  const endDate = endOfMonthISO(dateFromMonth(endMonth));
+  const startLabel = monthFormatter.format(dateFromMonth(startMonth));
+  const endLabel = monthFormatter.format(dateFromMonth(endMonth));
+  return { period, startDate, endDate, startMonth, endMonth, label: startMonth === endMonth ? startLabel : `${startLabel} – ${endLabel}` };
+}
+
+function reportEntriesBetween(startDate, endDate) {
+  return state.transactions.filter((item) => item.entry_date && item.entry_date >= startDate && item.entry_date <= endDate);
+}
+
+function monthKeysBetween(startMonth, endMonth) {
+  const keys = [];
+  let cursor = dateFromMonth(startMonth);
+  const end = dateFromMonth(endMonth);
+  while (cursor <= end && keys.length < 1200) {
+    keys.push(`${cursor.getFullYear()}-${String(cursor.getMonth() + 1).padStart(2, "0")}`);
+    cursor = new Date(cursor.getFullYear(), cursor.getMonth() + 1, 1);
+  }
+  return keys;
+}
+
+function reportSeries(config) {
+  if (config.period === "yearly") {
+    return Array.from({ length: config.endYear - config.startYear + 1 }, (_, offset) => {
+      const year = config.startYear + offset;
+      const entries = reportEntriesBetween(`${year}-01-01`, `${year}-12-31`);
+      return { key: String(year), label: String(year), date: new Date(year, 11, 1), income: sumTransactions(entries, "income"), expenses: sumTransactions(entries, "expense") };
+    });
+  }
+  return monthKeysBetween(config.startMonth, config.endMonth).map((key) => {
+    const date = dateFromMonth(key);
+    const entries = state.transactions.filter((item) => item.entry_date?.startsWith(key));
+    return { key, label: monthFormatter.format(date), date, income: sumTransactions(entries, "income"), expenses: sumTransactions(entries, "expense") };
+  });
+}
+
+function monthCountForRange(config) {
+  if (config.period === "yearly") return (config.endYear - config.startYear + 1) * 12;
+  return monthKeysBetween(config.startMonth, config.endMonth).length;
+}
+
+function budgetRangeMetrics(config) {
+  const monthKeys = config.period === "yearly"
+    ? monthKeysBetween(`${config.startYear}-01`, `${config.endYear}-12`)
+    : monthKeysBetween(config.startMonth, config.endMonth);
+  const monthSet = new Set(monthKeys);
+  const spendingByMonthCategory = new Map();
+  state.transactions.forEach((transaction) => {
+    if (transaction.type !== "expense") return;
+    const monthKey = String(transaction.entry_date || "").slice(0, 7);
+    if (!monthSet.has(monthKey)) return;
+    transactionAllocations(transaction).forEach((allocation) => {
+      const key = `${monthKey}:${allocation.category_id || "uncategorized"}`;
+      spendingByMonthCategory.set(key, (spendingByMonthCategory.get(key) || 0) + allocationBaseAmount(transaction, allocation));
+    });
+  });
+  let target = 0;
+  let spent = 0;
+  let overCount = 0;
+  monthKeys.forEach((monthKey) => {
+    state.budgets.forEach((budget) => {
+      const monthlyTarget = budget.period === "yearly" ? number(budget.amount) / 12 : number(budget.amount);
+      if (!(monthlyTarget > 0)) return;
+      const actual = spendingByMonthCategory.get(`${monthKey}:${budget.category_id}`) || 0;
+      target += monthlyTarget;
+      spent += actual;
+      if (actual > monthlyTarget) overCount += 1;
+    });
+  });
+  return { target, spent, percentage: target ? (spent / target) * 100 : 0, overCount, trackedPeriods: monthKeys.length };
+}
+
+function reportBudgetHTML(metrics) {
+  if (!metrics.target) return emptyHTML("No budgets for this range", "Create monthly or yearly category budgets to compare planned and actual spending.");
+  const remaining = metrics.target - metrics.spent;
+  const percentage = metrics.percentage;
+  return `<div class="report-budget-overview">
+    <div class="report-budget-head"><div><span>Budget used</span><strong class="${percentage > 100 ? "negative" : percentage > 85 ? "warning" : "positive"}">${percentage.toFixed(1)}%</strong></div><span>${metrics.trackedPeriods} month${metrics.trackedPeriods === 1 ? "" : "s"} tracked</span></div>
+    <div class="budget-track report-budget-track"><div class="budget-fill ${percentage > 100 ? "over" : ""}" style="width:${Math.min(percentage, 100)}%"></div></div>
+    <div class="report-budget-values"><div><span>Planned</span><strong>${formatMoneyHTML(metrics.target)}</strong></div><div><span>Actual</span><strong>${formatMoneyHTML(metrics.spent)}</strong></div><div><span>${remaining >= 0 ? "Remaining" : "Over budget"}</span><strong class="${remaining < 0 ? "negative" : "positive"}">${formatMoneyHTML(Math.abs(remaining))}</strong></div></div>
+    ${metrics.overCount ? `<p class="report-budget-note warning">${metrics.overCount} category-month budget${metrics.overCount === 1 ? " was" : "s were"} exceeded in the selected range.</p>` : `<p class="report-budget-note positive">No category-month budget was exceeded in the selected range.</p>`}
+  </div>`;
+}
+
+function reportInsightsHTML(series, entries, expenseTotals, income, expenses, monthCount) {
+  const active = series.filter((item) => item.income > 0 || item.expenses > 0);
+  const best = active.length ? [...active].sort((a, b) => (b.income - b.expenses) - (a.income - a.expenses))[0] : null;
+  const highestSpend = active.length ? [...active].sort((a, b) => b.expenses - a.expenses)[0] : null;
+  const largestCategory = expenseTotals[0] || null;
+  const averageMonthlyFlow = monthCount ? (income - expenses) / monthCount : 0;
+  const items = [
+    ["Average monthly expenses", formatMoneyHTML(monthCount ? expenses / monthCount : 0), `${monthCount} month${monthCount === 1 ? "" : "s"} in range`],
+    ["Average monthly cash flow", formatMoneyHTML(averageMonthlyFlow), averageMonthlyFlow >= 0 ? "Average surplus" : "Average shortfall"],
+    ["Best cash-flow period", best ? escapeHTML(best.label) : "—", best ? formatMoneyText(best.income - best.expenses) : "No activity"],
+    ["Highest spending period", highestSpend ? escapeHTML(highestSpend.label) : "—", highestSpend ? formatMoneyText(highestSpend.expenses) : "No activity"],
+    ["Largest expense category", largestCategory ? escapeHTML(largestCategory.name) : "—", largestCategory ? formatMoneyText(largestCategory.amount) : "No expenses"],
+  ];
+  return `<div class="report-insight-list">${items.map(([label, value, detail]) => `<article><span>${label}</span><strong>${value}</strong><small>${escapeHTML(detail)}</small></article>`).join("")}</div>`;
+}
+
+function reportTopExpensesHTML(entries) {
+  const expenses = entries.filter((item) => item.type === "expense").sort((a, b) => transactionBaseAmount(b) - transactionBaseAmount(a)).slice(0, 10);
+  if (!expenses.length) return emptyHTML("No expenses in this range", "Your largest expenses will appear here.");
+  return `<div class="report-top-expenses">${expenses.map((transaction, index) => {
+    const categories = transactionAllocations(transaction).map((allocation) => categoryById(allocation.category_id)?.name || "Uncategorized").join(", ");
+    const account = accountById(transaction.account_id);
+    return `<article class="report-top-expense-row"><span class="report-rank">${index + 1}</span><div><strong>${escapeHTML(transaction.description || categories || "Expense")}</strong><span>${formatDate(transaction.entry_date)} · ${escapeHTML(account?.name || "Unknown account")} · ${escapeHTML(categories || "Uncategorized")}</span></div><strong class="negative">−${formatMoneyHTML(transactionBaseAmount(transaction))}</strong></article>`;
+  }).join("")}</div>`;
+}
+
 function renderReports() {
-  if (!el.reportMonth.value) return;
-  const period = el.reportPeriod.value;
-  const anchor = el.reportMonth.value;
-  const predicate = period === "yearly" ? (item) => item.entry_date?.startsWith(anchor.slice(0, 4)) : (item) => item.entry_date?.startsWith(anchor);
-  const entries = state.transactions.filter(predicate);
+  if (el.reportPreset.value === "allTime") applyReportPreset("allTime");
+  updateReportRangeControls();
+  const config = reportRangeConfig();
+  const entries = reportEntriesBetween(config.startDate, config.endDate);
   const income = sumTransactions(entries, "income");
   const expenses = sumTransactions(entries, "expense");
   const net = income - expenses;
   const savingsRate = income ? (net / income) * 100 : 0;
-  const budget = budgetMetrics(period, anchor);
-  el.reportSummary.innerHTML = [
-    summaryCard("Net worth now", calculateNetWorth(), "Current included account balances", tone(calculateNetWorth())),
-    summaryCard(`${capitalize(period)} expenses`, expenses, `${entries.filter((item) => item.type === "expense").length} entries`, expenses ? "negative" : ""),
-    summaryCard("Cash flow", net, `${formatMoneyText(income)} income`, tone(net)),
-    summaryCard("Savings rate", savingsRate, budget.total ? `${Math.round(budget.percentage)}% of budget used` : "Net cash flow ÷ income", tone(savingsRate), false, "%"),
-  ].join("");
-
+  const monthCount = Math.max(1, monthCountForRange(config));
+  const budget = budgetRangeMetrics(config);
+  const series = reportSeries(config);
+  const endNetWorth = calculateNetWorth(config.endDate);
   const expenseTotals = categoryTotals(entries.filter((item) => item.type === "expense"));
   const incomeTotals = categoryTotals(entries.filter((item) => item.type === "income"));
-  el.reportExpenseChart.innerHTML = categoryBarsHTML(expenseTotals, "No expenses in this period");
-  el.incomeCategoryChart.innerHTML = categoryBarsHTML(incomeTotals, "No income in this period");
 
-  const chartMonths = period === "yearly" ? monthsInYear(Number(anchor.slice(0, 4))) : monthSeries(6, dateFromMonth(anchor));
-  el.reportCashFlowChart.innerHTML = cashFlowBarsHTML(chartMonths);
-  el.netWorthChart.innerHTML = netWorthLineHTML(monthSeries(12, dateFromMonth(anchor)));
-  el.reportMonth.parentElement.querySelector("span").textContent = period === "yearly" ? "Year anchor" : "Month";
+  el.reportRangeLabel.textContent = config.label;
+  el.reportEntryCount.textContent = `${entries.length.toLocaleString("en-AE")} entr${entries.length === 1 ? "y" : "ies"}`;
+  el.reportSummary.innerHTML = [
+    summaryCard("Ending net worth", endNetWorth, `Balance at ${formatDate(config.endDate)}`, tone(endNetWorth)),
+    summaryCard("Total income", income, `${entries.filter((item) => item.type === "income").length} income entries`, income ? "positive" : ""),
+    summaryCard("Total expenses", expenses, `${entries.filter((item) => item.type === "expense").length} expense entries`, expenses ? "negative" : ""),
+    summaryCard("Net cash flow", net, `${formatMoneyText(income)} income`, tone(net)),
+    summaryCard("Savings rate", savingsRate, "Net cash flow ÷ income", tone(savingsRate), false, "%"),
+    summaryCard("Average monthly spend", expenses / monthCount, `${monthCount} month${monthCount === 1 ? "" : "s"} normalized`, expenses ? "negative" : ""),
+  ].join("");
+
+  el.reportExpenseChart.innerHTML = categoryBarsHTML(expenseTotals, "No expenses in this range");
+  el.incomeCategoryChart.innerHTML = categoryBarsHTML(incomeTotals, "No income in this range");
+  el.reportCashFlowChart.innerHTML = cashFlowBarsHTML(series);
+  el.netWorthChart.innerHTML = netWorthLineHTML(series);
+  el.reportBudgetSummary.innerHTML = reportBudgetHTML(budget);
+  el.reportInsights.innerHTML = reportInsightsHTML(series, entries, expenseTotals, income, expenses, monthCount);
+  el.reportTopExpenses.innerHTML = reportTopExpensesHTML(entries);
   setReportLoading(false);
 }
-
 
 function recurringMonthlyBaseAmount(rule) {
   if (rule.type !== "expense" || rule.active === false) return 0;
@@ -3825,7 +4035,7 @@ function financialHealthData() {
   const averageExpenses = monthsWithActivity.reduce((sum, item) => sum + item.expenses, 0) / divisor;
   const averageNet = averageIncome - averageExpenses;
   const savingsRate = averageIncome > 0 ? (averageNet / averageIncome) * 100 : 0;
-  const liquidAssets = state.accounts.filter((account) => ["current", "savings", "cash"].includes(account.type)).reduce((sum, account) => {
+  const liquidAssets = state.accounts.filter(accountCountsAsLiquid).reduce((sum, account) => {
     const converted = accountBalanceInBase(account);
     return sum + Math.max(0, converted == null ? 0 : converted);
   }, 0);
@@ -4912,6 +5122,7 @@ function openAccountModal(id = null) {
   el.accountId.value = "";
   el.accountOpeningBalance.value = "0";
   el.accountIncludeNetWorth.checked = true;
+  el.accountIncludeLiquidAssets.checked = true;
   el.accountType.value = "current";
   el.accountCurrency.innerHTML = currencyOptionsHTML(BASE_CURRENCY);
   el.accountCurrency.value = BASE_CURRENCY;
@@ -4935,6 +5146,7 @@ function openAccountModal(id = null) {
     el.accountExchangeRate.value = accountCurrency(account) === BASE_CURRENCY ? "" : exchangeRateFor(accountCurrency(account), todayISO()) || "";
     el.accountColor.value = safeColor(account.color);
     el.accountIncludeNetWorth.checked = account.include_in_net_worth !== false;
+    el.accountIncludeLiquidAssets.checked = accountCountsAsLiquid(account);
     el.accountCardNetwork.value = normalizeCardNetwork(account.card_network);
     el.accountCardLastFour.value = /^\d{4}$/.test(String(account.card_last_four || "")) ? account.card_last_four : "";
     el.accountCardAccentColor.value = safeColor(account.card_accent_color || "#0f172a");
@@ -5152,6 +5364,7 @@ async function handleAccountSubmit(event) {
     currency_code: normalizeCurrencyCode(el.accountCurrency.value),
     color: safeColor(el.accountColor.value),
     include_in_net_worth: el.accountIncludeNetWorth.checked,
+    include_in_liquid_assets: el.accountIncludeLiquidAssets.checked,
     credit_limit: isCreditCard ? creditLimit : null,
     statement_closing_day: isCreditCard ? closingDay : null,
     payment_due_day: isCreditCard ? dueDay : null,

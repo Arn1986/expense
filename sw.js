@@ -1,7 +1,7 @@
 /* Ledgerly application-shell service worker.
  * Increase APP_VERSION whenever this file or the application shell changes.
  */
-const APP_VERSION = "2026.07.31.3";
+const APP_VERSION = "2026.08.01.1";
 const SHELL_CACHE = `ledgerly-shell-${APP_VERSION}`;
 const OFFLINE_URL = new URL("./offline.html", self.registration.scope).href;
 

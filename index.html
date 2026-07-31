@@ -15,7 +15,7 @@
   <link rel="apple-touch-icon" sizes="180x180" href="assets/icons/apple-touch-icon.png?v=1" />
   <link rel="icon" type="image/png" sizes="32x32" href="assets/icons/favicon-32.png?v=1" />
   <link rel="icon" type="image/png" sizes="192x192" href="assets/icons/icon-192.png?v=1" />
-  <link rel="stylesheet" href="styles.css?v=15" />
+  <link rel="stylesheet" href="styles.css?v=16" />
 </head>
 <body>
   <section class="auth-screen" id="authScreen">
@@ -433,11 +433,16 @@
         <div class="report-loading" id="reportLoading" role="status" aria-live="polite" hidden><span class="loading-spinner" aria-hidden="true"></span><span>Calculating report…</span></div>
         <section class="panel report-controls-panel">
           <div class="filters report-filters">
-            <label><span>Report period</span><select id="reportPeriod"><option value="monthly">Monthly</option><option value="yearly">Yearly</option></select></label>
-            <label><span>Month</span><input id="reportMonth" type="month" /></label>
+            <label><span>Range type</span><select id="reportPeriod"><option value="monthly">Range of months</option><option value="yearly">Range of years</option></select></label>
+            <label><span>Quick range</span><select id="reportPreset"><option value="custom">Custom</option><option value="last3">Last 3 months</option><option value="last6">Last 6 months</option><option value="last12" selected>Last 12 months</option><option value="thisYear">This year</option><option value="last3Years">Last 3 years</option><option value="allTime">All time</option></select></label>
+            <label id="reportStartMonthField"><span>Start month</span><input id="reportStartMonth" type="month" /></label>
+            <label id="reportEndMonthField"><span>End month</span><input id="reportEndMonth" type="month" /></label>
+            <label id="reportStartYearField" hidden><span>Start year</span><input id="reportStartYear" type="number" min="1900" max="2200" inputmode="numeric" /></label>
+            <label id="reportEndYearField" hidden><span>End year</span><input id="reportEndYear" type="number" min="1900" max="2200" inputmode="numeric" /></label>
           </div>
+          <div class="report-range-status"><div><strong id="reportRangeLabel">Selected report range</strong><span>Every card, chart, category total, and insight below uses this range.</span></div><span class="status-pill" id="reportEntryCount">0 entries</span></div>
         </section>
-        <div class="summary-grid" id="reportSummary"></div>
+        <div class="summary-grid report-summary-grid" id="reportSummary"></div>
         <div class="content-grid two-columns">
           <section class="panel"><div class="panel-heading"><div><p class="eyebrow">Trend</p><h2>Net worth over time</h2></div></div><div id="netWorthChart" class="line-chart"></div></section>
           <section class="panel"><div class="panel-heading"><div><p class="eyebrow">Breakdown</p><h2>Expenses by category</h2></div></div><div id="reportExpenseChart" class="category-chart"></div></section>
@@ -446,6 +451,11 @@
           <section class="panel"><div class="panel-heading"><div><p class="eyebrow">Flow</p><h2>Income vs expenses</h2></div></div><div id="reportCashFlowChart" class="cash-flow-chart"></div></section>
           <section class="panel"><div class="panel-heading"><div><p class="eyebrow">Income</p><h2>Income sources</h2></div></div><div id="incomeCategoryChart" class="category-chart"></div></section>
         </div>
+        <div class="content-grid two-columns equal-columns">
+          <section class="panel"><div class="panel-heading"><div><p class="eyebrow">Plan</p><h2>Budget vs actual</h2></div></div><div id="reportBudgetSummary"></div></section>
+          <section class="panel"><div class="panel-heading"><div><p class="eyebrow">Highlights</p><h2>Period insights</h2></div></div><div id="reportInsights"></div></section>
+        </div>
+        <section class="panel"><div class="panel-heading"><div><p class="eyebrow">Largest activity</p><h2>Top expenses in this range</h2></div></div><div id="reportTopExpenses"></div></section>
       </section>
 
       <section class="view" id="categoriesView">
@@ -690,6 +700,8 @@
           <label class="field full-width" id="accountExchangeRateField" hidden><span id="accountExchangeRateLabel">Current exchange rate</span><div class="rate-input"><span>1 AED =</span><input id="accountExchangeRate" type="number" min="0.00000001" step="0.00000001" inputmode="decimal" placeholder="e.g. 15.50" /><strong id="accountExchangeRateCurrency">PHP</strong></div><small>Used to value this account in AED. You can add dated rates later in Data &amp; settings.</small></label>
           <label class="field"><span>Primary color</span><input id="accountColor" type="color" value="#2563eb" /></label>
           <label class="check-field"><input id="accountIncludeNetWorth" type="checkbox" checked /><span>Include in net worth</span></label>
+          <label class="check-field"><input id="accountIncludeLiquidAssets" type="checkbox" checked /><span>Count as liquid for financial health</span></label>
+          <p class="field-help full-width account-liquidity-help">Liquid accounts are available for near-term spending or emergencies. Current, savings, and cash default to liquid; investments and credit cards do not. You can override this for any account.</p>
           <div class="credit-card-account-fields full-width" id="creditCardAccountFields" hidden>
             <div class="credit-card-account-heading"><strong>Credit-card settings</strong><span>Used for utilization, statement reminders, and due-date planning.</span></div>
             <div class="form-grid">
@@ -913,6 +925,6 @@
 
   <div class="toast" id="toast" role="status" aria-live="polite"></div>
   <script src="pwa.js?v=2" defer></script>
-  <script type="module" src="app.js?v=15"></script>
+  <script type="module" src="app.js?v=16"></script>
 </body>
 </html>
