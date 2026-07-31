@@ -30,6 +30,8 @@ const DEFAULT_TRANSACTION_PAGE_SIZE = 50;
 const DASHBOARD_SUMMARY_CACHE_TTL = 15 * 60 * 1000;
 const RECEIPT_THUMBNAIL_SECONDS = 600;
 const AUTO_SYNC_MIN_INTERVAL = 60 * 1000;
+const RECONCILIATION_WRITE_BATCH_SIZE = 150;
+const RECONCILIATION_RENDER_BATCH_SIZE = 200;
 const LAST_SYNC_STORAGE_PREFIX = "ledgerly-last-sync-v1";
 const TESSERACT_ESM_URL = "https://cdn.jsdelivr.net/npm/tesseract.js@7.0.0/dist/tesseract.esm.min.js";
 const OCR_IMAGE_TYPES = new Set(["image/jpeg", "image/png", "image/webp"]);
@@ -105,6 +107,10 @@ let calendarCursor = new Date(new Date().getFullYear(), new Date().getMonth(), 1
 let selectedCalendarDate = todayISO();
 let postingRecurringEntries = false;
 let reconciliationBusy = false;
+let reconciliationDataLoading = false;
+let reconciliationRenderLimit = RECONCILIATION_RENDER_BATCH_SIZE;
+let reconciliationRenderKey = "";
+const reconciliationLoadedClearingAccounts = new Set();
 let importRuleReturnToImport = false;
 let pendingBillPaymentId = "";
 let reminderNoticeShown = false;
@@ -254,7 +260,14 @@ function bindEvents() {
   [el.billStatusFilter, el.billRangeFilter].forEach((input) => input.addEventListener("input", renderBills));
   el.reminderButton.addEventListener("click", toggleReminderPopover);
   el.closeReminderPopover.addEventListener("click", closeReminderPopover);
-  [el.reconcileAccount, el.reconcileStatementDate, el.reconcileStatementBalance].forEach((input) => input.addEventListener("input", renderReconciliation));
+  el.reconcileAccount.addEventListener("change", () => {
+    reconciliationRenderKey = "";
+    void prepareReconciliationData();
+  });
+  [el.reconcileStatementDate, el.reconcileStatementBalance].forEach((input) => input.addEventListener("input", () => {
+    if (input === el.reconcileStatementDate) reconciliationRenderKey = "";
+    renderReconciliation();
+  }));
   [el.recurringAccount, el.recurringFromAccount].forEach((input) => input.addEventListener("change", updateAuxiliaryCurrencyFields));
   el.billAccount.addEventListener("change", updateAuxiliaryCurrencyFields);
   el.creditCardStatementAccount.addEventListener("change", updateAuxiliaryCurrencyFields);
@@ -394,6 +407,10 @@ function bindEvents() {
       "open-reconcile-account": () => openReconciliationForAccount(id),
       "toggle-reconciliation-cleared": () => toggleTransactionCleared(id, actionTarget.dataset.accountId),
       "undo-reconciliation": () => undoReconciliation(id),
+      "load-more-reconciliation": () => {
+        reconciliationRenderLimit += RECONCILIATION_RENDER_BATCH_SIZE;
+        renderReconciliation();
+      },
       "edit-exchange-rate": () => openExchangeRateModal(id),
       "delete-exchange-rate": () => deleteExchangeRate(id),
       "retry-transaction-page": () => loadTransactionPage(transactionPageState.page),
@@ -664,6 +681,8 @@ async function loadCloudState({ preserveTransactionHistory = false } = {}) {
     transactionHistoryFullyLoaded = loadedState.transactions.length >= transactionHistoryTotal;
   }
   state = loadedState;
+  reconciliationLoadedClearingAccounts.clear();
+  reconciliationRenderKey = "";
   dashboardServerSummary = normalizeDashboardServerSummary(dashboardSummaryResult.data) || dashboardServerSummary;
   writeDashboardSummaryCache(dashboardServerSummary);
 }
@@ -1237,7 +1256,10 @@ function switchView(view) {
   if (view === "health") renderFinancialHealth();
   if (view === "rules") renderImportRules();
   if (view === "creditcards") renderCreditCards();
-  if (view === "reconcile") renderReconciliation();
+  if (view === "reconcile") {
+    renderReconciliation();
+    void prepareReconciliationData();
+  }
   if (view === "calendar") renderCalendar();
   if (view === "recurring") renderRecurringEntries();
   if (view === "bills") renderBills();
@@ -2108,12 +2130,71 @@ function editSelectedAccount() {
 
 function openReconciliationForAccount(accountId) {
   if (!state.accounts.some((account) => account.id === accountId)) return;
-  switchView("reconcile");
   el.reconcileAccount.value = accountId;
+  switchView("reconcile");
   el.reconcileStatementBalance.value = "";
   el.reconcileNotes.value = "";
+  reconciliationRenderKey = "";
   renderReconciliation();
+  void prepareReconciliationData();
   window.scrollTo({ top: 0, behavior: "smooth" });
+}
+
+async function prepareReconciliationData({ force = false } = {}) {
+  if (mode !== "cloud" || !supabase || !user || !state.accounts.length) return;
+  const accountId = el.reconcileAccount.value || state.accounts[0]?.id;
+  if (!accountId || reconciliationDataLoading) return;
+  const needsHistory = !transactionHistoryFullyLoaded;
+  const needsClearings = force || !reconciliationLoadedClearingAccounts.has(accountId);
+  if (!needsHistory && !needsClearings) {
+    renderReconciliation();
+    return;
+  }
+
+  reconciliationDataLoading = true;
+  renderReconciliation();
+  try {
+    if (needsHistory) {
+      setSyncStatus("syncing", `Preparing reconciliation history ${state.transactions.length}/${transactionHistoryTotal}`, { recordSuccess: false });
+      if (!transactionHistoryHydrationPromise) transactionHistoryHydrationPromise = hydrateRemainingTransactions();
+      await transactionHistoryHydrationPromise;
+      transactionHistoryHydrationPromise = null;
+    }
+    if (needsClearings) await refreshReconciliationClearings(accountId);
+    setSyncStatus("cloud", "Cloud synchronized");
+  } catch (error) {
+    setSyncStatus(navigator.onLine ? "error" : "offline", navigator.onLine ? "Reconciliation sync failed" : "Offline", { recordSuccess: false });
+    showFormError(el.reconcileFormError, friendlyError(error));
+  } finally {
+    reconciliationDataLoading = false;
+    renderReconciliation();
+    const currentAccountId = el.reconcileAccount.value;
+    if (mode === "cloud" && currentAccountId && !reconciliationLoadedClearingAccounts.has(currentAccountId)) {
+      void prepareReconciliationData();
+    }
+  }
+}
+
+async function refreshReconciliationClearings(accountId) {
+  if (mode !== "cloud" || !accountId) return;
+  const rows = [];
+  let offset = 0;
+  const pageSize = 750;
+  while (true) {
+    const { data, error } = await supabase.from("transaction_clearings")
+      .select("*")
+      .eq("account_id", accountId)
+      .order("created_at", { ascending: true })
+      .range(offset, offset + pageSize - 1);
+    if (error) throw error;
+    const batch = data || [];
+    rows.push(...batch);
+    if (batch.length < pageSize) break;
+    offset += batch.length;
+  }
+  state.transactionClearings = state.transactionClearings.filter((item) => item.account_id !== accountId);
+  state.transactionClearings.push(...rows);
+  reconciliationLoadedClearingAccounts.add(accountId);
 }
 
 function renderReconciliation() {
@@ -2135,6 +2216,21 @@ function renderReconciliation() {
   const account = accountById(accountId);
   setCurrencyInputPrefix(el.reconcileCurrency, accountCurrency(account));
   const statementDate = el.reconcileStatementDate.value || todayISO();
+
+  if (mode === "cloud" && (reconciliationDataLoading || !transactionHistoryFullyLoaded || !reconciliationLoadedClearingAccounts.has(accountId))) {
+    const loaded = Math.min(state.transactions.length, transactionHistoryTotal || state.transactions.length);
+    const total = transactionHistoryTotal || loaded;
+    el.reconcileSummary.innerHTML = `<div class="content-loading-block"><span class="loading-spinner" aria-hidden="true"></span><div><strong>Preparing complete account history…</strong><p>${loaded.toLocaleString("en-AE")} of ${total.toLocaleString("en-AE")} transactions loaded</p></div></div>`;
+    el.reconcileTransactionsList.innerHTML = emptyHTML("Loading reconciliation data", "Ledgerly is loading the full transaction and clearing history for this account.");
+    el.reconciliationHistory.innerHTML = "";
+    el.reconcileLastStatus.innerHTML = '<span class="reconciliation-status-badge pending">Preparing data</span>';
+    el.completeReconciliationButton.disabled = true;
+    el.reconcileMarkAllButton.disabled = true;
+    el.reconcileUnclearAllButton.disabled = true;
+    el.reconcileDifferenceLabel.textContent = "Preparing complete history";
+    el.reconcileCompletionHint.textContent = "Large imported histories are loaded in batches before reconciliation calculations begin.";
+    return;
+  }
   const hasStatementBalance = String(el.reconcileStatementBalance.value || "").trim() !== "";
   const statementBalance = number(el.reconcileStatementBalance.value);
   const ledgerBalance = calculateAccountBalance(accountId, statementDate);
@@ -2165,8 +2261,15 @@ function renderReconciliation() {
 
   const showReconciled = el.reconcileShowReconciled.checked;
   const visibleTransactions = allTransactions.filter((transaction) => showReconciled || !clearingFor(transaction.id, accountId)?.reconciliation_id);
+  const renderKey = `${accountId}|${statementDate}|${showReconciled ? "all" : "pending"}`;
+  if (renderKey !== reconciliationRenderKey) {
+    reconciliationRenderKey = renderKey;
+    reconciliationRenderLimit = RECONCILIATION_RENDER_BATCH_SIZE;
+  }
+  const renderedTransactions = visibleTransactions.slice(0, reconciliationRenderLimit);
+  const remainingTransactions = Math.max(0, visibleTransactions.length - renderedTransactions.length);
   el.reconcileTransactionsList.innerHTML = visibleTransactions.length
-    ? `<div class="reconciliation-transaction-list">${visibleTransactions.map((transaction) => reconciliationTransactionHTML(transaction, accountId)).join("")}</div>`
+    ? `<div class="reconciliation-transaction-list">${renderedTransactions.map((transaction) => reconciliationTransactionHTML(transaction, accountId)).join("")}</div>${remainingTransactions ? `<div class="reconciliation-load-more"><span>Showing ${renderedTransactions.length.toLocaleString("en-AE")} of ${visibleTransactions.length.toLocaleString("en-AE")}</span><button class="secondary-button compact-button" data-action="load-more-reconciliation" type="button">Show ${Math.min(RECONCILIATION_RENDER_BATCH_SIZE, remainingTransactions).toLocaleString("en-AE")} more</button></div>` : ""}`
     : emptyHTML(showReconciled ? "No transactions through this date" : "No pending transactions", showReconciled ? "Add entries or choose a later statement date." : "All transactions through this date have already been reconciled.");
 
   const canFinish = hasStatementBalance && Math.abs(difference) < 0.005 && statementDateIsNew && !reconciliationBusy;
@@ -2276,7 +2379,38 @@ async function bulkSetReconciliationCleared(isCleared) {
     })
     .map((transaction) => ({ transactionId: transaction.id, accountId }));
   if (!pairs.length) return;
-  await saveClearingStates(pairs, isCleared);
+
+  if (mode !== "cloud") {
+    await saveClearingStates(pairs, isCleared);
+    return;
+  }
+
+  reconciliationBusy = true;
+  renderReconciliation();
+  try {
+    setSyncStatus("syncing", isCleared ? `Clearing ${pairs.length.toLocaleString("en-AE")} transactions` : `Marking ${pairs.length.toLocaleString("en-AE")} transactions outstanding`, { recordSuccess: false });
+    const { error } = await supabase.rpc("ledgerly_bulk_set_reconciliation_clearings", {
+      p_account_id: accountId,
+      p_statement_date: statementDate,
+      p_is_cleared: isCleared,
+    });
+    if (error) throw error;
+    await refreshReconciliationClearings(accountId);
+    setSyncStatus("cloud", "Cloud synchronized");
+    showToast(`${pairs.length.toLocaleString("en-AE")} transaction${pairs.length === 1 ? "" : "s"} marked ${isCleared ? "cleared" : "outstanding"}.`);
+  } catch (error) {
+    // Older deployments without the RPC can still complete the operation in
+    // smaller requests instead of sending one oversized browser request.
+    if (String(error?.message || error).includes("ledgerly_bulk_set_reconciliation_clearings") || String(error?.code || "") === "PGRST202") {
+      await saveClearingStates(pairs, isCleared);
+    } else {
+      setSyncStatus(navigator.onLine ? "error" : "offline", navigator.onLine ? "Sync error" : "Offline", { recordSuccess: false });
+      showToast(friendlyError(error), true);
+    }
+  } finally {
+    reconciliationBusy = false;
+    render();
+  }
 }
 
 async function saveClearingStates(pairs, isCleared) {
@@ -2294,11 +2428,18 @@ async function saveClearingStates(pairs, isCleared) {
         cleared_at: isCleared ? now : null,
         reconciliation_id: null,
       }));
-      const { data, error } = await supabase.from("transaction_clearings")
-        .upsert(rows, { onConflict: "user_id,transaction_id,account_id" })
-        .select();
-      if (error) throw error;
-      mergeTransactionClearings(data || []);
+      const savedRows = [];
+      const batches = chunk(rows, RECONCILIATION_WRITE_BATCH_SIZE);
+      for (let index = 0; index < batches.length; index += 1) {
+        setSyncStatus("syncing", `Saving cleared transactions ${Math.min((index + 1) * RECONCILIATION_WRITE_BATCH_SIZE, rows.length)}/${rows.length}`, { recordSuccess: false });
+        const { data, error } = await supabase.from("transaction_clearings")
+          .upsert(batches[index], { onConflict: "user_id,transaction_id,account_id" })
+          .select();
+        if (error) throw error;
+        savedRows.push(...(data || []));
+      }
+      mergeTransactionClearings(savedRows);
+      reconciliationLoadedClearingAccounts.add(pairs[0]?.accountId);
       setSyncStatus("cloud", "Cloud synchronized");
     } else {
       pairs.forEach(({ transactionId, accountId }) => {
@@ -2341,6 +2482,10 @@ async function completeReconciliation() {
   if (!statementDate) return showFormError(el.reconcileFormError, "Choose the statement ending date.");
   if (!balanceText) return showFormError(el.reconcileFormError, "Enter the statement ending balance.");
   if (notes.length > 300) return showFormError(el.reconcileFormError, "Statement note must be 300 characters or fewer.");
+  if (mode === "cloud" && (!transactionHistoryFullyLoaded || !reconciliationLoadedClearingAccounts.has(accountId))) {
+    await prepareReconciliationData();
+    if (!transactionHistoryFullyLoaded || !reconciliationLoadedClearingAccounts.has(accountId)) return showFormError(el.reconcileFormError, "The complete account history is still loading. Try again when preparation finishes.");
+  }
   const last = latestReconciliation(accountId);
   if (last && statementDate <= last.statement_date) return showFormError(el.reconcileFormError, `Choose a statement date after ${formatDate(last.statement_date)}, or undo that reconciliation first.`);
   const statementBalance = number(balanceText);
@@ -2369,30 +2514,70 @@ async function completeReconciliation() {
   renderReconciliation();
   let inserted = null;
   try {
-    inserted = await insertRow("reconciliations", row);
-    const clearingIds = pendingClearings.map((item) => item.id);
-    if (mode === "cloud" && clearingIds.length) {
-      setSyncStatus("syncing", "Finishing reconciliation");
-      const { data, error } = await supabase.from("transaction_clearings")
-        .update({ reconciliation_id: inserted.id, cleared_at: new Date().toISOString() })
-        .in("id", clearingIds)
-        .select();
+    if (mode === "cloud") {
+      setSyncStatus("syncing", `Finishing reconciliation for ${pendingClearings.length.toLocaleString("en-AE")} transactions`, { recordSuccess: false });
+      const { data, error } = await supabase.rpc("ledgerly_complete_reconciliation", {
+        p_account_id: accountId,
+        p_statement_date: statementDate,
+        p_statement_balance: statementBalance,
+        p_notes: notes,
+      });
       if (error) throw error;
-      mergeTransactionClearings(data || []);
+      inserted = Array.isArray(data) ? data[0] : data;
+      if (!inserted?.id) throw new Error("Supabase did not return the completed reconciliation.");
+      await refreshReconciliationClearings(accountId);
       setSyncStatus("cloud", "Cloud synchronized");
-    } else if (mode === "local") {
+    } else {
+      inserted = await insertRow("reconciliations", row);
+      const clearingIds = pendingClearings.map((item) => item.id);
       state.transactionClearings = state.transactionClearings.map((item) => clearingIds.includes(item.id) ? { ...item, reconciliation_id: inserted.id, updated_at: new Date().toISOString() } : item);
     }
-    state.reconciliations.unshift(inserted);
+    state.reconciliations = [inserted, ...state.reconciliations.filter((item) => item.id !== inserted.id)];
     persistLocal();
     el.reconcileStatementBalance.value = "";
     el.reconcileNotes.value = "";
+    reconciliationRenderKey = "";
     showToast(`Reconciliation completed for ${accountById(accountId)?.name || "account"}.`);
   } catch (error) {
-    if (inserted?.id) {
-      try { await deleteRow("reconciliations", inserted.id); } catch (rollbackError) { console.warn("Could not roll back reconciliation", rollbackError); }
+    // If the database RPC has not been installed yet, use safe chunked updates
+    // instead of one very long .in(...) URL. This keeps older deployments usable.
+    const missingRpc = String(error?.message || error).includes("ledgerly_complete_reconciliation") || String(error?.code || "") === "PGRST202";
+    if (mode === "cloud" && missingRpc) {
+      try {
+        inserted = await insertRow("reconciliations", row);
+        const clearingIds = pendingClearings.map((item) => item.id);
+        const batches = chunk(clearingIds, RECONCILIATION_WRITE_BATCH_SIZE);
+        const updatedRows = [];
+        for (let index = 0; index < batches.length; index += 1) {
+          setSyncStatus("syncing", `Finishing reconciliation ${Math.min((index + 1) * RECONCILIATION_WRITE_BATCH_SIZE, clearingIds.length)}/${clearingIds.length}`, { recordSuccess: false });
+          const { data, error: updateError } = await supabase.from("transaction_clearings")
+            .update({ reconciliation_id: inserted.id, cleared_at: new Date().toISOString() })
+            .in("id", batches[index])
+            .select();
+          if (updateError) throw updateError;
+          updatedRows.push(...(data || []));
+        }
+        mergeTransactionClearings(updatedRows);
+        state.reconciliations = [inserted, ...state.reconciliations.filter((item) => item.id !== inserted.id)];
+        el.reconcileStatementBalance.value = "";
+        el.reconcileNotes.value = "";
+        reconciliationRenderKey = "";
+        setSyncStatus("cloud", "Cloud synchronized");
+        showToast(`Reconciliation completed for ${accountById(accountId)?.name || "account"}.`);
+      } catch (fallbackError) {
+        if (inserted?.id) {
+          try {
+            await supabase.from("transaction_clearings").update({ reconciliation_id: null }).eq("reconciliation_id", inserted.id);
+            await deleteRow("reconciliations", inserted.id);
+          } catch (rollbackError) {
+            console.warn("Could not fully roll back reconciliation", rollbackError);
+          }
+        }
+        showFormError(el.reconcileFormError, friendlyError(fallbackError));
+      }
+    } else {
+      showFormError(el.reconcileFormError, friendlyError(error));
     }
-    showFormError(el.reconcileFormError, friendlyError(error));
   } finally {
     reconciliationBusy = false;
     render();
@@ -6358,6 +6543,7 @@ function friendlyError(error) {
   if ((message.includes("exchange_rates") || message.includes("currency_code") || message.includes("destination_amount") || message.includes("base_amount")) && (message.includes("does not exist") || message.includes("schema cache") || message.includes("column"))) return "Multi-currency support is not ready. Run supabase/add-financial-health-multicurrency.sql in the Supabase SQL Editor.";
   if (message.includes("user_preferences") && (message.includes("does not exist") || message.includes("schema cache"))) return "Dashboard customization is not ready. Run supabase/add-receipt-ocr-dashboard-customization.sql in the Supabase SQL Editor.";
   if (message.includes("ledgerly_search_transactions") || message.includes("ledgerly_dashboard_summary")) return "Performance functions are not ready. Run supabase/add-performance-improvements.sql in the Supabase SQL Editor.";
+  if ((message.includes("ledgerly_complete_reconciliation") || message.includes("ledgerly_bulk_set_reconciliation_clearings")) && (message.includes("does not exist") || message.includes("schema cache") || message.includes("Could not find"))) return "Large-history reconciliation is not ready. Run supabase/fix-large-history-reconciliation.sql in the Supabase SQL Editor.";
   if ((message.includes("reconciliations") || message.includes("transaction_clearings")) && (message.includes("does not exist") || message.includes("schema cache"))) return "Account reconciliation is not ready. Run supabase/add-account-reconciliation.sql in the Supabase SQL Editor.";
   if (message.includes("reconciliations_user_id_account_id_statement_date_key") || (message.includes("duplicate key") && message.includes("reconciliations"))) return "This account already has a completed reconciliation for that statement date. Undo it before creating another.";
   if ((message.includes("credit_card_statements") || message.includes("credit_limit") || message.includes("statement_closing_day") || message.includes("payment_due_day")) && (message.includes("does not exist") || message.includes("schema cache") || message.includes("column"))) return "Credit-card management is not ready. Run supabase/add-credit-card-management.sql in the Supabase SQL Editor.";
