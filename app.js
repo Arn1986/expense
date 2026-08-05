@@ -1972,7 +1972,7 @@ function renderAllTransactions() {
     } else if (transactionPageState.error) {
       el.allTransactions.innerHTML = `<div class="inline-error performance-error"><strong>Transactions could not load.</strong><span>${escapeHTML(transactionPageState.error)}</span><button class="secondary-button" type="button" onclick="void 0" data-action="retry-transaction-page">Try again</button></div>`;
     } else {
-      el.allTransactions.innerHTML = transactionPageState.items.length ? transactionListHTML(transactionPageState.items, true) : emptyHTML("No matching entries", "Try changing the filters or add a new entry.");
+      el.allTransactions.innerHTML = transactionPageState.items.length ? transactionListHTML(transactionPageState.items, true, true) : emptyHTML("No matching entries", "Try changing the filters or add a new entry.");
     }
     renderTransactionPagination();
   } else {
@@ -1981,7 +1981,7 @@ function renderAllTransactions() {
     transactionPageState.page = Math.min(transactionPageState.page, pages);
     const start = (transactionPageState.page - 1) * transactionPageState.pageSize;
     const items = all.slice(start, start + transactionPageState.pageSize);
-    el.allTransactions.innerHTML = items.length ? transactionListHTML(items, true) : emptyHTML("No matching entries", "Try changing the filters or add a new entry.");
+    el.allTransactions.innerHTML = items.length ? transactionListHTML(items, true, true) : emptyHTML("No matching entries", "Try changing the filters or add a new entry.");
     renderTransactionPagination(all.length);
   }
   window.queueMicrotask(() => hydrateReceiptThumbnails(el.transactionsView || document));
@@ -2026,10 +2026,10 @@ function transactionRunningBalanceHTML(transaction, runningIndex) {
   return `<small class="running-balance">Balance ${formatCurrencyText(balance, accountCurrency(account))}</small>`;
 }
 
-function transactionListHTML(items, showActions) {
+function transactionListHTML(items, showActions, groupByMonth = false) {
   const hasServerBalances = items.every((transaction) => transaction.type === "transfer" ? transaction.server_from_running_balance != null && transaction.server_to_running_balance != null : transaction.server_running_balance != null);
   const runningIndex = hasServerBalances ? null : buildRunningBalanceIndex();
-  return `<div class="transaction-list">${items.map((transaction) => {
+  const renderRow = (transaction) => {
     const category = categoryById(transaction.category_id);
     const splitCount = splitsForTransaction(transaction.id).length;
     const categorySummary = transactionCategorySummary(transaction);
@@ -2049,7 +2049,20 @@ function transactionListHTML(items, showActions) {
       <div class="amount ${transaction.type}">${sign}${formatCurrencyHTML(number(transaction.amount), transactionCurrency(transaction))}${transaction.type === "transfer" && accountCurrency(transaction.from_account_id) !== accountCurrency(transaction.to_account_id) ? `<small>→ ${formatCurrencyText(transferDestinationAmount(transaction), accountCurrency(transaction.to_account_id))}</small>` : ""}${transactionRunningBalanceHTML(transaction, runningIndex)}</div>
       <div class="row-actions">${receiptAction}${showActions ? `<button class="row-action" data-action="edit-transaction" data-id="${transaction.id}" aria-label="Edit entry">✎</button><button class="row-action danger" data-action="delete-transaction" data-id="${transaction.id}" aria-label="Delete entry">×</button>` : ""}</div>
     </div>`;
-  }).join("")}</div>`;
+  };
+
+  if (!groupByMonth) {
+    return `<div class="transaction-list">${items.map(renderRow).join("")}</div>`;
+  }
+
+  const groups = new Map();
+  items.forEach((transaction) => {
+    const month = String(transaction.entry_date || "").slice(0, 7) || "unknown";
+    if (!groups.has(month)) groups.set(month, []);
+    groups.get(month).push(transaction);
+  });
+
+  return `<div class="transaction-month-groups">${[...groups.entries()].map(([month, rows]) => `<section class="transaction-month-group"><h3>${escapeHTML(month === "unknown" ? "Unknown date" : accountActivityMonthLabel(month))}</h3><div class="transaction-list transaction-list-grouped">${rows.map(renderRow).join("")}</div></section>`).join("")}</div>`;
 }
 
 function accountTransactions(accountId) {

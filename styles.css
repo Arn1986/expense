@@ -137,6 +137,11 @@ button:disabled { cursor: not-allowed; opacity: 0.55; }
 .account-menu-button { width: 34px; height: 34px; border: 0; border-radius: 10px; color: var(--white); background: rgba(255,255,255,.15); }
 
 .transaction-list { display: grid; }
+.transaction-month-groups { display: grid; gap: 22px; }
+.transaction-month-group { min-width: 0; }
+.transaction-month-group > h3 { margin: 0 0 9px; color: var(--slate-500); font-size: .86rem; font-weight: 800; }
+.transaction-list-grouped { overflow: hidden; border: 1px solid var(--slate-200); border-radius: 16px; background: var(--white); }
+.transaction-list-grouped .transaction-row { padding-left: 14px; padding-right: 14px; }
 .transaction-row { display: grid; grid-template-columns: minmax(220px, 1.35fr) minmax(120px, .7fr) 128px 112px 78px; gap: 14px; align-items: center; padding: 14px 4px; border-bottom: 1px solid var(--slate-100); }
 .transaction-row:last-child { border-bottom: 0; }
 .transaction-main { min-width: 0; display: flex; align-items: center; gap: 12px; }
